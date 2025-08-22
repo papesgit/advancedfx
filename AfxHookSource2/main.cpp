@@ -11,6 +11,7 @@
 #include "CamIO.h"
 #include "ViewModel.h"
 #include "Globals.h"
+#include "../shared/overlay/Overlay.h"
 #include "DeathMsg.h"
 #include "ReplaceName.h"
 #include "SchemaSystem.h"
@@ -262,9 +263,11 @@ public:
 	int LastHeight;
 
 private:
-	virtual bool GetSuspendMirvInput() override {
-		return g_pGameUIService && g_pGameUIService->Con_IsVisible();
-	}
+    virtual bool GetSuspendMirvInput() override {
+        // Suspend mirv_input camera when console is visible or overlay GUI is visible
+        return (g_pGameUIService && g_pGameUIService->Con_IsVisible())
+            || advancedfx::overlay::Overlay::Get().IsVisible();
+    }
 
 	virtual void GetLastCameraData(double & x, double & y, double & z, double & rX, double & rY, double & rZ, double & fov) override {
 		x = LastCameraOrigin[0];
