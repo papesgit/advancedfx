@@ -102,6 +102,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 	dxguid.lib
     bcrypt.lib # corrosion fails to detect this
     $<$<CONFIG:Debug>:msvcrtd.lib> # corrision messes this up in latest rust version
+    hlae_overlay
 )
 
 target_sources(${PROJECT_NAME} PRIVATE

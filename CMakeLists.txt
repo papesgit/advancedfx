@@ -169,6 +169,7 @@ if(CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
 elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
     add_subdirectory("deps/release/openexr")
     add_subdirectory("ShaderBuilder")
+    add_subdirectory("shared/overlay")
     add_subdirectory("AfxHookSource2")
     add_subdirectory("misc/mirv-script/src/snippets")
 
