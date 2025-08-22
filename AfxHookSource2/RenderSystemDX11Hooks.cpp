@@ -1,6 +1,9 @@
 #include "stdafx.h"
 
 #include "RenderSystemDX11Hooks.h"
+#include "../shared/overlay/Overlay.h"
+#include "../shared/overlay/OverlayDx11.h"
+#include <memory>
 
 #include "CampathDrawer.h"
 #include "ReShadeAdvancedfx.h"
@@ -1763,6 +1766,39 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
         }
     }
 
+    // Render overlay just before present if visible.
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        static bool s_loggedNoRenderer = false;
+        if (!overlay.HasRenderer()) {
+            // Try to lazily initialize the overlay renderer here as well (more robust timing).
+            if (g_pSwapChain) {
+                ID3D11Device* pDev = nullptr;
+                ID3D11DeviceContext* pCtx = nullptr;
+                if (SUCCEEDED(g_pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&pDev)) && pDev) {
+                    pDev->GetImmediateContext(&pCtx);
+                    DXGI_SWAP_CHAIN_DESC desc = {};
+                    if (pCtx && SUCCEEDED(g_pSwapChain->GetDesc(&desc))) {
+                        overlay.SetRenderer(std::unique_ptr<advancedfx::overlay::IOverlayRenderer>(
+                            new advancedfx::overlay::OverlayDx11(pDev, pCtx, g_pSwapChain, desc.OutputWindow))
+                        );
+                    }
+                    if (pCtx) pCtx->Release();
+                    pDev->Release();
+                }
+            }
+            if (!overlay.HasRenderer() && !s_loggedNoRenderer) {
+                advancedfx::Message("Overlay: no supported renderer detected\n");
+                s_loggedNoRenderer = true;
+            }
+        }
+        if (overlay.IsVisible()) {
+            overlay.BeginFrame();
+            overlay.RenderFrame();
+            overlay.EndFrame();
+        }
+    }
+
     HRESULT result = g_OldPresent(This, SyncInterval, Flags);
 
     if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands()) {
@@ -1812,6 +1848,26 @@ HRESULT STDMETHODCALLTYPE New_CreateSwapChain( void * This,
             DetourUpdateThread(GetCurrentThread());
             DetourAttach(&(PVOID&)g_OldPresent, New_Present);
             if(NO_ERROR != DetourTransactionCommit()) ErrorBox("Failed to detour IDXGISwapChain::Present.");
+        }
+
+        // Lazy-initialize overlay DX11 renderer on first swapchain (robust: fetch device/context via swapchain).
+        if (g_pSwapChain) {
+            auto &overlay = advancedfx::overlay::Overlay::Get();
+            if (!overlay.HasRenderer()) {
+                ID3D11Device* pDev = nullptr;
+                ID3D11DeviceContext* pCtx = nullptr;
+                if (SUCCEEDED(g_pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&pDev)) && pDev) {
+                    pDev->GetImmediateContext(&pCtx);
+                    DXGI_SWAP_CHAIN_DESC desc2 = {};
+                    if (pCtx && SUCCEEDED(g_pSwapChain->GetDesc(&desc2))) {
+                        overlay.SetRenderer(std::unique_ptr<advancedfx::overlay::IOverlayRenderer>(
+                            new advancedfx::overlay::OverlayDx11(pDev, pCtx, g_pSwapChain, desc2.OutputWindow))
+                        );
+                    }
+                    if (pCtx) pCtx->Release();
+                    pDev->Release();
+                }
+            }
         }
     }
 
