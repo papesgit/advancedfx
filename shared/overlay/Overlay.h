@@ -38,6 +38,10 @@ public:
     void AttachInputRouter(std::unique_ptr<InputRouter> router);
     InputRouter* GetInputRouter() const { return m_InputRouter.get(); }
 
+    // RMB passthrough to mirv input while overlay is visible
+    void SetRmbPassthroughActive(bool v) { m_RmbPassthrough = v; }
+    bool IsRmbPassthroughActive() const { return m_RmbPassthrough; }
+
 private:
     Overlay();
     ~Overlay();
@@ -45,6 +49,7 @@ private:
     bool m_Visible = false;
     float m_DeltaTime = 0.0f;
     double m_LastTime = 0.0;
+    bool m_RmbPassthrough = false;
 
     std::unique_ptr<IOverlayRenderer> m_Renderer;
     std::unique_ptr<InputRouter> m_InputRouter;
@@ -52,4 +57,3 @@ private:
 
 } // namespace overlay
 } // namespace advancedfx
-

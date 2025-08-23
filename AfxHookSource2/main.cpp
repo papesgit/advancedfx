@@ -265,8 +265,11 @@ public:
 private:
     virtual bool GetSuspendMirvInput() override {
         // Suspend mirv_input camera when console is visible or overlay GUI is visible
-        return (g_pGameUIService && g_pGameUIService->Con_IsVisible())
-            || advancedfx::overlay::Overlay::Get().IsVisible();
+        // but allow RMB passthrough to mirv input while overlay is open.
+        bool consoleVisible = (g_pGameUIService && g_pGameUIService->Con_IsVisible());
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        bool overlayBlocks = overlay.IsVisible() && !overlay.IsRmbPassthroughActive();
+        return consoleVisible || overlayBlocks;
     }
 
 	virtual void GetLastCameraData(double & x, double & y, double & z, double & rX, double & rY, double & rZ, double & fov) override {
@@ -309,7 +312,32 @@ private:
 } g_MirvInputEx;
 
 float GetLastCameraFov() {
-	return (float)g_MirvInputEx.LastCameraFov;
+    return (float)g_MirvInputEx.LastCameraFov;
+}
+
+// Expose mirv_input and last camera roll to overlay GUI
+MirvInput * Afx_GetMirvInput() {
+    return g_MirvInputEx.m_MirvInput;
+}
+
+float GetLastCameraRoll() {
+    return (float)g_MirvInputEx.LastCameraAngles[2];
+}
+
+void Afx_GetLastCameraData(double & x, double & y, double & z, double & rX, double & rY, double & rZ, float & fov) {
+    x = g_MirvInputEx.LastCameraOrigin[0];
+    y = g_MirvInputEx.LastCameraOrigin[1];
+    z = g_MirvInputEx.LastCameraOrigin[2];
+    rX = g_MirvInputEx.LastCameraAngles[0];
+    rY = g_MirvInputEx.LastCameraAngles[1];
+    rZ = g_MirvInputEx.LastCameraAngles[2];
+    fov = (float)g_MirvInputEx.LastCameraFov;
+}
+
+void Afx_GotoDemoTick(int tick) {
+    std::ostringstream oss;
+    oss << "demo_gototick " << tick;
+    if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, oss.str().c_str(), true);
 }
 
 CON_COMMAND(mirv_input, "Input mode configuration.")
