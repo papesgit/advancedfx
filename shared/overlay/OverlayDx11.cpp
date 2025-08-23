@@ -30,6 +30,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <float.h>
+#include <vector>
+#include <string>
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -40,6 +42,12 @@ extern const char* AfxStreams_GetRecordNameUtf8();
 #endif
 
 namespace advancedfx { namespace overlay {
+
+// Simple in-overlay console state
+static bool g_ShowOverlayConsole = false;
+static std::vector<std::string> g_OverlayConsoleLog;
+static char g_OverlayConsoleInput[512] = {0};
+static bool g_OverlayConsoleScrollToBottom = false;
 
 OverlayDx11::OverlayDx11(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* swapchain, HWND hwnd)
     : m_Device(device), m_Context(context), m_Swapchain(swapchain), m_Hwnd(hwnd) {}
@@ -207,6 +215,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     ImGuiIO& io = ImGui::GetIO();
     ImGui::Text("FPS: %.1f", io.Framerate);
 
+    // Toggle overlay console
+    ImGui::Checkbox("Show Console", &g_ShowOverlayConsole);
+
     // Campath information (if any)
     extern CamPath g_CamPath;
     size_t cpCount = g_CamPath.GetSize();
@@ -310,8 +321,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
         ImGui::SameLine();
         if (ImGui::Button("End Recording")) {
-            AfxStreams_RecordEnd();
             Afx_ExecClientCmd("demo_pause");
+            Afx_ExecClientCmd("mirv_streams record end");
+            //AfxStreams_RecordEnd();
         }
     }
 
@@ -379,6 +391,35 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             pMirv->SetKeyboardSensitivity(s_ksens);
         }
 
+        ImGui::End();
+    }
+
+    // Overlay Console window
+    if (g_ShowOverlayConsole) {
+        ImGui::Begin("HLAE Console", &g_ShowOverlayConsole);
+        // Log area
+        ImGui::BeginChild("ConsoleLog", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()*2.0f), true, ImGuiWindowFlags_HorizontalScrollbar);
+        for (const auto &line : g_OverlayConsoleLog) {
+            ImGui::TextUnformatted(line.c_str());
+        }
+        if (g_OverlayConsoleScrollToBottom) {
+            ImGui::SetScrollHereY(1.0f);
+            g_OverlayConsoleScrollToBottom = false;
+        }
+        ImGui::EndChild();
+
+        // Input + Submit
+        ImGui::SetNextItemWidth(-100.0f);
+        bool submitted = ImGui::InputText("##cmd", g_OverlayConsoleInput, sizeof(g_OverlayConsoleInput), ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine();
+        if (ImGui::Button("Submit") || submitted) {
+            if (g_OverlayConsoleInput[0] != '\0') {
+                g_OverlayConsoleLog.emplace_back(std::string("> ") + g_OverlayConsoleInput);
+                Afx_ExecClientCmd(g_OverlayConsoleInput);
+                g_OverlayConsoleInput[0] = '\0';
+                g_OverlayConsoleScrollToBottom = true;
+            }
+        }
         ImGui::End();
     }
 #else
