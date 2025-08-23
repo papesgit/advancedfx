@@ -278,6 +278,22 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             advancedfx::Warning("Overlay: No campath points available.\n");
         }
     }
+    // Interpolation toggle: Cubic (default) <-> Linear
+    ImGui::SameLine();
+    {
+        static bool s_interpCubic = true; // default UI state: Cubic
+        const char* interpLabel = s_interpCubic ? "Interp: Cubic" : "Interp: Linear";
+        if (ImGui::Button(interpLabel)) {
+            s_interpCubic = !s_interpCubic;
+            if (s_interpCubic) {
+                Afx_ExecClientCmd(
+                    "mirv_campath edit interp position default; mirv_campath edit interp rotation default; mirv_campath edit interp fov default");
+            } else {
+                Afx_ExecClientCmd(
+                    "mirv_campath edit interp position linear; mirv_campath edit interp rotation sLinear; mirv_campath edit interp fov linear");
+            }
+        }
+    }
     // Recording FPS override and screen enable
     {
         static char s_fpsText[64] = {0};
