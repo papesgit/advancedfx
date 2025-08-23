@@ -9,6 +9,7 @@
 
 // Minimal Dear ImGui loader includes (stubbed or vendored)
 #include "third_party/imgui/imgui.h"
+#include "third_party/imgui/imgui_internal.h" // for ImGui::ClearActiveID
 #include "third_party/imgui/backends/imgui_impl_win32.h"
 #include "third_party/imgui/backends/imgui_impl_dx11.h"
 #include "../AfxConsole.h"
@@ -315,6 +316,62 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             AfxStreams_SetRecordScreenEnabled(screenEnabled);
         }
 
+        // FFmpeg HLAE profiles dropdown
+        ImGui::Separator();
+        ImGui::TextUnformatted("FFmpeg profiles");
+        ImGui::SameLine();
+        static const char* s_selectedProfile = "Select profile...";
+        if (ImGui::BeginCombo("##ffmpeg_profiles", s_selectedProfile)) {
+            if (ImGui::Selectable("TGA Sequence")) {
+                s_selectedProfile = "TGA Sequence";
+                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings afxClassic;echo [Current Record Setting];echo afxClassic - 无损 .tga 图片序列)"
+                );
+            }
+            if (ImGui::Selectable("ProRes 4444")) {
+                s_selectedProfile = "ProRes 4444";
+                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg p0  "-c:v prores  -profile:v 4 {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")");
+                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings p0  ;echo [Current Record Setting];echo p0 - ProRes 4444)"
+                );
+            }
+            if (ImGui::Selectable("ProRes 422 HQ")) {
+                s_selectedProfile = "ProRes 422 HQ";
+                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg phq "-c:v prores  -profile:v 3 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")");
+                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings phq ;echo [Current Record Setting];echo phq - ProRes 422 HQ)"
+                );
+            }
+            if (ImGui::Selectable("ProRes 422")) {
+                s_selectedProfile = "ProRes 422";
+                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg p1  "-c:v prores  -profile:v 2 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")");
+                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings p1  ;echo [Current Record Setting];echo p1 - ProRes 422)"
+                );
+            }
+            if (ImGui::Selectable("x264 Lossless")) {
+                s_selectedProfile = "x264 Lossless";
+                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg c0  "-c:v libx264 -preset 0 -qp  0  -g 120 -keyint_min 1 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")");
+                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings c0  ;echo [Current Record Setting];echo c0 - x264 无损)"
+                );
+            }
+            if (ImGui::Selectable("x264 HQ")) {
+                s_selectedProfile = "x264 HQ";
+                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg c1  "-c:v libx264 -preset 1 -crf 4  -qmax 20 -g 120 -keyint_min 1 -pix_fmt yuv420p -x264-params ref=3:me=hex:subme=3:merange=12:b-adapt=1:aq-mode=2:aq-strength=0.9:no-fast-pskip=1 {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")");
+                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings c1  ;echo [Current Record Setting];echo c1 - x264 高画质)"
+                );
+            }
+            if (ImGui::Selectable("x265 Lossless")) {
+                s_selectedProfile = "x265 Lossless";
+                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg he0  "-c:v libx265 -x265-params no-sao=1 -preset 0 -lossless -g 120 -keyint_min 1 -pix_fmt yuv422p {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")");
+                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings he0 ;echo [Current Record Setting];echo he0 - x265 无损)"
+                );
+            }
+            if (ImGui::Selectable("x265 HQ")) {
+                s_selectedProfile = "x265 HQ";
+                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg he1  "-c:v libx265 -x265-params no-sao=1 -preset 1 -crf 8  -qmax 20 -g 120 -keyint_min 1 -pix_fmt yuv422p {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")");
+                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings he1 ;echo [Current Record Setting];echo he1 - x265 高画质)"
+                );
+            }
+            ImGui::EndCombo();
+        }
+
         if (ImGui::Button("Start Recording")) {
             Afx_ExecClientCmd("demo_resume");
             AfxStreams_RecordStart();
@@ -351,10 +408,20 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             ImGui::SetNextItemWidth(width);
         }
         // FOV slider
-        static bool fovInit = false; static float s_fov = 90.0f;
-        if (!fovInit) { s_fov = GetLastCameraFov(); fovInit = true; }
-        if (ImGui::SliderFloat("FOV", &s_fov, 1.0f, 179.0f, "%.1f deg")) {
-            pMirv->SetFov(s_fov);
+        static bool fovInit = false; static float s_fov = 90.0f; static float s_fovDefault = 90.0f;
+        if (!fovInit) { s_fov = GetLastCameraFov(); s_fovDefault = s_fov; fovInit = true; }
+        {
+            float tmp = s_fov;
+            bool changed = ImGui::SliderFloat("FOV", &tmp, 1.0f, 179.0f, "%.1f deg");
+            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            if (reset) {
+                s_fov = s_fovDefault;
+                ImGui::ClearActiveID();
+                pMirv->SetFov(s_fov);
+            } else if (changed) {
+                s_fov = tmp;
+                pMirv->SetFov(s_fov);
+            }
         }
 
         // Roll slider (reserve right space so label is always visible)
@@ -368,10 +435,20 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (width < 100.0f) width = avail * 0.6f; // fallback
             ImGui::SetNextItemWidth(width);
         }
-        static bool rollInit = false; static float s_roll = 0.0f;
-        if (!rollInit) { s_roll = GetLastCameraRoll(); rollInit = true; }
-        if (ImGui::SliderFloat("Roll", &s_roll, -180.0f, 180.0f, "%.1f deg")) {
-            pMirv->SetRz(s_roll);
+        static bool rollInit = false; static float s_roll = 0.0f; static float s_rollDefault = 0.0f;
+        if (!rollInit) { s_roll = GetLastCameraRoll(); s_rollDefault = s_roll; rollInit = true; }
+        {
+            float tmp = s_roll;
+            bool changed = ImGui::SliderFloat("Roll", &tmp, -180.0f, 180.0f, "%.1f deg");
+            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            if (reset) {
+                s_roll = s_rollDefault;
+                ImGui::ClearActiveID();
+                pMirv->SetRz(s_roll);
+            } else if (changed) {
+                s_roll = tmp;
+                pMirv->SetRz(s_roll);
+            }
         }
 
         // Keyboard sensitivity (mirv_input cfg ksens) (reserve right space so label is always visible)
@@ -385,10 +462,20 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (width < 100.0f) width = avail * 0.6f; // fallback
             ImGui::SetNextItemWidth(width);
         }
-        static bool ksensInit = false; static float s_ksens = 1.0f;
-        if (!ksensInit) { s_ksens = (float)pMirv->GetKeyboardSensitivty(); ksensInit = true; }
-        if (ImGui::SliderFloat("ksens", &s_ksens, 0.01f, 10.0f, "%.2f")) {
-            pMirv->SetKeyboardSensitivity(s_ksens);
+        static bool ksensInit = false; static float s_ksens = 1.0f; static float s_ksensDefault = 1.0f;
+        if (!ksensInit) { s_ksens = (float)pMirv->GetKeyboardSensitivty(); s_ksensDefault = s_ksens; ksensInit = true; }
+        {
+            float tmp = s_ksens;
+            bool changed = ImGui::SliderFloat("ksens", &tmp, 0.01f, 10.0f, "%.2f");
+            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            if (reset) {
+                s_ksens = s_ksensDefault;
+                ImGui::ClearActiveID();
+                pMirv->SetKeyboardSensitivity(s_ksens);
+            } else if (changed) {
+                s_ksens = tmp;
+                pMirv->SetKeyboardSensitivity(s_ksens);
+            }
         }
 
         ImGui::End();
