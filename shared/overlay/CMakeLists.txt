@@ -36,11 +36,18 @@ target_sources(${PROJECT_NAME} PRIVATE
     third_party/imgui/backends/imgui_impl_win32.cpp
     third_party/imgui/backends/imgui_impl_dx11.h
     third_party/imgui/backends/imgui_impl_dx11.cpp
+    
+    # ImGui Neo Sequencer (third-party timeline widget)
+    third_party/imgui_neo_sequencer/imgui_neo_sequencer.h
+    third_party/imgui_neo_sequencer/imgui_neo_sequencer.cpp
+    third_party/imgui_neo_sequencer/imgui_neo_internal.h
+    third_party/imgui_neo_sequencer/imgui_neo_internal.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_neo_sequencer
 )
 
 if (MSVC)

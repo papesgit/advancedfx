@@ -12,7 +12,9 @@
 #include "third_party/imgui/imgui_internal.h" // for ImGui::ClearActiveID
 #include "third_party/imgui/backends/imgui_impl_win32.h"
 #include "third_party/imgui/backends/imgui_impl_dx11.h"
+#include "third_party/imgui_neo_sequencer/imgui_neo_sequencer.h"
 #include "../AfxConsole.h"
+#include "../AfxMath.h"
 
 // Campath info (points and duration): access global campath and time.
 #include "../CamPath.h"
@@ -33,6 +35,7 @@
 #include <float.h>
 #include <vector>
 #include <string>
+#include <algorithm>
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -219,6 +222,10 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     // Toggle overlay console
     ImGui::Checkbox("Show Console", &g_ShowOverlayConsole);
 
+    // Sequencer toggle
+    static bool g_ShowSequencer = false;
+    ImGui::Checkbox("Show Sequencer", &g_ShowSequencer);
+
     // Campath information (if any)
     extern CamPath g_CamPath;
     size_t cpCount = g_CamPath.GetSize();
@@ -401,6 +408,187 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     }
 
     ImGui::End();
+
+    // Sequencer window (ImGui Neo Sequencer)
+    if (g_ShowSequencer) {
+        ImGui::SetNextWindowSize(ImVec2(720, 260), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("HLAE Sequencer", &g_ShowSequencer)) {
+            static ImGui::FrameIndexType s_seqFrame = 0;
+            static ImGui::FrameIndexType s_seqStart = 0;
+            static ImGui::FrameIndexType s_seqEnd = 0;
+            static bool s_seqInit = false;
+
+            // Use current demo tick as live frame pointer; grow end to the maximum observed tick.
+            int curDemoTick = 0;
+            if (g_MirvTime.GetCurrentDemoTick(curDemoTick)) {
+                if (curDemoTick > (int)s_seqEnd) s_seqEnd = (ImGui::FrameIndexType)curDemoTick;
+            }
+
+            // Snapshot frame before drawing; if changed by user, we seek.
+            ImGui::FrameIndexType prevFrame = s_seqFrame;
+
+            // Determine content bound once (when opening): set initial view to fit content.
+            if (!s_seqInit) {
+                int contentMaxTick = 0;
+                int tmpTick = 0;
+                if (g_MirvTime.GetCurrentDemoTick(tmpTick)) contentMaxTick = tmpTick;
+                extern CamPath g_CamPath;
+                size_t cpCount = g_CamPath.GetSize();
+                if (cpCount > 0) {
+                    double curTime = g_MirvTime.curtime_get();
+                    double currentDemoTime = 0.0;
+                    bool haveDemoTime = g_MirvTime.GetCurrentDemoTime(currentDemoTime);
+                    float ipt = g_MirvTime.interval_per_tick_get();
+                    if (ipt <= 0.0f) ipt = 1.0f / 64.0f;
+                    for (CamPathIterator it = g_CamPath.GetBegin(); it != g_CamPath.GetEnd(); ++it) {
+                        double tRel = it.GetTime();
+                        double clientTarget = g_CamPath.GetOffset() + tRel;
+                        int tick = 0;
+                        if (haveDemoTime) {
+                            double demoTarget = clientTarget - (curTime - currentDemoTime);
+                            tick = (int)llround(demoTarget / (double)ipt);
+                        } else {
+                            tick = (int)llround(clientTarget / (double)ipt);
+                        }
+                        if (tick > contentMaxTick) contentMaxTick = tick;
+                    }
+                }
+                s_seqStart = 0;
+                s_seqEnd = (ImGui::FrameIndexType)(contentMaxTick > 0 ? contentMaxTick : 1);
+                s_seqInit = true;
+            }
+
+            // Minimal sequencer usage: a single empty timeline spanning demo ticks
+            const ImVec2 seqSize(ImGui::GetContentRegionAvail().x, 0.0f);
+            if (ImGui::BeginNeoSequencer("##demo_seq", &s_seqFrame, &s_seqStart, &s_seqEnd, seqSize,
+                                         ImGuiNeoSequencerFlags_AlwaysShowHeader)) {
+                // Campath timeline: populate from g_CamPath keyframes
+                {
+                    extern CamPath g_CamPath;
+                    size_t cpCount = g_CamPath.GetSize();
+                    if (cpCount > 0) {
+                        std::vector<int32_t> keyTicks;
+                        keyTicks.reserve(cpCount);
+                        std::vector<double> keyTimes; // original relative times (seconds)
+                        keyTimes.reserve(cpCount);
+                        std::vector<CamPathValue> keyValues;
+                        keyValues.reserve(cpCount);
+
+                        double curTime = g_MirvTime.curtime_get();
+                        double currentDemoTime = 0.0;
+                        bool haveDemoTime = g_MirvTime.GetCurrentDemoTime(currentDemoTime);
+                        float ipt = g_MirvTime.interval_per_tick_get();
+                        if (ipt <= 0.0f) ipt = 1.0f / 64.0f;
+
+                        for (CamPathIterator it = g_CamPath.GetBegin(); it != g_CamPath.GetEnd(); ++it) {
+                            double tRel = it.GetTime();
+                            keyTimes.push_back(tRel);
+                            keyValues.push_back(it.GetValue());
+                            double clientTarget = g_CamPath.GetOffset() + tRel;
+                            int tick = 0;
+                            if (haveDemoTime) {
+                                double demoTarget = clientTarget - (curTime - currentDemoTime);
+                                tick = (int)llround(demoTarget / (double)ipt);
+                            } else {
+                                tick = (int)llround(clientTarget / (double)ipt);
+                            }
+                            if (tick < 0) tick = 0;
+                            keyTicks.push_back(tick);
+                        }
+
+                        bool open = true;
+                        if (ImGui::BeginNeoTimelineEx("Campath", &open, ImGuiNeoTimelineFlags_None)) {
+                            // Stable context for right-clicked keyframe
+                            struct CtxKf { bool active; double time; CamPathValue value; };
+                            static CtxKf s_ctx = {false, 0.0, {}};
+
+                            int rightClickedIndex = -1;
+                            for (int i = 0; i < (int)keyTicks.size(); ++i) {
+                                ImGui::NeoKeyframe(&keyTicks[i]);
+                                if (ImGui::IsNeoKeyframeRightClicked()) rightClickedIndex = i;
+                            }
+                            if (rightClickedIndex >= 0) {
+                                s_ctx.active = true;
+                                s_ctx.time = keyTimes[(size_t)rightClickedIndex];
+                                s_ctx.value = keyValues[(size_t)rightClickedIndex];
+                                ImGui::OpenPopup("campath_kf_ctx");
+                                ImGui::SetNextWindowPos(ImGui::GetMousePos());
+                                ImGui::SetNextWindowSizeConstraints(ImVec2(120,0), ImVec2(300,FLT_MAX));
+                            }
+                            if (ImGui::BeginPopup("campath_kf_ctx")) {
+                                bool doRemove = false, doGet = false, doSet = false;
+                                if (ImGui::MenuItem("Remove")) doRemove = true;
+                                if (ImGui::MenuItem("Get")) doGet = true;
+                                if (ImGui::MenuItem("Set")) doSet = true;
+                                if (ImGui::MenuItem("Edit")) { /* stub */ }
+                                ImGui::EndPopup();
+
+                                if (s_ctx.active) {
+                                    extern CCampathDrawer g_CampathDrawer;
+                                    bool prevDraw = g_CampathDrawer.Draw_get();
+                                    if (doRemove) {
+                                        g_CampathDrawer.Draw_set(false);
+                                        g_CamPath.Remove(s_ctx.time);
+                                        g_CampathDrawer.Draw_set(prevDraw);
+                                        s_ctx.active = false;
+                                    }
+                                    if (doGet) {
+                                        if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                                            pMirv->SetCameraControlMode(true);
+                                            const CamPathValue& v = s_ctx.value;
+                                            pMirv->SetTx((float)v.X);
+                                            pMirv->SetTy((float)v.Y);
+                                            pMirv->SetTz((float)v.Z);
+                                            using namespace Afx::Math;
+                                            QEulerAngles angles = v.R.ToQREulerAngles().ToQEulerAngles();
+                                            pMirv->SetRx((float)angles.Yaw);
+                                            pMirv->SetRy((float)angles.Pitch);
+                                            pMirv->SetRz((float)angles.Roll);
+                                            pMirv->SetFov((float)v.Fov);
+                                        }
+                                        s_ctx.active = false;
+                                    }
+                                    if (doSet) {
+                                        double cx, cy, cz, rX, rY, rZ; float cfov;
+                                        Afx_GetLastCameraData(cx, cy, cz, rX, rY, rZ, cfov);
+                                        CamPathValue newVal(cx, cy, cz, rX, rY, rZ, cfov);
+                                        g_CampathDrawer.Draw_set(false);
+                                        g_CamPath.Remove(s_ctx.time);
+                                        g_CamPath.Add(s_ctx.time, newVal);
+                                        g_CampathDrawer.Draw_set(prevDraw);
+                                        s_ctx.active = false;
+                                    }
+                                }
+                            }
+
+                            ImGui::EndNeoTimeLine();
+                        }
+                    } else {
+                        // Show empty Campath track for visibility
+                        bool open = true;
+                        if (ImGui::BeginNeoTimelineEx("Campath", &open)) {
+                            ImGui::EndNeoTimeLine();
+                        }
+                    }
+                }
+
+                ImGui::EndNeoSequencer();
+            }
+
+            // Follow current tick to keep pointer in view when not interacting.
+            // If users drag the pointer, we respect their new position and seek.
+            if (s_seqFrame != prevFrame) {
+                Afx_GotoDemoTick((int)s_seqFrame);
+            } else if (curDemoTick > 0) {
+                s_seqFrame = (ImGui::FrameIndexType)curDemoTick;
+            }
+
+            ImGui::Text("Start: %d  End: %d  Current: %d",
+                        (int)s_seqStart, (int)s_seqEnd, (int)s_seqFrame);
+
+            ImGui::End();
+        }
+    }
 
     // Mirv input camera controls/indicator
     if (MirvInput* pMirv = Afx_GetMirvInput()) {
