@@ -2460,6 +2460,9 @@ public:
         m_RecordScreen = new CRecordScreen(false, advancedfx::CRecordingSettings::GetDefault());        
     }
 
+    bool GetRecordScreenEnabled() const { return m_RecordScreen->Enabled; }
+    void SetRecordScreenEnabled(bool v) { m_RecordScreen->Enabled = v; }
+
 	void ShutDown(void) {
         if(m_Shutdown) return;
         m_Shutdown = true;
@@ -3743,6 +3746,25 @@ bool AfxStreams_IsRcording() {
 const wchar_t * AfxStreams_GetTakeDir() {
     return g_AfxStreams.GetTakeDir();
 }
+
+const char * AfxStreams_GetRecordNameUtf8() {
+    return g_AfxStreams.GetRecordName();
+}
+
+void AfxStreams_SetRecordNameUtf8(const char * name) {
+    g_AfxStreams.SetRecordName(name ? name : "");
+}
+
+bool AfxStreams_GetRecordScreenEnabled() { return g_AfxStreams.GetRecordScreenEnabled(); }
+void AfxStreams_SetRecordScreenEnabled(bool enabled) { g_AfxStreams.SetRecordScreenEnabled(enabled); }
+
+bool AfxStreams_GetOverrideFps() { return g_AfxStreams.GetOverrideFps(); }
+float AfxStreams_GetOverrideFpsValue() { return g_AfxStreams.GetOverrideFpsValue(); }
+void AfxStreams_SetOverrideFpsDefault() { g_AfxStreams.SetOverrideFps(false); }
+void AfxStreams_SetOverrideFpsValue(float value) { g_AfxStreams.SetOverrideFpsValue(value); g_AfxStreams.SetOverrideFps(true); }
+void AfxStreams_RecordStart() { g_AfxStreams.RecordStart(); }
+void AfxStreams_RecordEnd() { g_AfxStreams.RecordEnd(); }
+void Afx_ExecClientCmd(const char * cmd) { if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, cmd, true); }
 
 bool g_bEngine_ReShade_Enabled = true;
 bool g_bEngine_ReShade_FoceSmokeFullresPass = true;
