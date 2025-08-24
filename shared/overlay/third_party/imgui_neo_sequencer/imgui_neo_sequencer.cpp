@@ -409,10 +409,16 @@ namespace ImGui
                 }
                 float mouseDelta = GetMousePos().x - context.DraggingMouseStart.x;
 
-                auto offsetA = int32_t(
-                        mouseDelta / (context.Size.x / (float) context.EndFrame - (float) context.StartFrame));
+                // How many pixels one frame takes at current zoom & layout:
+                const float perFrame = getPerFrameWidth(context);
 
-                *frame = context.DraggingSelectionStart[index] + offsetA;
+                // Convert mouse pixels -> frame delta (rounded)
+                const int32_t offsetA = (int32_t)roundf(mouseDelta / perFrame);
+
+                const int32_t minFrame = (int32_t)(context.StartFrame + context.OffsetFrame);
+                const int32_t maxFrame = (int32_t)(context.EndFrame   + context.OffsetFrame);
+
+                *frame = ImClamp(context.DraggingSelectionStart[index] + offsetA, minFrame, maxFrame);
             }
         }
 

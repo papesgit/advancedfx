@@ -42,12 +42,14 @@ target_sources(${PROJECT_NAME} PRIVATE
     third_party/imgui_neo_sequencer/imgui_neo_sequencer.cpp
     third_party/imgui_neo_sequencer/imgui_neo_internal.h
     third_party/imgui_neo_sequencer/imgui_neo_internal.cpp
+    third_party/imguizmo/ImGuizmo.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_neo_sequencer
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imguizmo
 )
 
 if (MSVC)
