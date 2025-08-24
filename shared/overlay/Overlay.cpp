@@ -64,7 +64,6 @@ void Overlay::SetRenderer(std::unique_ptr<IOverlayRenderer> renderer) {
 void Overlay::BeginFrame() {
     if (!m_Visible || !m_Renderer) return;
     UpdateDeltaTime();
-    m_Renderer->BeginFrame(m_DeltaTime);
 
 #ifdef _WIN32
     // Fallback polling if we did not see WM_KEYDOWN for a while
@@ -96,6 +95,9 @@ void Overlay::BeginFrame() {
         }
     }
 #endif
+
+    if (!m_Visible) return;
+    m_Renderer->BeginFrame(m_DeltaTime);
 }
 
 void Overlay::RenderFrame() {
