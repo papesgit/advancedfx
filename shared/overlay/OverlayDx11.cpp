@@ -13,6 +13,7 @@
 #include "third_party/imgui/backends/imgui_impl_win32.h"
 #include "third_party/imgui/backends/imgui_impl_dx11.h"
 #include "third_party/imgui_neo_sequencer/imgui_neo_sequencer.h"
+#include "third_party/imguizmo/ImGuizmo.h"
 #include "../AfxConsole.h"
 #include "../AfxMath.h"
 
@@ -47,6 +48,17 @@ extern const char* AfxStreams_GetRecordNameUtf8();
 
 namespace advancedfx { namespace overlay {
 
+struct CampathCtx {
+    bool active = false;
+    double time = 0.0;
+    CamPathValue value{};
+};
+
+// Global (file-scope) context for “last selected/edited campath key”
+static CampathCtx g_LastCampathCtx;
+static ImGuizmo::OPERATION g_GizmoOp   = ImGuizmo::TRANSLATE;
+static ImGuizmo::MODE      g_GizmoMode = ImGuizmo::LOCAL;
+
 // Simple in-overlay console state
 static bool g_ShowOverlayConsole = false;
 static std::vector<std::string> g_OverlayConsoleLog;
@@ -67,6 +79,7 @@ bool OverlayDx11::Initialize() {
     if (!ImGui::GetCurrentContext()) ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
 
     if (!ImGui_ImplWin32_Init(m_Hwnd)) return false;
     if (!ImGui_ImplDX11_Init(m_Device, m_Context)) return false;
@@ -481,118 +494,175 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             ImGui::BeginChild("seq_child", ImVec2(0.0f, seqH), false); // scrolling lives inside this child
             {
                 const ImVec2 seqSize(ImGui::GetContentRegionAvail().x, 0.0f);
-                if (ImGui::BeginNeoSequencer("##demo_seq", &s_seqFrame, &s_seqStart, &s_seqEnd, seqSize,
-                                            ImGuiNeoSequencerFlags_AlwaysShowHeader)) {
+                const ImGuiNeoSequencerFlags seqFlags =
+                    ImGuiNeoSequencerFlags_AlwaysShowHeader |
+                    ImGuiNeoSequencerFlags_EnableSelection |
+                    ImGuiNeoSequencerFlags_Selection_EnableDragging;
+                if (ImGui::BeginNeoSequencer("##demo_seq", &s_seqFrame, &s_seqStart, &s_seqEnd, seqSize, seqFlags)) {
                     // Campath timeline: populate from g_CamPath keyframes
-                    {
-                        extern CamPath g_CamPath;
-                        size_t cpCount = g_CamPath.GetSize();
-                        if (cpCount > 0) {
-                            std::vector<int32_t> keyTicks;
-                            keyTicks.reserve(cpCount);
-                            std::vector<double> keyTimes; // original relative times (seconds)
-                            keyTimes.reserve(cpCount);
-                            std::vector<CamPathValue> keyValues;
-                            keyValues.reserve(cpCount);
+                    
+                    extern CamPath g_CamPath;
+                    struct KfCache {
+                        bool valid = false;
+                        std::vector<int32_t> ticks;   // demo ticks
+                        std::vector<double> times;    // relative seconds
+                        std::vector<CamPathValue> values;
+                    };
+                    static KfCache s_cache;
+                    static bool s_wasDragging = false;
 
-                            double curTime = g_MirvTime.curtime_get();
-                            double currentDemoTime = 0.0;
-                            bool haveDemoTime = g_MirvTime.GetCurrentDemoTime(currentDemoTime);
-                            float ipt = g_MirvTime.interval_per_tick_get();
-                            if (ipt <= 0.0f) ipt = 1.0f / 64.0f;
+                    double curTime = g_MirvTime.curtime_get();
+                    double currentDemoTime = 0.0;
+                    bool haveDemoTime = g_MirvTime.GetCurrentDemoTime(currentDemoTime);
+                    float ipt = g_MirvTime.interval_per_tick_get();
+                    if (ipt <= 0.0f) ipt = 1.0f / 64.0f;
 
-                            for (CamPathIterator it = g_CamPath.GetBegin(); it != g_CamPath.GetEnd(); ++it) {
-                                double tRel = it.GetTime();
-                                keyTimes.push_back(tRel);
-                                keyValues.push_back(it.GetValue());
-                                double clientTarget = g_CamPath.GetOffset() + tRel;
-                                int tick = 0;
-                                if (haveDemoTime) {
-                                    double demoTarget = clientTarget - (curTime - currentDemoTime);
-                                    tick = (int)llround(demoTarget / (double)ipt);
-                                } else {
-                                    tick = (int)llround(clientTarget / (double)ipt);
-                                }
-                                if (tick < 0) tick = 0;
-                                keyTicks.push_back(tick);
+                    auto rebuild_cache_from_campath = [&]() {
+                        s_cache.valid = true;
+                        s_cache.ticks.clear();
+                        s_cache.times.clear();
+                        s_cache.values.clear();
+                        s_cache.ticks.reserve(g_CamPath.GetSize());
+                        s_cache.times.reserve(g_CamPath.GetSize());
+                        s_cache.values.reserve(g_CamPath.GetSize());
+                        for (CamPathIterator it = g_CamPath.GetBegin(); it != g_CamPath.GetEnd(); ++it) {
+                            double tRel = it.GetTime();
+                            s_cache.times.push_back(tRel);
+                            s_cache.values.push_back(it.GetValue());
+                            double clientTarget = g_CamPath.GetOffset() + tRel;
+                            int tick = 0;
+                            if (haveDemoTime) {
+                                double demoTarget = clientTarget - (curTime - currentDemoTime);
+                                tick = (int)llround(demoTarget / (double)ipt);
+                            } else {
+                                tick = (int)llround(clientTarget / (double)ipt);
                             }
-
-                            bool open = true;
-                            if (ImGui::BeginNeoTimelineEx("Campath", &open, ImGuiNeoTimelineFlags_None)) {
-                                // Stable context for right-clicked keyframe
-                                struct CtxKf { bool active; double time; CamPathValue value; };
-                                static CtxKf s_ctx = {false, 0.0, {}};
-
-                                int rightClickedIndex = -1;
-                                for (int i = 0; i < (int)keyTicks.size(); ++i) {
-                                    ImGui::NeoKeyframe(&keyTicks[i]);
-                                    if (ImGui::IsNeoKeyframeRightClicked()) rightClickedIndex = i;
-                                }
-                                if (rightClickedIndex >= 0) {
-                                    s_ctx.active = true;
-                                    s_ctx.time = keyTimes[(size_t)rightClickedIndex];
-                                    s_ctx.value = keyValues[(size_t)rightClickedIndex];
-                                    ImGui::OpenPopup("campath_kf_ctx");
-                                    ImGui::SetNextWindowPos(ImGui::GetMousePos());
-                                    ImGui::SetNextWindowSizeConstraints(ImVec2(120,0), ImVec2(300,FLT_MAX));
-                                }
-                                if (ImGui::BeginPopup("campath_kf_ctx")) {
-                                    bool doRemove = false, doGet = false, doSet = false;
-                                    if (ImGui::MenuItem("Remove")) doRemove = true;
-                                    if (ImGui::MenuItem("Get")) doGet = true;
-                                    if (ImGui::MenuItem("Set")) doSet = true;
-                                    if (ImGui::MenuItem("Edit")) { /* stub */ }
-                                    ImGui::EndPopup();
-
-                                    if (s_ctx.active) {
-                                        extern CCampathDrawer g_CampathDrawer;
-                                        bool prevDraw = g_CampathDrawer.Draw_get();
-                                        if (doRemove) {
-                                            g_CampathDrawer.Draw_set(false);
-                                            g_CamPath.Remove(s_ctx.time);
-                                            g_CampathDrawer.Draw_set(prevDraw);
-                                            s_ctx.active = false;
-                                        }
-                                        if (doGet) {
-                                            if (MirvInput* pMirv = Afx_GetMirvInput()) {
-                                                pMirv->SetCameraControlMode(true);
-                                                const CamPathValue& v = s_ctx.value;
-                                                pMirv->SetTx((float)v.X);
-                                                pMirv->SetTy((float)v.Y);
-                                                pMirv->SetTz((float)v.Z);
-                                                using namespace Afx::Math;
-                                                QEulerAngles angles = v.R.ToQREulerAngles().ToQEulerAngles();
-                                                pMirv->SetRx((float)angles.Pitch);
-                                                pMirv->SetRy((float)angles.Yaw);
-                                                pMirv->SetRz((float)angles.Roll);
-                                                pMirv->SetFov((float)v.Fov);
-                                            }
-                                            s_ctx.active = false;
-                                        }
-                                        if (doSet) {
-                                            double cx, cy, cz, rX, rY, rZ; float cfov;
-                                            Afx_GetLastCameraData(cx, cy, cz, rX, rY, rZ, cfov);
-                                            CamPathValue newVal(cx, cy, cz, rX, rY, rZ, cfov);
-                                            g_CampathDrawer.Draw_set(false);
-                                            g_CamPath.Remove(s_ctx.time);
-                                            g_CamPath.Add(s_ctx.time, newVal);
-                                            g_CampathDrawer.Draw_set(prevDraw);
-                                            s_ctx.active = false;
-                                        }
-                                    }
-                                }
-
-                                ImGui::EndNeoTimeLine();
-                            }
-                        } else {
-                            // Show empty Campath track for visibility
-                            bool open = true;
-                            if (ImGui::BeginNeoTimelineEx("Campath", &open)) {
-                                ImGui::EndNeoTimeLine();
-                            }
+                            if (tick < 0) tick = 0;
+                            s_cache.ticks.push_back(tick);
                         }
+                    };
+                    if (!ImGui::NeoIsDraggingSelection()) {
+                        if (!s_cache.valid || s_cache.ticks.size() != g_CamPath.GetSize())
+                            rebuild_cache_from_campath();
                     }
 
+                    bool open = true;
+                    if (ImGui::BeginNeoTimelineEx("Campath", &open, ImGuiNeoTimelineFlags_None)) {
+
+                        int rightClickedIndex = -1;
+                        for (int i = 0; i < (int)s_cache.ticks.size(); ++i) {
+                            ImGui::NeoKeyframe(&s_cache.ticks[i]);
+                            if (ImGui::IsNeoKeyframeRightClicked())
+                                rightClickedIndex = i;
+                        }
+                        if (rightClickedIndex >= 0) {
+                            g_LastCampathCtx.active = true;
+                            g_LastCampathCtx.time = s_cache.times[(size_t)rightClickedIndex];
+                            g_LastCampathCtx.value = s_cache.values[(size_t)rightClickedIndex];
+                            ImGui::OpenPopup("campath_kf_ctx");
+                            ImGui::SetNextWindowPos(ImGui::GetMousePos());
+                            ImGui::SetNextWindowSizeConstraints(ImVec2(120,0), ImVec2(300,FLT_MAX));
+                        }
+                        if (ImGui::BeginPopup("campath_kf_ctx")) {
+                            bool doRemove = false, doGet = false, doSet = false;
+                            if (ImGui::MenuItem("Remove")) doRemove = true;
+                            if (ImGui::MenuItem("Get")) doGet = true;
+                            if (ImGui::MenuItem("Set")) doSet = true;
+                            if (ImGui::MenuItem("Edit")) { /* stub */ }
+                            ImGui::EndPopup();
+
+                            if (g_LastCampathCtx.active) {
+                                extern CCampathDrawer g_CampathDrawer;
+                                bool prevDraw = g_CampathDrawer.Draw_get();
+                                if (doRemove) {
+                                    g_CampathDrawer.Draw_set(false);
+                                    g_CamPath.Remove(g_LastCampathCtx.time);
+                                    g_CampathDrawer.Draw_set(prevDraw);
+                                    g_LastCampathCtx.active = false;
+                                }
+                                if (doGet) {
+                                    if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                                        pMirv->SetCameraControlMode(true);
+                                        const CamPathValue& v = g_LastCampathCtx.value;
+                                        pMirv->SetTx((float)v.X);
+                                        pMirv->SetTy((float)v.Y);
+                                        pMirv->SetTz((float)v.Z);
+                                        using namespace Afx::Math;
+                                        QEulerAngles angles = v.R.ToQREulerAngles().ToQEulerAngles();
+                                        pMirv->SetRx((float)angles.Pitch);
+                                        pMirv->SetRy((float)angles.Yaw);
+                                        pMirv->SetRz((float)angles.Roll);
+                                        pMirv->SetFov((float)v.Fov);
+                                    }
+                                    g_LastCampathCtx.active = false;
+                                }
+                                if (doSet) {
+                                    double cx, cy, cz, rX, rY, rZ; float cfov;
+                                    Afx_GetLastCameraData(cx, cy, cz, rX, rY, rZ, cfov);
+                                    CamPathValue newVal(cx, cy, cz, rX, rY, rZ, cfov);
+                                    g_CampathDrawer.Draw_set(false);
+                                    g_CamPath.Remove(g_LastCampathCtx.time);
+                                    g_CamPath.Add(g_LastCampathCtx.time, newVal);
+                                    g_CampathDrawer.Draw_set(prevDraw);
+                                    g_LastCampathCtx.active = false;
+                                }
+                            }
+                        }
+                        // Commit moved keys on drag end (transaction-style: rebuild the whole path)
+                        bool draggingNow = ImGui::NeoIsDraggingSelection();
+                        if (s_wasDragging && !draggingNow) {
+                            // Build new list of (time,value) for ALL keys
+                            std::vector<std::pair<double, CamPathValue>> newKeys;
+                            newKeys.reserve(s_cache.ticks.size());
+
+                            // Convert every cached tick to a new relative time (seconds)
+                            for (size_t i = 0; i < s_cache.ticks.size(); ++i) {
+                                const double newDemoTime  = (double)s_cache.ticks[i] * (double)ipt;
+                                const double clientTarget = haveDemoTime
+                                    ? newDemoTime + (curTime - currentDemoTime)
+                                    : newDemoTime;
+                                double newRelTime = clientTarget - g_CamPath.GetOffset();
+                                newKeys.emplace_back(newRelTime, s_cache.values[i]);
+                            }
+
+                            // Sort by time and de-duplicate very close times (avoid identical keys)
+                            std::sort(newKeys.begin(), newKeys.end(),
+                                    [](const auto& a, const auto& b){ return a.first < b.first; });
+                            const double eps = 1e-6;
+                            for (size_t i = 1; i < newKeys.size(); ++i) {
+                                if (fabs(newKeys[i].first - newKeys[i-1].first) < eps) {
+                                    newKeys[i].first = newKeys[i-1].first + eps; // nudge slightly
+                                }
+                            }
+
+                            // Atomically rebuild the path while drawer is disabled
+                            extern CCampathDrawer g_CampathDrawer;
+                            const bool prevDraw = g_CampathDrawer.Draw_get();
+                            g_CampathDrawer.Draw_set(false);
+
+                            const bool prevEnabled = g_CamPath.Enabled_get();
+                            g_CamPath.Enabled_set(false);
+
+                            g_CamPath.Clear();
+                            for (const auto& kv : newKeys) {
+                                g_CamPath.Add(kv.first, kv.second);
+                            }
+
+                            g_CamPath.Enabled_set(prevEnabled);
+                            g_CampathDrawer.Draw_set(prevDraw);
+
+                            // Update cache times to the new sorted values
+                            for (size_t i = 0; i < newKeys.size(); ++i) {
+                                s_cache.times[i] = newKeys[i].first;
+                            }
+                            s_cache.valid = false; // rebuild from authoritative state next frame
+
+                            advancedfx::Message("Overlay: Campath rebuilt (%zu keys)\n", newKeys.size());
+                        }
+                        s_wasDragging = draggingNow;
+                        ImGui::EndNeoTimeLine();
+                    }
+                    
                     ImGui::EndNeoSequencer();
                 }
             }
@@ -778,6 +848,157 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
         ImGui::End();
     }
+    // ---------- ImGuizmo overlay + small control panel ----------
+    ImGuizmo::BeginFrame();
+
+    // Optional: a tiny panel to pick operation/mode
+    ImGui::Begin("Gizmo", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+    {
+        if (ImGui::RadioButton("Translate", g_GizmoOp == ImGuizmo::TRANSLATE)) g_GizmoOp = ImGuizmo::TRANSLATE;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Rotate",    g_GizmoOp == ImGuizmo::ROTATE))    g_GizmoOp = ImGuizmo::ROTATE;
+
+        if (ImGui::RadioButton("Local",     g_GizmoMode == ImGuizmo::LOCAL))   g_GizmoMode = ImGuizmo::LOCAL;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("World",     g_GizmoMode == ImGuizmo::WORLD))   g_GizmoMode = ImGuizmo::WORLD;
+
+        ImGui::TextUnformatted("Hold CTRL to snap");
+    }
+    ImGui::End();
+
+    // Only draw a gizmo if we have a selected keyframe
+    using advancedfx::overlay::g_LastCampathCtx;
+    if (g_LastCampathCtx.active)
+    {
+        // Where to draw (full screen / swapchain area)
+        ImVec2 ds = ImGui::GetIO().DisplaySize;
+        ImGuizmo::SetOrthographic(false);
+        ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList()); // draw on top
+        ImGuizmo::SetRect(0.0f, 0.0f, ds.x, ds.y);
+
+        // Build view & projection from current camera
+        double cx, cy, cz, rX, rY, rZ; float cfovDeg;
+        Afx_GetLastCameraData(cx, cy, cz, rX, rY, rZ, cfovDeg);
+
+        auto DegToRad = [](double d){ return (float)(d * 3.14159265358979323846 / 180.0); };
+
+        // Build a column-major MODEL matrix from pos + Source-like Euler order:
+        // R = Rz(yaw) * Rx(pitch) * Ry(roll)   (Z-up, yaw about Z)
+        auto BuildModel = [&](float px, float py, float pz,
+                            float pitchDeg, float yawDeg, float rollDeg,
+                            float out[16])
+        {
+            const float cp = cosf(DegToRad(pitchDeg)), sp = sinf(DegToRad(pitchDeg)); // Rx
+            const float cz = cosf(DegToRad(yawDeg)),   sz = sinf(DegToRad(yawDeg));   // Rz
+            const float cy = cosf(DegToRad(rollDeg)),  sy = sinf(DegToRad(rollDeg));  // Ry
+
+            // Rz * Rx * Ry
+            // First Rx*Ry
+            const float r00 =        cy;           const float r01 =        0.0f;  const float r02 =        sy;
+            const float r10 =  sp *  sy;           const float r11 =        cp;    const float r12 = -sp *  cy;
+            const float r20 = -cp *  sy;           const float r21 =        sp;    const float r22 =  cp *  cy;
+
+            // Then Rz * (Rx*Ry)
+            const float R00 = cz*r00 - sz*r10;     const float R01 = cz*r01 - sz*r11;  const float R02 = cz*r02 - sz*r12;
+            const float R10 = sz*r00 + cz*r10;     const float R11 = sz*r01 + cz*r11;  const float R12 = sz*r02 + cz*r12;
+            const float R20 =       r20;           const float R21 =       r21;        const float R22 =       r22;
+
+            // Column-major 4x4
+            out[0]=R00; out[1]=R10; out[2]=R20; out[3]=0.0f;
+            out[4]=R01; out[5]=R11; out[6]=R21; out[7]=0.0f;
+            out[8]=R02; out[9]=R12; out[10]=R22; out[11]=0.0f;
+            out[12]=px; out[13]=py; out[14]=pz;  out[15]=1.0f;
+        };
+
+        // Build VIEW = inverse(model) for a rigid transform (column-major)
+        auto BuildView = [&](float eyeX, float eyeY, float eyeZ,
+                            float pitchDeg, float yawDeg, float rollDeg,
+                            float out[16])
+        {
+            float M[16];
+            BuildModel(eyeX, eyeY, eyeZ, pitchDeg, yawDeg, rollDeg, M);
+
+            // Extract rotation columns (column-major)
+            const float R00=M[0], R01=M[4], R02=M[8];
+            const float R10=M[1], R11=M[5], R12=M[9];
+            const float R20=M[2], R21=M[6], R22=M[10];
+            const float tx = M[12], ty = M[13], tz = M[14];
+
+            // View rotation = R^T ; translation = -R^T * t
+            out[0]=R00; out[1]=R10; out[2]=R20; out[3]=0.0f;
+            out[4]=R01; out[5]=R11; out[6]=R21; out[7]=0.0f;
+            out[8]=R02; out[9]=R12; out[10]=R22; out[11]=0.0f;
+            out[12]=-(R00*tx + R01*ty + R02*tz);
+            out[13]=-(R10*tx + R11*ty + R12*tz);
+            out[14]=-(R20*tx + R21*ty + R22*tz);
+            out[15]=1.0f;
+        };
+
+        // D3D-style (left-handed) perspective, column-major, using vertical FOV in degrees.
+        // This matches what you’re feeding the game (cfovDeg) and works fine for ImGuizmo.
+        auto BuildProj = [&](float fovDeg, float aspect, float zn, float zf, float out[16])
+        {
+            const float f = 1.0f / tanf(DegToRad(fovDeg) * 0.5f);
+            out[0] = f/aspect; out[1]=0; out[2]=0;              out[3]=0;
+            out[4] = 0;        out[5]=f; out[6]=0;              out[7]=0;
+            out[8] = 0;        out[9]=0; out[10]= zf/(zf-zn);   out[11]=1.0f;
+            out[12]=0;         out[13]=0; out[14]=(-zn*zf)/(zf-zn); out[15]=0;
+        };
+
+        float view[16], proj[16];
+        BuildView((float)cx,(float)cy,(float)cz,(float)rX,(float)rY,(float)rZ, view);
+        float aspect = (ds.y > 0.0f) ? (ds.x / ds.y) : 1.777f;
+        BuildProj(cfovDeg, aspect, 0.1f, 10000.0f, proj);
+
+        // Model from selected key
+        float model[16];
+        {
+            const CamPathValue& v = g_LastCampathCtx.value;
+            using namespace Afx::Math;
+            QEulerAngles ea = v.R.ToQREulerAngles().ToQEulerAngles();
+            BuildModel((float)v.X, (float)v.Y, (float)v.Z,
+                    (float)ea.Pitch, (float)ea.Yaw, (float)ea.Roll, model);
+        }
+
+        // Optional snap
+        bool snap = ImGui::GetIO().KeyCtrl;
+        float snapTranslate[3] = {1.0f,1.0f,1.0f};
+        float snapRotate = 5.0f;
+
+        bool changed = ImGuizmo::Manipulate(
+            view, proj,
+            g_GizmoOp, g_GizmoMode,
+            model, nullptr,
+            snap ? (g_GizmoOp == ImGuizmo::ROTATE ? &snapRotate : snapTranslate) : nullptr
+        );
+
+        // Commit on release (only if it changed)
+        static bool wasUsing = false;
+        bool usingNow = ImGuizmo::IsUsing();
+        if (wasUsing && !usingNow && changed) {
+            float t[3], r[3], s[3];
+            ImGuizmo::DecomposeMatrixToComponents(model, t, r, s);
+
+            CamPathValue newVal(
+                (double)t[0], (double)t[1], (double)t[2],
+                (double)r[0], (double)r[1], (double)r[2],
+                g_LastCampathCtx.value.Fov
+            );
+
+            extern CCampathDrawer g_CampathDrawer;
+            bool prevDraw = g_CampathDrawer.Draw_get();
+            g_CampathDrawer.Draw_set(false);
+
+            g_CamPath.Remove(g_LastCampathCtx.time);
+            g_CamPath.Add(g_LastCampathCtx.time, newVal);
+
+            g_CampathDrawer.Draw_set(prevDraw);
+
+            g_LastCampathCtx.value = newVal;
+        }
+        wasUsing = usingNow;
+    }
+
 #else
     (void)dtSeconds;
 #endif
