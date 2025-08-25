@@ -8,6 +8,7 @@
 #include "imgui_neo_internal.h"
 
 #include <unordered_map>
+#include <math.h>
 
 namespace ImGui
 {
@@ -109,6 +110,8 @@ namespace ImGui
     static std::unordered_map<ImGuiID, ImGuiNeoSequencerInternalData> sequencerData;
 
     static ImVector<ImGuiNeoKeyframeDuplicate> keyframeDuplicates;
+    // Per-timeline counter for keyframe labels (0,1,2,...) shown under keyframes
+    static int keyLabelCounter = 0;
 
     ///////////// STATIC HELPERS ///////////////////////
 
@@ -164,7 +167,7 @@ namespace ImGui
 
         context.CurrentFrameColor = GetStyleNeoSequencerColorVec4(ImGuiNeoSequencerCol_FramePointer);
 
-        if (hovered)
+        if (hovered && !context.HoldingZoomSlider)
         {
             context.CurrentFrameColor = GetStyleNeoSequencerColorVec4(ImGuiNeoSequencerCol_FramePointerHovered);
         }
@@ -198,7 +201,7 @@ namespace ImGui
             }
         }
 
-        if (hovered && IsMouseDown(ImGuiMouseButton_Left) && !context.HoldingCurrentFrame)
+        if (hovered && IsMouseDown(ImGuiMouseButton_Left) && !context.HoldingCurrentFrame && !context.HoldingZoomSlider)
         {
             context.HoldingCurrentFrame = true;
             context.CurrentFrameColor = GetStyleNeoSequencerColorVec4(ImGuiNeoSequencerCol_FramePointerPressed);
@@ -431,8 +434,19 @@ namespace ImGui
 
             ImColor color = getKeyframeColor(context, hovered, inSelection);
 
-            drawList->AddCircleFilled(pos + ImVec2{0, currentTimelineHeight / 2.f}, currentTimelineHeight / 3.0f,
-                                      color, 4);
+            // Draw keyframe circle
+            const float radius = currentTimelineHeight / 3.0f;
+            const ImVec2 center = pos + ImVec2{0, currentTimelineHeight / 2.f};
+            drawList->AddCircleFilled(center, radius, color, 4);
+
+            // Draw numeric label under the keyframe (0,1,2,... per timeline)
+            char lbl[16];
+            snprintf(lbl, sizeof(lbl), "%d", keyLabelCounter);
+            const ImVec2 textSize = CalcTextSize(lbl);
+            const float paddingY = GetStyle().ItemInnerSpacing.y * 0.25f + 2.0f;
+            ImVec2 textPos = ImVec2(center.x - textSize.x * 0.5f, center.y + radius + paddingY);
+            drawList->AddText(textPos, IM_COL32_WHITE, lbl);
+            keyLabelCounter++;
         }
 
         context.IsLastKeyframeHovered = hovered;
@@ -598,11 +612,20 @@ namespace ImGui
             SetKeyOwner(ImGuiKey_MouseWheelY, GetItemID());
             const float currentScroll = GetIO().MouseWheel;
 
-            context.Zoom = ImClamp(context.Zoom + float(currentScroll) * 0.3f, 1.0f, (float) viewWidth);
+            // Use multiplicative zoom for consistent feel at all scales
+            if (currentScroll != 0.0f)
+            {
+                const float step = 1.20f; // per wheel detent
+                const float factor = (currentScroll > 0.0f)
+                    ? powf(step,  currentScroll)
+                    : powf(1.0f / step, -currentScroll);
+                const float maxZoom = (float)ImMax<FrameIndexType>(1, totalFrames);
+                context.Zoom = ImClamp(context.Zoom * factor, 1.0f, maxZoom);
+            }
             const auto newZoomWidth = (FrameIndexType) ceil((float) totalFrames / (context.Zoom));
 
             if (*start + context.OffsetFrame + newZoomWidth > *end)
-                context.OffsetFrame = ImMax(0U, totalFrames - viewWidth);
+                context.OffsetFrame = ImMax<FrameIndexType>(0, totalFrames - newZoomWidth);
         }
 
         if (context.HoldingZoomSlider)
@@ -643,7 +666,7 @@ namespace ImGui
             }
         }
 
-        if (hovered && IsMouseDown(ImGuiMouseButton_Left))
+        if (hovered && IsMouseDown(ImGuiMouseButton_Left) && !context.HoldingCurrentFrame)
         {
             context.HoldingZoomSlider = true;
         }
@@ -989,9 +1012,11 @@ namespace ImGui
 
         const auto clipMin = context.TopBarStartCursor + ImVec2(0, context.TopBarSize.y);
 
+        // Extend bottom clipping slightly to allow labels drawn below keyframes
+        const float labelBottomPad = GetFontSize() * 1.20f;
         drawList->PushClipRect(clipMin,
                                clipMin + backgroundSize - ImVec2(0, context.TopBarSize.y) -
-                               ImVec2{0, GetFontSize() * style.ZoomHeightScale}, true);
+                               ImVec2{0, GetFontSize() * style.ZoomHeightScale} + ImVec2{0, labelBottomPad}, true);
 
         return true;
     }
@@ -1132,6 +1157,8 @@ namespace ImGui
         auto labelSize = CalcTextSize(label);
 
         labelSize.y += imStyle.FramePadding.y * 2 + style.ItemSpacing.y * 2;
+        // Reserve extra vertical space under the timeline row for keyframe labels
+        labelSize.y += GetFontSize() * 1.10f;
         labelSize.x += imStyle.FramePadding.x * 2 + style.ItemSpacing.x * 2 +
                        (float) currentTimelineDepth * style.DepthItemSpacing;
 
@@ -1191,6 +1218,7 @@ namespace ImGui
         }
 
         keyframeDuplicates.resize(0);
+        keyLabelCounter = 0; // reset numbering at the start of each timeline
 
         return result;
     }
