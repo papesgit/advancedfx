@@ -58,6 +58,10 @@ struct CampathCtx {
 static CampathCtx g_LastCampathCtx;
 static ImGuizmo::OPERATION g_GizmoOp   = ImGuizmo::TRANSLATE;
 static ImGuizmo::MODE      g_GizmoMode = ImGuizmo::LOCAL;
+// Signal to sequencer to refresh its cached keyframe values after edits
+static bool g_SequencerNeedsRefresh = false;
+// Gizmo debug controls (file-scope so both UI and render path can access)
+//
 
 // Simple in-overlay console state
 static bool g_ShowOverlayConsole = false;
@@ -425,7 +429,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     // Sequencer window (ImGui Neo Sequencer)
     if (g_ShowSequencer) {
         ImGui::SetNextWindowSize(ImVec2(720, 260), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("HLAE Sequencer", &g_ShowSequencer)) {
+        if (ImGui::Begin("HLAE Sequencer", &g_ShowSequencer, ImGuiWindowFlags_NoCollapse)) {
             static ImGui::FrameIndexType s_seqFrame = 0;
             static ImGui::FrameIndexType s_seqStart = 0;
             static ImGui::FrameIndexType s_seqEnd = 0;
@@ -489,7 +493,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
             // Clamp: at least 100 px, at most what’s left after the controls row
             float maxSeqHAvail = ImMax(55.0f, availY - btnRowH);
-            float seqH         = ImClamp(desiredSeqH, 60.0f, maxSeqHAvail);
+            float seqH         = ImClamp(desiredSeqH, 70.0f, maxSeqHAvail);
 
             ImGui::BeginChild("seq_child", ImVec2(0.0f, seqH), false); // scrolling lives inside this child
             {
@@ -541,6 +545,15 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             s_cache.ticks.push_back(tick);
                         }
                     };
+                    if (g_SequencerNeedsRefresh) {
+                        rebuild_cache_from_campath();
+                        g_SequencerNeedsRefresh = false;
+                        s_cache.valid = true;
+                        // Also reset the drag sentinel so the next block doesn't think a user drag just ended
+                        s_wasDragging = ImGui::NeoIsDraggingSelection();
+                    }
+
+                    // When no refresh is pending, do the lazy refresh (only when not dragging)
                     if (!ImGui::NeoIsDraggingSelection()) {
                         if (!s_cache.valid || s_cache.ticks.size() != g_CamPath.GetSize())
                             rebuild_cache_from_campath();
@@ -550,15 +563,17 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     if (ImGui::BeginNeoTimelineEx("Campath", &open, ImGuiNeoTimelineFlags_None)) {
 
                         int rightClickedIndex = -1;
+                        static CampathCtx s_ctxMenuPending; // holds context menu target until action chosen
                         for (int i = 0; i < (int)s_cache.ticks.size(); ++i) {
                             ImGui::NeoKeyframe(&s_cache.ticks[i]);
                             if (ImGui::IsNeoKeyframeRightClicked())
                                 rightClickedIndex = i;
                         }
                         if (rightClickedIndex >= 0) {
-                            g_LastCampathCtx.active = true;
-                            g_LastCampathCtx.time = s_cache.times[(size_t)rightClickedIndex];
-                            g_LastCampathCtx.value = s_cache.values[(size_t)rightClickedIndex];
+                            // Do not immediately activate gizmo; defer to context menu action
+                            s_ctxMenuPending.active = true;
+                            s_ctxMenuPending.time = s_cache.times[(size_t)rightClickedIndex];
+                            s_ctxMenuPending.value = s_cache.values[(size_t)rightClickedIndex];
                             ImGui::OpenPopup("campath_kf_ctx");
                             ImGui::SetNextWindowPos(ImGui::GetMousePos());
                             ImGui::SetNextWindowSizeConstraints(ImVec2(120,0), ImVec2(300,FLT_MAX));
@@ -568,22 +583,34 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             if (ImGui::MenuItem("Remove")) doRemove = true;
                             if (ImGui::MenuItem("Get")) doGet = true;
                             if (ImGui::MenuItem("Set")) doSet = true;
-                            if (ImGui::MenuItem("Edit")) { /* stub */ }
+                            if (ImGui::MenuItem("Edit")) {
+                                if (s_ctxMenuPending.active) {
+                                    // Activate gizmo edit for the pending keyframe
+                                    g_LastCampathCtx = s_ctxMenuPending;
+                                }
+                                // Close the popup
+                                ImGui::CloseCurrentPopup();
+                            }
                             ImGui::EndPopup();
 
-                            if (g_LastCampathCtx.active) {
+                            if (s_ctxMenuPending.active) {
                                 extern CCampathDrawer g_CampathDrawer;
                                 bool prevDraw = g_CampathDrawer.Draw_get();
                                 if (doRemove) {
                                     g_CampathDrawer.Draw_set(false);
-                                    g_CamPath.Remove(g_LastCampathCtx.time);
+                                    g_CamPath.Remove(s_ctxMenuPending.time);
                                     g_CampathDrawer.Draw_set(prevDraw);
-                                    g_LastCampathCtx.active = false;
+                                    s_ctxMenuPending.active = false;
+                                    g_SequencerNeedsRefresh = true;
+                                    const double epsTime = 1e-9;
+                                    if (g_LastCampathCtx.active && fabs(g_LastCampathCtx.time - s_ctxMenuPending.time) < epsTime) {
+                                        g_LastCampathCtx.active = false;
+                                    }
                                 }
                                 if (doGet) {
                                     if (MirvInput* pMirv = Afx_GetMirvInput()) {
                                         pMirv->SetCameraControlMode(true);
-                                        const CamPathValue& v = g_LastCampathCtx.value;
+                                        const CamPathValue& v = s_ctxMenuPending.value;
                                         pMirv->SetTx((float)v.X);
                                         pMirv->SetTy((float)v.Y);
                                         pMirv->SetTz((float)v.Z);
@@ -594,70 +621,129 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                                         pMirv->SetRz((float)angles.Roll);
                                         pMirv->SetFov((float)v.Fov);
                                     }
-                                    g_LastCampathCtx.active = false;
+                                    s_ctxMenuPending.active = false;
                                 }
                                 if (doSet) {
                                     double cx, cy, cz, rX, rY, rZ; float cfov;
                                     Afx_GetLastCameraData(cx, cy, cz, rX, rY, rZ, cfov);
                                     CamPathValue newVal(cx, cy, cz, rX, rY, rZ, cfov);
                                     g_CampathDrawer.Draw_set(false);
-                                    g_CamPath.Remove(g_LastCampathCtx.time);
-                                    g_CamPath.Add(g_LastCampathCtx.time, newVal);
+                                    g_CamPath.Remove(s_ctxMenuPending.time);
+                                    g_CamPath.Add(s_ctxMenuPending.time, newVal);
                                     g_CampathDrawer.Draw_set(prevDraw);
-                                    g_LastCampathCtx.active = false;
+                                    s_ctxMenuPending.active = false;
+                                    g_SequencerNeedsRefresh = true;
                                 }
                             }
                         }
                         // Commit moved keys on drag end (transaction-style: rebuild the whole path)
                         bool draggingNow = ImGui::NeoIsDraggingSelection();
                         if (s_wasDragging && !draggingNow) {
-                            // Build new list of (time,value) for ALL keys
-                            std::vector<std::pair<double, CamPathValue>> newKeys;
-                            newKeys.reserve(s_cache.ticks.size());
+                            // 1) Snapshot authoritative values (in current index order) directly from g_CamPath
+                            std::vector<CamPathValue> liveValues;
+                            liveValues.reserve(g_CamPath.GetSize());
+                            // Also capture current selection indices and gizmo-target index (by time) for remap
+                            std::vector<int> prevSelectedIdx;
+                            int prevGizmoIdx = -1;
+                            int curIdx = 0;
+                            const double timeEps = 1e-9;
+                            for (CamPathIterator it = g_CamPath.GetBegin(); it != g_CamPath.GetEnd(); ++it, ++curIdx) {
+                                liveValues.push_back(it.GetValue());
+                                if (it.GetValue().Selected) prevSelectedIdx.push_back(curIdx);
+                                if (g_LastCampathCtx.active && fabs(it.GetTime() - g_LastCampathCtx.time) < timeEps)
+                                    prevGizmoIdx = curIdx;
+                            }
 
-                            // Convert every cached tick to a new relative time (seconds)
+                            // 2) Convert cached ticks to target times (seconds), keep original index for remapping
+                            struct TmpKey { double t; CamPathValue v; int origIndex; };
+                            std::vector<TmpKey> newKeys;
+                            newKeys.reserve(s_cache.ticks.size());
                             for (size_t i = 0; i < s_cache.ticks.size(); ++i) {
                                 const double newDemoTime  = (double)s_cache.ticks[i] * (double)ipt;
                                 const double clientTarget = haveDemoTime
                                     ? newDemoTime + (curTime - currentDemoTime)
                                     : newDemoTime;
                                 double newRelTime = clientTarget - g_CamPath.GetOffset();
-                                newKeys.emplace_back(newRelTime, s_cache.values[i]);
+
+                                // Use authoritative value (aligned by index) rather than stale s_cache.values[i]
+                                CamPathValue val = (i < liveValues.size()) ? liveValues[i] : s_cache.values[i];
+                                newKeys.push_back({ newRelTime, val, (int)i });
                             }
 
-                            // Sort by time and de-duplicate very close times (avoid identical keys)
+                            // 3) Sort + nudge identical times
                             std::sort(newKeys.begin(), newKeys.end(),
-                                    [](const auto& a, const auto& b){ return a.first < b.first; });
+                                [](const TmpKey& a, const TmpKey& b){ return a.t < b.t; });
                             const double eps = 1e-6;
                             for (size_t i = 1; i < newKeys.size(); ++i) {
-                                if (fabs(newKeys[i].first - newKeys[i-1].first) < eps) {
-                                    newKeys[i].first = newKeys[i-1].first + eps; // nudge slightly
-                                }
+                                if (fabs(newKeys[i].t - newKeys[i-1].t) < eps)
+                                    newKeys[i].t = newKeys[i-1].t + eps;
                             }
 
-                            // Atomically rebuild the path while drawer is disabled
+                            // 4) Rebuild atomically – force a true full-clear independent of current selection
                             extern CCampathDrawer g_CampathDrawer;
                             const bool prevDraw = g_CampathDrawer.Draw_get();
                             g_CampathDrawer.Draw_set(false);
-
                             const bool prevEnabled = g_CamPath.Enabled_get();
                             g_CamPath.Enabled_set(false);
 
+                            // Ensure Clear() path clears all by neutralizing selection first
+                            g_CamPath.SelectNone();
                             g_CamPath.Clear();
-                            for (const auto& kv : newKeys) {
-                                g_CamPath.Add(kv.first, kv.second);
+                            for (const auto& k : newKeys) g_CamPath.Add(k.t, k.v);
+
+                            // Restore selection (map old indices -> new indices via origIndex)
+                            if (!prevSelectedIdx.empty()) {
+                                // Build mapping origIndex -> newIndex
+                                std::vector<int> newSelected;
+                                newSelected.reserve(prevSelectedIdx.size());
+                                for (int oldIdx : prevSelectedIdx) {
+                                    for (size_t ni = 0; ni < newKeys.size(); ++ni) {
+                                        if (newKeys[ni].origIndex == oldIdx) { newSelected.push_back((int)ni); break; }
+                                    }
+                                }
+                                // Coalesce contiguous ranges and select
+                                std::sort(newSelected.begin(), newSelected.end());
+                                newSelected.erase(std::unique(newSelected.begin(), newSelected.end()), newSelected.end());
+                                int rangeStart = -1, prev = -1000000;
+                                g_CamPath.SelectNone();
+                                for (int idx : newSelected) {
+                                    if (rangeStart < 0) { rangeStart = prev = idx; continue; }
+                                    if (idx == prev + 1) { prev = idx; continue; }
+                                    // commit previous range
+                                    g_CamPath.SelectAdd((size_t)rangeStart, (size_t)prev);
+                                    rangeStart = prev = idx;
+                                }
+                                if (rangeStart >= 0) g_CamPath.SelectAdd((size_t)rangeStart, (size_t)prev);
                             }
 
                             g_CamPath.Enabled_set(prevEnabled);
                             g_CampathDrawer.Draw_set(prevDraw);
 
-                            // Update cache times to the new sorted values
-                            for (size_t i = 0; i < newKeys.size(); ++i) {
-                                s_cache.times[i] = newKeys[i].first;
-                            }
-                            s_cache.valid = false; // rebuild from authoritative state next frame
+                            // 5) Update cache times and mark invalid so the next frame refreshes from the authoritative state
+                            for (size_t i = 0; i < newKeys.size(); ++i) s_cache.times[i] = newKeys[i].t;
+                            s_cache.valid = false;
 
-                            advancedfx::Message("Overlay: Campath rebuilt (%zu keys)\n", newKeys.size());
+                            // 6) Keep ImGuizmo target alive across the move by remapping to its new index
+                            if (g_LastCampathCtx.active && prevGizmoIdx >= 0) {
+                                int newIdx = -1;
+                                for (size_t ni = 0; ni < newKeys.size(); ++ni) {
+                                    if (newKeys[ni].origIndex == prevGizmoIdx) { newIdx = (int)ni; break; }
+                                }
+                                if (newIdx >= 0) {
+                                    // Fetch updated time/value from authoritative path
+                                    int idx = 0;
+                                    for (CamPathIterator it = g_CamPath.GetBegin(); it != g_CamPath.GetEnd(); ++it, ++idx) {
+                                        if (idx == newIdx) {
+                                            g_LastCampathCtx.time  = it.GetTime();
+                                            g_LastCampathCtx.value = it.GetValue();
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    // Could not remap – deactivate to avoid editing a stale key
+                                    g_LastCampathCtx.active = false;
+                                }
+                            }
                         }
                         s_wasDragging = draggingNow;
                         ImGui::EndNeoTimeLine();
@@ -851,19 +937,15 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     // ---------- ImGuizmo overlay + small control panel ----------
     ImGuizmo::BeginFrame();
 
-    // Optional: a tiny panel to pick operation/mode
+    // Tiny panel to pick operation/mode
     ImGui::Begin("Gizmo", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-    {
-        if (ImGui::RadioButton("Translate", g_GizmoOp == ImGuizmo::TRANSLATE)) g_GizmoOp = ImGuizmo::TRANSLATE;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("Rotate",    g_GizmoOp == ImGuizmo::ROTATE))    g_GizmoOp = ImGuizmo::ROTATE;
-
-        if (ImGui::RadioButton("Local",     g_GizmoMode == ImGuizmo::LOCAL))   g_GizmoMode = ImGuizmo::LOCAL;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("World",     g_GizmoMode == ImGuizmo::WORLD))   g_GizmoMode = ImGuizmo::WORLD;
-
-        ImGui::TextUnformatted("Hold CTRL to snap");
-    }
+    if (ImGui::RadioButton("Translate", g_GizmoOp == ImGuizmo::TRANSLATE)) g_GizmoOp = ImGuizmo::TRANSLATE;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Rotate",    g_GizmoOp == ImGuizmo::ROTATE))    g_GizmoOp = ImGuizmo::ROTATE;
+    if (ImGui::RadioButton("Local",     g_GizmoMode == ImGuizmo::LOCAL))   g_GizmoMode = ImGuizmo::LOCAL;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("World",     g_GizmoMode == ImGuizmo::WORLD))   g_GizmoMode = ImGuizmo::WORLD;
+    ImGui::TextUnformatted("Hold CTRL to snap");
     ImGui::End();
 
     // Only draw a gizmo if we have a selected keyframe
@@ -872,8 +954,12 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     {
         // Where to draw (full screen / swapchain area)
         ImVec2 ds = ImGui::GetIO().DisplaySize;
+        // While right mouse button passthrough is active, make gizmo intangible
+        // so it doesn't steal focus or reveal the cursor while the camera is controlled.
+        ImGuizmo::Enable(!Overlay::Get().IsRmbPassthroughActive());
         ImGuizmo::SetOrthographic(false);
         ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList()); // draw on top
+        // Use main viewport rect for ImGuizmo normalization (accounts for viewport offset/DPI)
         ImGuizmo::SetRect(0.0f, 0.0f, ds.x, ds.y);
 
         // Build view & projection from current camera
@@ -882,73 +968,108 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
         auto DegToRad = [](double d){ return (float)(d * 3.14159265358979323846 / 180.0); };
 
-        // Build a column-major MODEL matrix from pos + Source-like Euler order:
-        // R = Rz(yaw) * Rx(pitch) * Ry(roll)   (Z-up, yaw about Z)
-        auto BuildModel = [&](float px, float py, float pz,
-                            float pitchDeg, float yawDeg, float rollDeg,
-                            float out[16])
-        {
-            const float cp = cosf(DegToRad(pitchDeg)), sp = sinf(DegToRad(pitchDeg)); // Rx
-            const float cz = cosf(DegToRad(yawDeg)),   sz = sinf(DegToRad(yawDeg));   // Rz
-            const float cy = cosf(DegToRad(rollDeg)),  sy = sinf(DegToRad(rollDeg));  // Ry
-
-            // Rz * Rx * Ry
-            // First Rx*Ry
-            const float r00 =        cy;           const float r01 =        0.0f;  const float r02 =        sy;
-            const float r10 =  sp *  sy;           const float r11 =        cp;    const float r12 = -sp *  cy;
-            const float r20 = -cp *  sy;           const float r21 =        sp;    const float r22 =  cp *  cy;
-
-            // Then Rz * (Rx*Ry)
-            const float R00 = cz*r00 - sz*r10;     const float R01 = cz*r01 - sz*r11;  const float R02 = cz*r02 - sz*r12;
-            const float R10 = sz*r00 + cz*r10;     const float R11 = sz*r01 + cz*r11;  const float R12 = sz*r02 + cz*r12;
-            const float R20 =       r20;           const float R21 =       r21;        const float R22 =       r22;
-
-            // Column-major 4x4
-            out[0]=R00; out[1]=R10; out[2]=R20; out[3]=0.0f;
-            out[4]=R01; out[5]=R11; out[6]=R21; out[7]=0.0f;
-            out[8]=R02; out[9]=R12; out[10]=R22; out[11]=0.0f;
-            out[12]=px; out[13]=py; out[14]=pz;  out[15]=1.0f;
+        // Helper to convert Source (X=fwd,Y=left,Z=up) vectors into DirectX style (X=right,Y=up,Z=fwd)
+        auto SrcToDx = [](float x, float y, float z, float out[3]) {
+            out[0] = -y; // left to right
+            out[1] =  z; // up stays up
+            out[2] =  x; // forward to forward (z)
         };
 
-        // Build VIEW = inverse(model) for a rigid transform (column-major)
+        // Build a column-major MODEL matrix from Source2 position / angles
+        auto BuildModel = [&](float px, float py, float pz,
+                              float pitchDeg, float yawDeg, float rollDeg,
+                              float out[16])
+        {
+            // Convert Euler to basis vectors using shared math util (roll,pitch,yaw order)
+            double fwdS[3], rightS[3], upS[3];
+            Afx::Math::MakeVectors(rollDeg, pitchDeg, yawDeg, fwdS, rightS, upS);
+
+            float fwd[3], right[3], up[3], pos[3];
+            SrcToDx((float)rightS[0], (float)rightS[1], (float)rightS[2], right);
+            SrcToDx((float)upS[0],    (float)upS[1],    (float)upS[2],    up);
+            SrcToDx((float)fwdS[0],   (float)fwdS[1],   (float)fwdS[2],   fwd);
+            SrcToDx(px, py, pz, pos);
+
+            // Row-major 4x4, row-vector math:
+            //   row0 = camera right
+            //   row1 = camera up
+            //   row2 = camera forward
+            //   row3 = translation (position)
+            out[0]=right[0]; out[1]=right[1]; out[2]=right[2]; out[3]=0.0f;
+            out[4]=up[0];    out[5]=up[1];    out[6]=up[2];    out[7]=0.0f;
+            out[8]=fwd[0];   out[9]=fwd[1];   out[10]=fwd[2];  out[11]=0.0f;
+            out[12]=pos[0];  out[13]=pos[1];  out[14]=pos[2];  out[15]=1.0f;
+        };
+
+        // Build VIEW = inverse(model) for a rigid transform (row-major, row-vector math)
         auto BuildView = [&](float eyeX, float eyeY, float eyeZ,
-                            float pitchDeg, float yawDeg, float rollDeg,
-                            float out[16])
+                              float pitchDeg, float yawDeg, float rollDeg,
+                              float out[16])
         {
             float M[16];
             BuildModel(eyeX, eyeY, eyeZ, pitchDeg, yawDeg, rollDeg, M);
 
-            // Extract rotation columns (column-major)
-            const float R00=M[0], R01=M[4], R02=M[8];
-            const float R10=M[1], R11=M[5], R12=M[9];
-            const float R20=M[2], R21=M[6], R22=M[10];
-            const float tx = M[12], ty = M[13], tz = M[14];
+            // Extract rotation rows (row-major):
+            const float r00=M[0], r01=M[1], r02=M[2];   // row 0
+            const float r10=M[4], r11=M[5], r12=M[6];   // row 1
+            const float r20=M[8], r21=M[9], r22=M[10];  // row 2
+            const float tx = M[12], ty = M[13], tz = M[14]; // translation (row 3)
 
-            // View rotation = R^T ; translation = -R^T * t
-            out[0]=R00; out[1]=R10; out[2]=R20; out[3]=0.0f;
-            out[4]=R01; out[5]=R11; out[6]=R21; out[7]=0.0f;
-            out[8]=R02; out[9]=R12; out[10]=R22; out[11]=0.0f;
-            out[12]=-(R00*tx + R01*ty + R02*tz);
-            out[13]=-(R10*tx + R11*ty + R12*tz);
-            out[14]=-(R20*tx + R21*ty + R22*tz);
+            // View rotation = R^{-1} = R^T (row-vector math => rows become columns)
+            out[0]=r00; out[1]=r10; out[2]=r20; out[3]=0.0f; // row 0 = column 0 of R
+            out[4]=r01; out[5]=r11; out[6]=r21; out[7]=0.0f; // row 1 = column 1 of R
+            out[8]=r02; out[9]=r12; out[10]=r22; out[11]=0.0f; // row 2 = column 2 of R
+            // Translation = -t * R^{-1} = -t * R^T (row-vector math)
+            out[12]=-(tx*r00 + ty*r01 + tz*r02);
+            out[13]=-(tx*r10 + ty*r11 + tz*r12);
+            out[14]=-(tx*r20 + ty*r21 + tz*r22);
             out[15]=1.0f;
         };
 
-        // D3D-style (left-handed) perspective, column-major, using vertical FOV in degrees.
-        // This matches what you’re feeding the game (cfovDeg) and works fine for ImGuizmo.
-        auto BuildProj = [&](float fovDeg, float aspect, float zn, float zf, float out[16])
-        {
-            const float f = 1.0f / tanf(DegToRad(fovDeg) * 0.5f);
-            out[0] = f/aspect; out[1]=0; out[2]=0;              out[3]=0;
-            out[4] = 0;        out[5]=f; out[6]=0;              out[7]=0;
-            out[8] = 0;        out[9]=0; out[10]= zf/(zf-zn);   out[11]=1.0f;
-            out[12]=0;         out[13]=0; out[14]=(-zn*zf)/(zf-zn); out[15]=0;
-        };
+        // Matrix conventions for ImGuizmo interop:
+        // - All matrices below are row-major and use row-vector math (v' = v * M).
+        // - World axes mapping follows Source: input angles build X=fwd, Y=left, Z=up, then we remap
+        //   to overlay/Im space as X=right, Y=up, Z=forward (see SrcToDx above).
+        // - View matrix is the rigid inverse of the model in row-major form: R^T in the top-left 3x3,
+        //   and translation = -t * R^T (note: multiply on the right due to row-vectors).
+        // - We pre-apply a Z flip (negate 3rd row) to match ImGuizmo's expected camera convention.
+        // - Projection is OpenGL-style right-handed with z in [-1,1] (m[2][3] = -1), using a vertical FOV.
+        //   Since the engine FOV is horizontal (scaled from a 4:3 default), we convert hfov->vfov
+        //   based on the current swapchain aspect so gizmo projection matches the game.
 
         float view[16], proj[16];
+        // Build a view from camera rigid transform (same mapping as model)
         BuildView((float)cx,(float)cy,(float)cz,(float)rX,(float)rY,(float)rZ, view);
-        float aspect = (ds.y > 0.0f) ? (ds.x / ds.y) : 1.777f;
-        BuildProj(cfovDeg, aspect, 0.1f, 10000.0f, proj);
+
+        // Build GL-style RH projection (z in [-1,1]) expected by ImGuizmo.
+        auto PerspectiveGlRh = [&](float fovyDeg, float aspect, float znear, float zfar, float* m16)
+        {
+            const float f = 1.0f / tanf((float)(fovyDeg * 3.14159265358979323846 / 180.0 * 0.5));
+            m16[0] = f/aspect; m16[1]=0; m16[2]=0;               m16[3]=0;
+            m16[4] = 0;        m16[5]=f; m16[6]=0;               m16[7]=0;
+            m16[8] = 0;        m16[9]=0; m16[10]=-(zfar+znear)/(zfar-znear); m16[11]=-1.0f;
+            m16[12]=0;         m16[13]=0; m16[14]=-(2.0f*zfar*znear)/(zfar-znear); m16[15]=0;
+        };
+        // Apply Z-flip as pre-multiply (negate 3rd row) – matches ImGuizmo's expectations here
+        view[2]  *= -1.0f; view[6]  *= -1.0f; view[10] *= -1.0f; view[14] *= -1.0f;
+
+        // Prefer swapchain aspect if known
+        float aspect = 0.0f;
+        if (m_Rtv.height > 0) aspect = (float)m_Rtv.width / (float)m_Rtv.height;
+        else if (ds.y > 0.0f) aspect = ds.x / ds.y;
+        if (aspect <= 0.0f) aspect = 16.0f/9.0f;
+
+        // Convert engine-reported horizontal FOV (scaled from 4:3) to vertical FOV for GL projection
+        float fovyDeg = cfovDeg;
+        {
+            const float defaultAspect = 4.0f/3.0f;
+            const float ratio = aspect / defaultAspect;
+            const float fovRad = (float)(cfovDeg * 3.14159265358979323846/180.0);
+            const float half = 0.5f * fovRad;
+            const float halfVert = atanf(tanf(half) / ratio);
+            fovyDeg = (float)(2.0f * (halfVert) * 180.0 / 3.14159265358979323846);
+        }
+        PerspectiveGlRh(fovyDeg, aspect, 0.1f, 100000.0f, proj);
 
         // Model from selected key
         float model[16];
@@ -960,10 +1081,26 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     (float)ea.Pitch, (float)ea.Yaw, (float)ea.Roll, model);
         }
 
+        // Matrices ready – call ImGuizmo
+
         // Optional snap
         bool snap = ImGui::GetIO().KeyCtrl;
         float snapTranslate[3] = {1.0f,1.0f,1.0f};
         float snapRotate = 5.0f;
+
+        // Keep model stable across frames while dragging: don't rebuild from campath every frame.
+        // Use a per-selection temporary matrix that we feed back into ImGuizmo while IsUsing().
+        static bool   s_hasModelOverride = false;
+        static double s_overrideKeyTime = 0.0;
+        static float  s_modelOverride[16];
+        if (s_hasModelOverride) {
+            // Only keep override while operating on the same selected key/time.
+            if (fabs(s_overrideKeyTime - g_LastCampathCtx.time) < 1e-9) {
+                for (int i=0;i<16;++i) model[i]=s_modelOverride[i];
+            } else {
+                s_hasModelOverride = false;
+            }
+        }
 
         bool changed = ImGuizmo::Manipulate(
             view, proj,
@@ -972,29 +1109,115 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             snap ? (g_GizmoOp == ImGuizmo::ROTATE ? &snapRotate : snapTranslate) : nullptr
         );
 
-        // Commit on release (only if it changed)
         static bool wasUsing = false;
+        static bool s_dragChanged = false;
         bool usingNow = ImGuizmo::IsUsing();
-        if (wasUsing && !usingNow && changed) {
-            float t[3], r[3], s[3];
-            ImGuizmo::DecomposeMatrixToComponents(model, t, r, s);
+        if (usingNow) {
+            // Persist the live-updated model so next frame starts from here.
+            for (int i=0;i<16;++i) s_modelOverride[i]=model[i];
+            s_hasModelOverride = true;
+            s_overrideKeyTime = g_LastCampathCtx.time;
+            if (changed) s_dragChanged = true;
+        }
+
+        // Commit on release (only if it changed)
+        if (wasUsing && !usingNow && (s_dragChanged || s_hasModelOverride)) {
+            float t[3], r_dummy[3], s_dummy[3];
+            // Use the last live model (override) if available
+            const float* finalModel = s_hasModelOverride ? s_modelOverride : model;
+            ImGuizmo::DecomposeMatrixToComponents(finalModel, t, r_dummy, s_dummy);
+            // Translation back to Source2 space (X=fwd,Y=left,Z=up)
+            double sx = (double)t[2];
+            double sy = (double)(-t[0]);
+            double sz = (double)t[1];
+
+            // Robust rotation extraction: derive Quake (pitch,yaw,roll) from basis vectors
+            // 1) Extract Im-space basis (row-major rows): right=R, up=U, forward=F
+            float Rx = finalModel[0],  Ry = finalModel[1],  Rz = finalModel[2];
+            float Ux = finalModel[4],  Uy = finalModel[5],  Uz = finalModel[6];
+            float Fx = finalModel[8],  Fy = finalModel[9],  Fz = finalModel[10];
+            // 2) Map Im -> Source (X=fwd,Y=left,Z=up): S = {X=iz, Y=-ix, Z=iy}
+            auto im_to_src = [](float ix, float iy, float iz, double out[3]){
+                out[0] = (double)iz;   // X (forward)
+                out[1] = (double)(-ix); // Y (left)
+                out[2] = (double)iy;   // Z (up)
+            };
+            double R_s[3], U_s[3], F_s[3];
+            im_to_src(Rx,Ry,Rz,R_s);
+            im_to_src(Ux,Uy,Uz,U_s);
+            im_to_src(Fx,Fy,Fz,F_s);
+            // Normalize just in case
+            auto norm3 = [](double v[3]){
+                double l = sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]); if(l>1e-12){ v[0]/=l; v[1]/=l; v[2]/=l; }
+            };
+            norm3(R_s); norm3(U_s); norm3(F_s);
+            // 3) Quake angles from F_s and U_s
+            // Forward from (pitch,yaw): F = (cp*cy, cp*sy, -sp)
+            double sp = -F_s[2];
+            if (sp < -1.0) sp = -1.0; else if (sp > 1.0) sp = 1.0;
+            double pitch = asin(sp) * (180.0 / 3.14159265358979323846);
+            double cp = cos(pitch * (3.14159265358979323846/180.0));
+            double yaw = 0.0;
+            if (fabs(cp) > 1e-6) {
+                yaw = atan2(F_s[1], F_s[0]) * (180.0 / 3.14159265358979323846);
+            }
+            // 4) Compute roll by comparing actual Up to the theoretical Up with roll=0
+            double fwd0[3], right0[3], up0[3];
+            {
+                // Use MakeVectors with roll=0, pitch,yaw to get base axes in Source space
+                double fwdQ[3], rightQ[3], upQ[3];
+                Afx::Math::MakeVectors(/*roll*/0.0, /*pitch*/pitch, /*yaw*/yaw, fwdQ, rightQ, upQ);
+                // MakeVectors returns right (to the right, not left). Our R_s is "right" already, consistent.
+                fwd0[0]=fwdQ[0]; fwd0[1]=fwdQ[1]; fwd0[2]=fwdQ[2];
+                right0[0]=rightQ[0]; right0[1]=rightQ[1]; right0[2]=rightQ[2];
+                up0[0]=upQ[0]; up0[1]=upQ[1]; up0[2]=upQ[2];
+            }
+            // roll = atan2( dot(U, right0), dot(U, up0) )
+            double dot_ur = U_s[0]*right0[0] + U_s[1]*right0[1] + U_s[2]*right0[2];
+            double dot_uu = U_s[0]*up0[0]    + U_s[1]*up0[1]    + U_s[2]*up0[2];
+            double roll = atan2(dot_ur, dot_uu) * (180.0 / 3.14159265358979323846);
 
             CamPathValue newVal(
-                (double)t[0], (double)t[1], (double)t[2],
-                (double)r[0], (double)r[1], (double)r[2],
+                sx, sy, sz,
+                pitch, yaw, roll,
                 g_LastCampathCtx.value.Fov
             );
 
-            extern CCampathDrawer g_CampathDrawer;
-            bool prevDraw = g_CampathDrawer.Draw_get();
-            g_CampathDrawer.Draw_set(false);
-
-            g_CamPath.Remove(g_LastCampathCtx.time);
-            g_CamPath.Add(g_LastCampathCtx.time, newVal);
-
-            g_CampathDrawer.Draw_set(prevDraw);
+            // Prefer updating via console commands on the engine thread to avoid races with the drawer.
+            // Try to select the exact keyframe by index, then apply per-component edits.
+            int foundIndex = -1;
+            {
+                int idx = 0;
+                const double eps = 1e-9;
+                for (CamPathIterator it = g_CamPath.GetBegin(); it != g_CamPath.GetEnd(); ++it, ++idx) {
+                    if (fabs(it.GetTime() - g_LastCampathCtx.time) < eps) { foundIndex = idx; break; }
+                }
+            }
+            if (foundIndex >= 0) {
+                char buf[1024];
+                // Select the single key
+                snprintf(buf, sizeof(buf), "mirv_campath select none; mirv_campath select #%d #%d", foundIndex, foundIndex);
+                Afx_ExecClientCmd(buf);
+                // Apply position
+                snprintf(buf, sizeof(buf), "mirv_campath edit position %.*f %.*f %.*f",
+                        6, (float)newVal.X, 6, (float)newVal.Y, 6, (float)newVal.Z);
+                Afx_ExecClientCmd(buf);
+                // Apply angles (Pitch,Yaw,Roll)
+                snprintf(buf, sizeof(buf), "mirv_campath edit angles %.*f %.*f %.*f",
+                        6, (float)newVal.R.ToQREulerAngles().ToQEulerAngles().Pitch,
+                        6, (float)newVal.R.ToQREulerAngles().ToQEulerAngles().Yaw,
+                        6, (float)newVal.R.ToQREulerAngles().ToQEulerAngles().Roll);
+                Afx_ExecClientCmd(buf);
+                // Apply FOV
+                snprintf(buf, sizeof(buf), "mirv_campath edit fov %.*f", 6, (float)newVal.Fov);
+                Afx_ExecClientCmd(buf);
+                Afx_ExecClientCmd("mirv_campath select none");
+                g_SequencerNeedsRefresh = true;
+            } 
 
             g_LastCampathCtx.value = newVal;
+            s_hasModelOverride = false;
+            s_dragChanged = false;
         }
         wasUsing = usingNow;
     }
