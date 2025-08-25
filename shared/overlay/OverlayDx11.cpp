@@ -69,6 +69,12 @@ static std::vector<std::string> g_OverlayConsoleLog;
 static char g_OverlayConsoleInput[512] = {0};
 static bool g_OverlayConsoleScrollToBottom = false;
 
+// UI state mirrored for Mirv camera sliders so external changes (e.g., wheel in passthrough)
+// stay in sync with the controls below.
+static bool  g_uiFovInit   = false; static float  g_uiFov = 90.0f;   static float g_uiFovDefault = 90.0f;
+static bool  g_uiRollInit  = false; static float  g_uiRoll = 0.0f;   static float g_uiRollDefault = 0.0f;
+static bool  g_uiKsensInit = false; static float  g_uiKsens = 1.0f;  static float g_uiKsensDefault = 1.0f;
+
 OverlayDx11::OverlayDx11(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* swapchain, HWND hwnd)
     : m_Device(device), m_Context(context), m_Swapchain(swapchain), m_Hwnd(hwnd) {}
 
@@ -108,8 +114,63 @@ bool OverlayDx11::Initialize() {
                 bool passThrough = overlayVisible && s_rmbDown && !wantCaptureMouse;
                 Overlay::Get().SetRmbPassthroughActive(passThrough);
 
+                // While in RMB passthrough mode, intercept scroll wheel to control mirv camera instead of passing to game
+                if (passThrough && msg == WM_MOUSEWHEEL) {
+                    int zDelta = GET_WHEEL_DELTA_WPARAM((WPARAM)wparam);
+                    int steps = zDelta / WHEEL_DELTA;
+                    if (steps != 0) {
+                        if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                            const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                            const bool ctrlDown  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                            if (ctrlDown) {
+                                // Adjust Roll
+                                float roll = GetLastCameraRoll();
+                                float stepDeg = 1.0f;
+                                roll += stepDeg * (float)steps;
+                                // Clamp to [-180, 180]
+                                if (roll < -180.0f) roll = -180.0f;
+                                if (roll >  180.0f) roll =  180.0f;
+                                pMirv->SetRz(roll);
+                                g_uiRoll = roll; g_uiRollInit = true; // sync UI
+                            } else if (shiftDown) {
+                                // Adjust FOV
+                                float fov = GetLastCameraFov();
+                                float stepDeg = 1.0f;
+                                fov += stepDeg * (float)steps;
+                                if (fov < 1.0f)   fov = 1.0f;
+                                if (fov > 179.0f) fov = 179.0f;
+                                pMirv->SetFov(fov);
+                                g_uiFov = fov; g_uiFovInit = true; // sync UI
+                            } else {
+                                // Adjust keyboard sensitivity (ksens)
+                                double ks = pMirv->GetKeyboardSensitivty();
+                                double step = 0.25; // fine-grained
+                                ks += step * (double)steps;
+                                if (ks < 0.01) ks = 0.01;
+                                if (ks > 10.0) ks = 10.0;
+                                pMirv->SetKeyboardSensitivity(ks);
+                                g_uiKsens = (float)ks; g_uiKsensInit = true; // sync UI
+                            }
+                        }
+                    }
+                    return true; // consume wheel
+                }
+
+                // In passthrough, swallow Shift/Ctrl so they don't reach the game (used only for our scroll modifiers)
                 if (passThrough) {
-                    // Do not consume: allow the game to receive input while overlay stays open
+                    switch (msg) {
+                        case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_SYSKEYUP: {
+                            WPARAM vk = (WPARAM)wparam;
+                            if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_LCONTROL || vk == VK_RCONTROL)
+                                return true; // consume modifiers
+                            break;
+                        }
+                        default: break;
+                    }
+                }
+
+                if (passThrough) {
+                    // Do not consume other inputs: allow the game to receive input while overlay stays open
                     return false;
                 }
 
@@ -489,13 +550,15 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             float trackRowH    = ImGui::GetFrameHeight()*1.2f;
             float margins      = st.ItemSpacing.y + st.FramePadding.y;
 
-            float desiredSeqH  = headerH + trackCount * trackRowH + margins;
+            // Add extra space for per-keyframe labels drawn below the markers
+            float labelExtra   = ImGui::GetTextLineHeightWithSpacing();
+            float desiredSeqH  = headerH + trackCount * trackRowH + margins + labelExtra;
 
             // Clamp: at least 100 px, at most what’s left after the controls row
             float maxSeqHAvail = ImMax(55.0f, availY - btnRowH);
             float seqH         = ImClamp(desiredSeqH, 70.0f, maxSeqHAvail);
 
-            ImGui::BeginChild("seq_child", ImVec2(0.0f, seqH), false); // scrolling lives inside this child
+            ImGui::BeginChild("seq_child", ImVec2(0.0f, 90.0f), false); // scrolling lives inside this child
             {
                 const ImVec2 seqSize(ImGui::GetContentRegionAvail().x, 0.0f);
                 const ImGuiNeoSequencerFlags seqFlags =
@@ -832,20 +895,19 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (width < 100.0f) width = avail * 0.6f; // fallback
             ImGui::SetNextItemWidth(width);
         }
-        // FOV slider
-        static bool fovInit = false; static float s_fov = 90.0f; static float s_fovDefault = 90.0f;
-        if (!fovInit) { s_fov = GetLastCameraFov(); s_fovDefault = s_fov; fovInit = true; }
+        // FOV slider (synced with RMB+wheel in passthrough)
+        if (!g_uiFovInit) { g_uiFov = GetLastCameraFov(); g_uiFovDefault = g_uiFov; g_uiFovInit = true; }
         {
-            float tmp = s_fov;
+            float tmp = g_uiFov;
             bool changed = ImGui::SliderFloat("FOV", &tmp, 1.0f, 179.0f, "%.1f deg");
             bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
             if (reset) {
-                s_fov = s_fovDefault;
+                g_uiFov = g_uiFovDefault;
                 ImGui::ClearActiveID();
-                pMirv->SetFov(s_fov);
+                pMirv->SetFov(g_uiFov);
             } else if (changed) {
-                s_fov = tmp;
-                pMirv->SetFov(s_fov);
+                g_uiFov = tmp;
+                pMirv->SetFov(g_uiFov);
             }
         }
 
@@ -860,19 +922,18 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (width < 100.0f) width = avail * 0.6f; // fallback
             ImGui::SetNextItemWidth(width);
         }
-        static bool rollInit = false; static float s_roll = 0.0f; static float s_rollDefault = 0.0f;
-        if (!rollInit) { s_roll = GetLastCameraRoll(); s_rollDefault = s_roll; rollInit = true; }
+        if (!g_uiRollInit) { g_uiRoll = GetLastCameraRoll(); g_uiRollDefault = g_uiRoll; g_uiRollInit = true; }
         {
-            float tmp = s_roll;
+            float tmp = g_uiRoll;
             bool changed = ImGui::SliderFloat("Roll", &tmp, -180.0f, 180.0f, "%.1f deg");
             bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
             if (reset) {
-                s_roll = s_rollDefault;
+                g_uiRoll = g_uiRollDefault;
                 ImGui::ClearActiveID();
-                pMirv->SetRz(s_roll);
+                pMirv->SetRz(g_uiRoll);
             } else if (changed) {
-                s_roll = tmp;
-                pMirv->SetRz(s_roll);
+                g_uiRoll = tmp;
+                pMirv->SetRz(g_uiRoll);
             }
         }
 
@@ -887,21 +948,21 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (width < 100.0f) width = avail * 0.6f; // fallback
             ImGui::SetNextItemWidth(width);
         }
-        static bool ksensInit = false; static float s_ksens = 1.0f; static float s_ksensDefault = 1.0f;
-        if (!ksensInit) { s_ksens = (float)pMirv->GetKeyboardSensitivty(); s_ksensDefault = s_ksens; ksensInit = true; }
+        if (!g_uiKsensInit) { g_uiKsens = (float)pMirv->GetKeyboardSensitivty(); g_uiKsensDefault = g_uiKsens; g_uiKsensInit = true; }
         {
-            float tmp = s_ksens;
+            float tmp = g_uiKsens;
             bool changed = ImGui::SliderFloat("ksens", &tmp, 0.01f, 10.0f, "%.2f");
             bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
             if (reset) {
-                s_ksens = s_ksensDefault;
+                g_uiKsens = g_uiKsensDefault;
                 ImGui::ClearActiveID();
-                pMirv->SetKeyboardSensitivity(s_ksens);
+                pMirv->SetKeyboardSensitivity(g_uiKsens);
             } else if (changed) {
-                s_ksens = tmp;
-                pMirv->SetKeyboardSensitivity(s_ksens);
+                g_uiKsens = tmp;
+                pMirv->SetKeyboardSensitivity(g_uiKsens);
             }
         }
+        ImGui::Text("Scroll: ksens | +Shift: FOV | +Ctrl: Roll");
 
         ImGui::End();
     }
@@ -937,11 +998,21 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     // ---------- ImGuizmo overlay + small control panel ----------
     ImGuizmo::BeginFrame();
 
+    // Global hotkeys for gizmo mode (avoid triggering while editing a text field)
+    if (ImGui::GetActiveID() == 0) {
+        if (ImGui::IsKeyPressed(ImGuiKey_G, false)) {
+            g_GizmoOp = ImGuizmo::TRANSLATE;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+            g_GizmoOp = ImGuizmo::ROTATE;
+        }
+    }
+
     // Tiny panel to pick operation/mode
     ImGui::Begin("Gizmo", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-    if (ImGui::RadioButton("Translate", g_GizmoOp == ImGuizmo::TRANSLATE)) g_GizmoOp = ImGuizmo::TRANSLATE;
+    if (ImGui::RadioButton("Translate (G)", g_GizmoOp == ImGuizmo::TRANSLATE)) g_GizmoOp = ImGuizmo::TRANSLATE;
     ImGui::SameLine();
-    if (ImGui::RadioButton("Rotate",    g_GizmoOp == ImGuizmo::ROTATE))    g_GizmoOp = ImGuizmo::ROTATE;
+    if (ImGui::RadioButton("Rotate (R)",    g_GizmoOp == ImGuizmo::ROTATE))    g_GizmoOp = ImGuizmo::ROTATE;
     if (ImGui::RadioButton("Local",     g_GizmoMode == ImGuizmo::LOCAL))   g_GizmoMode = ImGuizmo::LOCAL;
     ImGui::SameLine();
     if (ImGui::RadioButton("World",     g_GizmoMode == ImGuizmo::WORLD))   g_GizmoMode = ImGuizmo::WORLD;
