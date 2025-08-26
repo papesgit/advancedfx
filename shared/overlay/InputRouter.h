@@ -22,6 +22,7 @@ public:
     void Detach();
 
     void SetMessageCallback(MsgCallback cb);
+    void* GetAttachedHwnd() const { return m_Hwnd; }
     
 #ifdef _WIN32
     // Diagnostics & fallback: query if any WM_KEYDOWN was seen since last frame.
