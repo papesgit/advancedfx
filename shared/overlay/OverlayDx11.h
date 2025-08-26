@@ -37,15 +37,16 @@ private:
 
     bool m_Initialized = false;
 
-    // Backbuffer RTV for safe rendering.
+    // Backbuffer size cache (RTV is created per-frame and not cached).
     struct RtvState {
-        ID3D11RenderTargetView* rtv = nullptr;
         uint32_t width = 0;
         uint32_t height = 0;
     } m_Rtv;
 
-    void CreateOrUpdateRtv();
-    void ReleaseRtv();
+    // When true, ImGui backend device objects need recreation after a resize/device-loss.
+    bool m_ImGuiNeedRecreate = false;
+
+    void UpdateBackbufferSize();
 };
 
 }} // namespace

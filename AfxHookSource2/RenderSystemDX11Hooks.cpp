@@ -3,6 +3,7 @@
 #include "RenderSystemDX11Hooks.h"
 #include "../shared/overlay/Overlay.h"
 #include "../shared/overlay/OverlayDx11.h"
+#include "../shared/overlay/InputRouter.h"
 #include <memory>
 
 #include "CampathDrawer.h"
@@ -50,6 +51,10 @@
 
 #include <dxgi.h>
 #include <dxgi1_4.h>
+
+// Forward declarations for overlay resize/quarantine state used across this file
+extern std::atomic<bool> g_OverlayResizePending;
+extern std::atomic<int>  g_OverlayQuarantineFrames;
 
 extern advancedfx::CThreadPool * g_pThreadPool;
 extern advancedfx::CImageBufferPoolThreadSafe * g_pImageBufferPoolThreadSafe;
@@ -1274,11 +1279,18 @@ HRESULT STDMETHODCALLTYPE New_CreateRenderTargetView(  ID3D11Device * This,
     
     HRESULT result = g_Old_CreateRenderTargetView(This, pResource, pDesc, ppRTView);
 
-    if (SUCCEEDED(result) && ppRTView && *ppRTView
-    &&g_pSwapChain // can be nullptr e.g. when people forget to "disable service" on FACEIT anti cheat.
-    ) {
+    if (SUCCEEDED(result) && ppRTView && *ppRTView && g_pSwapChain) {
+        // Avoid backbuffer probing during resize/quarantine to not disturb engine transitions.
+        if (g_OverlayResizePending.load(std::memory_order_relaxed) || g_OverlayQuarantineFrames.load(std::memory_order_relaxed) > 0)
+            return result;
+        // Ensure the cached swapchain belongs to this device before querying its backbuffer.
+        ID3D11Device* scDev = nullptr;
+        if (FAILED(g_pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&scDev))) scDev = nullptr;
+        bool sameDevice = (scDev == This);
+        if (scDev) scDev->Release();
+
         ID3D11Texture2D * pTexture = nullptr;
-        HRESULT result2 = g_pSwapChain->GetBuffer(0,__uuidof(ID3D11Texture2D), (void**)&pTexture);
+        HRESULT result2 = sameDevice ? g_pSwapChain->GetBuffer(0,__uuidof(ID3D11Texture2D), (void**)&pTexture) : E_FAIL;
         if(SUCCEEDED(result2)) {
             if(pResource == pTexture/* && (g_pDevice == nullptr || This != g_pDevice)*/) {
                 if(g_pDevice) {
@@ -1744,11 +1756,50 @@ typedef HRESULT (STDMETHODCALLTYPE * Present_t)( void * This,
 
 Present_t g_OldPresent = nullptr;
 
+// Hook IDXGISwapChain::ResizeBuffers to properly handle windowed resolution changes
+typedef HRESULT (STDMETHODCALLTYPE * ResizeBuffers_t)( void * This,
+            /* [in] */ UINT BufferCount,
+            /* [in] */ UINT Width,
+            /* [in] */ UINT Height,
+            /* [in] */ DXGI_FORMAT NewFormat,
+            /* [in] */ UINT SwapChainFlags);
+
+ResizeBuffers_t g_OldResizeBuffers = nullptr;
+
+// ResizeBuffers detour: mark resize pending; actual resource handling is deferred to Present.
+std::atomic<bool> g_OverlayResizePending{false};
+std::atomic<int>  g_OverlayResizeRetry{0};
+// Quarantine: skip overlay and all backbuffer queries for a few frames after resize or when we detect transitional swapchain states.
+std::atomic<int>  g_OverlayQuarantineFrames{0};
+
 HRESULT STDMETHODCALLTYPE New_Present( void * This,
             /* [in] */ UINT SyncInterval,
             /* [in] */ UINT Flags) {
- 
+
     g_bInOwnDraw = true;
+    // Always track the latest swapchain instance being presented.
+    g_pSwapChain = reinterpret_cast<IDXGISwapChain*>(This);
+
+    // One-time present info logging to aid diagnostics
+    {
+        static bool s_presentLogged = false;
+        static UINT s_prevSync = 0xffffffffu;
+        static UINT s_prevFlags = 0xffffffffu;
+        if (!s_presentLogged || s_prevSync != SyncInterval || s_prevFlags != Flags) {
+            s_presentLogged = true;
+            s_prevSync = SyncInterval;
+            s_prevFlags = Flags;
+            advancedfx::Message("Present: SyncInterval=%u Flags=0x%X\n", SyncInterval, Flags);
+            if (g_pSwapChain) {
+                DXGI_SWAP_CHAIN_DESC d = {};
+                if (SUCCEEDED(g_pSwapChain->GetDesc(&d))) {
+                    advancedfx::Message("SwapDesc: BufferCount=%u SwapEffect=%u Flags=0x%X\n", d.BufferCount, (unsigned)d.SwapEffect, d.Flags);
+                }
+            }
+        }
+    }
+
+    // Defer resize handling until after the app's Present to avoid mid-transition states.
 
     g_CampathDrawer.OnRenderThread_Present();
 
@@ -1758,9 +1809,12 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
 
     if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
     {
-        if(!pRenderPassCommands->BeforePresent.Empty()) {
+        if(!pRenderPassCommands->BeforePresent.Empty()
+            && !g_OverlayResizePending.load(std::memory_order_relaxed)
+            && g_OverlayQuarantineFrames.load(std::memory_order_relaxed) <= 0) {
             ID3D11Texture2D * pTexture = nullptr;
-            if(g_pSwapChain) g_pSwapChain->GetBuffer(0,__uuidof(ID3D11Texture2D), (void**)&pTexture);            
+            IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+            if(sc) sc->GetBuffer(0,__uuidof(ID3D11Texture2D), (void**)&pTexture);
             pRenderPassCommands->OnBeforePresent(pTexture);
             if(pTexture) pTexture->Release();
         }
@@ -1770,17 +1824,32 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
     {
         auto &overlay = advancedfx::overlay::Overlay::Get();
         static bool s_loggedNoRenderer = false;
+        // Ensure WndProc hook is on the current window if we have one
+        {
+            IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+            DXGI_SWAP_CHAIN_DESC tmp = {};
+            if (sc && SUCCEEDED(sc->GetDesc(&tmp))) {
+                auto router = overlay.GetInputRouter();
+                void* cur = router ? router->GetAttachedHwnd() : nullptr;
+                if (router && tmp.OutputWindow && cur && cur != tmp.OutputWindow) {
+                    router->Detach();
+                    router->Attach(tmp.OutputWindow);
+                    advancedfx::Message("Overlay: WndProc hook reattached hwnd=0x%p\n", tmp.OutputWindow);
+                }
+            }
+        }
         if (!overlay.HasRenderer()) {
-            // Try to lazily initialize the overlay renderer here as well (more robust timing).
-            if (g_pSwapChain) {
+            // Try to lazily initialize the overlay renderer here as well using the actual swapchain being presented.
+            IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+            if (sc) {
                 ID3D11Device* pDev = nullptr;
                 ID3D11DeviceContext* pCtx = nullptr;
-                if (SUCCEEDED(g_pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&pDev)) && pDev) {
+                if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D11Device), (void**)&pDev)) && pDev) {
                     pDev->GetImmediateContext(&pCtx);
                     DXGI_SWAP_CHAIN_DESC desc = {};
-                    if (pCtx && SUCCEEDED(g_pSwapChain->GetDesc(&desc))) {
+                    if (pCtx && SUCCEEDED(sc->GetDesc(&desc))) {
                         overlay.SetRenderer(std::unique_ptr<advancedfx::overlay::IOverlayRenderer>(
-                            new advancedfx::overlay::OverlayDx11(pDev, pCtx, g_pSwapChain, desc.OutputWindow))
+                            new advancedfx::overlay::OverlayDx11(pDev, pCtx, sc, desc.OutputWindow))
                         );
                     }
                     if (pCtx) pCtx->Release();
@@ -1792,7 +1861,10 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
                 s_loggedNoRenderer = true;
             }
         }
-        if (overlay.IsVisible()) {
+        // Skip rendering overlay while a resize is pending or quarantine is active to avoid touching backbuffers mid-transition.
+        if (overlay.IsVisible()
+            && !g_OverlayResizePending.load(std::memory_order_relaxed)
+            && g_OverlayQuarantineFrames.load(std::memory_order_relaxed) <= 0) {
             overlay.BeginFrame();
             overlay.RenderFrame();
             overlay.EndFrame();
@@ -1812,11 +1884,86 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
 
     g_DepthCompositor.OnPresent();
 
+    // Detect transitional swapchain states (legacy DISCARD + single buffer) and enter a short quarantine.
+    {
+        IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+        DXGI_SWAP_CHAIN_DESC d = {};
+        if (sc && SUCCEEDED(sc->GetDesc(&d))) {
+            if (d.BufferCount == 1 && d.SwapEffect == DXGI_SWAP_EFFECT_DISCARD) {
+                // Quarantine for N frames to avoid backbuffer queries while engine transitions.
+                int q = g_OverlayQuarantineFrames.load(std::memory_order_relaxed);
+                if (q <= 0) {
+                    g_OverlayQuarantineFrames.store(15, std::memory_order_relaxed);
+                    advancedfx::Message("Overlay: quarantine enter (DISCARD+1)\n");
+                }
+            }
+        }
+        int q = g_OverlayQuarantineFrames.load(std::memory_order_relaxed);
+        if (q > 0) g_OverlayQuarantineFrames.store(q - 1, std::memory_order_relaxed);
+    }
+
+    // Handle pending resize after the app presented the first post-resize frame
+    if (g_OverlayResizePending.load(std::memory_order_relaxed)) {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        // Try to determine new size from the backbuffer (now more likely valid)
+        UINT newW = 0, newH = 0;
+        IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+        if (sc) {
+            ID3D11Texture2D* backbuffer = nullptr;
+            if (SUCCEEDED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backbuffer)) && backbuffer) {
+                D3D11_TEXTURE2D_DESC bbDesc = {};
+                backbuffer->GetDesc(&bbDesc);
+                newW = bbDesc.Width; newH = bbDesc.Height;
+                backbuffer->Release();
+            }
+        }
+        if (newW != 0 && newH != 0) {
+            if (overlay.HasRenderer()) {
+                overlay.OnDeviceLost();
+                overlay.OnResize(newW, newH);
+            }
+            g_OverlayResizePending.store(false, std::memory_order_relaxed);
+        } else {
+            int tries = g_OverlayResizeRetry.load(std::memory_order_relaxed);
+            if (tries > 5) {
+                // Give up and clear pending to avoid blocking overlay indefinitely
+                g_OverlayResizePending.store(false, std::memory_order_relaxed);
+            } else {
+                g_OverlayResizeRetry.store(tries + 1, std::memory_order_relaxed);
+            }
+        }
+    }
+
     g_bInOwnDraw = false;
 
     g_iDraw = 0;
 
     return result;
+}
+
+
+HRESULT STDMETHODCALLTYPE New_ResizeBuffers( void * This,
+            /* [in] */ UINT BufferCount,
+            /* [in] */ UINT Width,
+            /* [in] */ UINT Height,
+            /* [in] */ DXGI_FORMAT NewFormat,
+            /* [in] */ UINT SwapChainFlags) {
+    // Pre-release any overlay resources referencing the backbuffer and unbind RTs
+    // to avoid INVALID_CALL on ResizeBuffers due to outstanding references.
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.HasRenderer())
+            overlay.OnDeviceLost();
+        IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+        // No further D3D unbinding here to avoid interfering with engine state.
+    }
+
+    // Mark pending resize so overlay skips touching backbuffers until we complete, and enter quarantine.
+    g_OverlayResizePending.store(true, std::memory_order_relaxed);
+    g_OverlayResizeRetry.store(0, std::memory_order_relaxed);
+    g_OverlayQuarantineFrames.store(30, std::memory_order_relaxed);
+
+    return g_OldResizeBuffers(This, BufferCount, Width, Height, NewFormat, SwapChainFlags);
 }
 
 
@@ -1844,29 +1991,30 @@ HRESULT STDMETHODCALLTYPE New_CreateSwapChain( void * This,
         if(nullptr == g_OldPresent) {
             void **vtable = *(void***)*ppSwapChain;
             g_OldPresent = (Present_t)vtable[8];
+            g_OldResizeBuffers = (ResizeBuffers_t)vtable[13]; // IDXGISwapChain::ResizeBuffers
             DetourTransactionBegin();
             DetourUpdateThread(GetCurrentThread());
             DetourAttach(&(PVOID&)g_OldPresent, New_Present);
-            if(NO_ERROR != DetourTransactionCommit()) ErrorBox("Failed to detour IDXGISwapChain::Present.");
+            if (g_OldResizeBuffers)
+                DetourAttach(&(PVOID&)g_OldResizeBuffers, New_ResizeBuffers);
+            if(NO_ERROR != DetourTransactionCommit()) ErrorBox("Failed to detour IDXGISwapChain methods.");
         }
 
-        // Lazy-initialize overlay DX11 renderer on first swapchain (robust: fetch device/context via swapchain).
+        // (Re)initialize overlay DX11 renderer for the current swapchain.
         if (g_pSwapChain) {
             auto &overlay = advancedfx::overlay::Overlay::Get();
-            if (!overlay.HasRenderer()) {
-                ID3D11Device* pDev = nullptr;
-                ID3D11DeviceContext* pCtx = nullptr;
-                if (SUCCEEDED(g_pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&pDev)) && pDev) {
-                    pDev->GetImmediateContext(&pCtx);
-                    DXGI_SWAP_CHAIN_DESC desc2 = {};
-                    if (pCtx && SUCCEEDED(g_pSwapChain->GetDesc(&desc2))) {
-                        overlay.SetRenderer(std::unique_ptr<advancedfx::overlay::IOverlayRenderer>(
-                            new advancedfx::overlay::OverlayDx11(pDev, pCtx, g_pSwapChain, desc2.OutputWindow))
-                        );
-                    }
-                    if (pCtx) pCtx->Release();
-                    pDev->Release();
+            ID3D11Device* pDev = nullptr;
+            ID3D11DeviceContext* pCtx = nullptr;
+            if (SUCCEEDED(g_pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&pDev)) && pDev) {
+                pDev->GetImmediateContext(&pCtx);
+                DXGI_SWAP_CHAIN_DESC desc2 = {};
+                if (pCtx && SUCCEEDED(g_pSwapChain->GetDesc(&desc2))) {
+                    overlay.SetRenderer(std::unique_ptr<advancedfx::overlay::IOverlayRenderer>(
+                        new advancedfx::overlay::OverlayDx11(pDev, pCtx, g_pSwapChain, desc2.OutputWindow))
+                    );
                 }
+                if (pCtx) pCtx->Release();
+                pDev->Release();
             }
         }
     }

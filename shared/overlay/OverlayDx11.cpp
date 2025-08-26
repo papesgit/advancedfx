@@ -103,6 +103,26 @@ bool OverlayDx11::Initialize() {
                 // Feed ImGui first so it updates IO states
                 bool consumed = ImGui_ImplWin32_WndProcHandler((HWND)hwnd, msg, (WPARAM)wparam, (LPARAM)lparam) ? true : false;
 
+                // Never consume critical window management messages; always pass to the game.
+                switch (msg) {
+                    case WM_ENTERSIZEMOVE:
+                    case WM_EXITSIZEMOVE:
+                    case WM_SIZING:
+                    case WM_SIZE:
+                    case WM_WINDOWPOSCHANGING:
+                    case WM_WINDOWPOSCHANGED:
+                    case WM_DISPLAYCHANGE:
+                    case WM_DPICHANGED:
+                        consumed = false;
+                        // Proactively drop backbuffer resources on resize-related messages to avoid blocking engine ResizeBuffers.
+                        if (msg == WM_SIZE) {
+                            advancedfx::overlay::Overlay::Get().OnDeviceLost();
+                        }
+                        break;
+                    default:
+                        break;
+                }
+
                 // Right-click passthrough when hovering outside overlay (no capture)
                 static bool s_rmbDown = false;
                 if (msg == WM_RBUTTONDOWN) s_rmbDown = true;
@@ -195,7 +215,7 @@ bool OverlayDx11::Initialize() {
         }
     }
 
-    CreateOrUpdateRtv();
+    UpdateBackbufferSize();
 
     m_Initialized = true;
     return true;
@@ -207,7 +227,7 @@ bool OverlayDx11::Initialize() {
 void OverlayDx11::Shutdown() {
 #ifdef _WIN32
     if (!m_Initialized) return;
-    ReleaseRtv();
+    m_Rtv.width = m_Rtv.height = 0;
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     // Do not destroy ImGui context here, shared across overlays.
@@ -1301,14 +1321,55 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 void OverlayDx11::Render() {
 #ifdef _WIN32
     if (!m_Initialized) return;
-    // Ensure a valid RTV is bound before rendering ImGui
-    if (!m_Rtv.rtv) CreateOrUpdateRtv();
-    if (m_Rtv.rtv) {
-        ID3D11RenderTargetView* rtvs[1] = { m_Rtv.rtv };
-        m_Context->OMSetRenderTargets(1, rtvs, nullptr);
+    // Update backbuffer size cache
+    UpdateBackbufferSize();
+
+    // Recreate ImGui device objects once after a resize/device-loss
+    if (m_ImGuiNeedRecreate) {
+        ImGui_ImplDX11_CreateDeviceObjects();
+        m_ImGuiNeedRecreate = false;
     }
-    ImGui::Render();
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+    // Backup current state we might disturb (render targets + viewport)
+    ID3D11RenderTargetView* prevRtv = nullptr;
+    ID3D11DepthStencilView* prevDsv = nullptr;
+    m_Context->OMGetRenderTargets(1, &prevRtv, &prevDsv);
+
+    UINT prevVpCount = 0;
+    m_Context->RSGetViewports(&prevVpCount, nullptr);
+    D3D11_VIEWPORT prevVp = {};
+    if (prevVpCount > 0) {
+        prevVpCount = 1;
+        m_Context->RSGetViewports(&prevVpCount, &prevVp);
+    }
+
+    // Create ephemeral RTV this frame, render, then release
+    ID3D11Texture2D* backbuffer = nullptr;
+    if (SUCCEEDED(m_Swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backbuffer)) && backbuffer) {
+        ID3D11RenderTargetView* rtv = nullptr;
+        if (SUCCEEDED(m_Device->CreateRenderTargetView(backbuffer, nullptr, &rtv)) && rtv) {
+            ID3D11RenderTargetView* rtvs[1] = { rtv };
+            m_Context->OMSetRenderTargets(1, rtvs, nullptr);
+            ImGui::Render();
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+            rtv->Release();
+        }
+        backbuffer->Release();
+    }
+
+    // Restore viewport
+    if (prevVpCount > 0)
+        m_Context->RSSetViewports(1, &prevVp);
+
+    // Restore previous render targets
+    if (prevRtv || prevDsv) {
+        if (prevRtv)
+            m_Context->OMSetRenderTargets(1, &prevRtv, prevDsv);
+        else
+            m_Context->OMSetRenderTargets(0, nullptr, prevDsv);
+    }
+    if (prevRtv) prevRtv->Release();
+    if (prevDsv) prevDsv->Release();
 #endif
 }
 
@@ -1319,18 +1380,19 @@ void OverlayDx11::EndFrame() {
 void OverlayDx11::OnDeviceLost() {
 #ifdef _WIN32
     if (!m_Initialized) return;
-    ReleaseRtv();
+    m_Rtv.width = m_Rtv.height = 0;
     ImGui_ImplDX11_InvalidateDeviceObjects();
+    m_ImGuiNeedRecreate = true;
 #endif
 }
 
 void OverlayDx11::OnResize(uint32_t, uint32_t) {
 #ifdef _WIN32
     if (!m_Initialized) return;
-    ReleaseRtv();
+    m_Rtv.width = m_Rtv.height = 0;
     ImGui_ImplDX11_InvalidateDeviceObjects();
-    ImGui_ImplDX11_CreateDeviceObjects();
-    CreateOrUpdateRtv();
+    // Defer device object and RTV recreation to the next Render() after resize has completed
+    m_ImGuiNeedRecreate = true;
 #endif
 }
 
@@ -1339,31 +1401,16 @@ void OverlayDx11::OnResize(uint32_t, uint32_t) {
 #ifdef _WIN32
 namespace advancedfx { namespace overlay {
 
-void OverlayDx11::ReleaseRtv() {
-    if (m_Rtv.rtv) { m_Rtv.rtv->Release(); m_Rtv.rtv = nullptr; }
-    m_Rtv.width = m_Rtv.height = 0;
-}
-
-void OverlayDx11::CreateOrUpdateRtv() {
+void OverlayDx11::UpdateBackbufferSize() {
     if (!m_Swapchain || !m_Device) return;
-    DXGI_SWAP_CHAIN_DESC desc = {};
-    if (FAILED(m_Swapchain->GetDesc(&desc))) return;
-    UINT w = desc.BufferDesc.Width;
-    UINT h = desc.BufferDesc.Height;
-    if (w == 0 || h == 0) return;
-    if (m_Rtv.rtv && m_Rtv.width == w && m_Rtv.height == h) return; // up to date
-
-    ReleaseRtv();
     ID3D11Texture2D* backbuffer = nullptr;
-    if (FAILED(m_Swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backbuffer)) || !backbuffer) return;
-    ID3D11RenderTargetView* rtv = nullptr;
-    HRESULT hr = m_Device->CreateRenderTargetView(backbuffer, nullptr, &rtv);
+    if (FAILED(m_Swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backbuffer)) || !backbuffer)
+        return;
+    D3D11_TEXTURE2D_DESC bbDesc = {};
+    backbuffer->GetDesc(&bbDesc);
+    m_Rtv.width = bbDesc.Width;
+    m_Rtv.height = bbDesc.Height;
     backbuffer->Release();
-    if (SUCCEEDED(hr)) {
-        m_Rtv.rtv = rtv;
-        m_Rtv.width = w;
-        m_Rtv.height = h;
-    }
 }
 
 }} // namespace
