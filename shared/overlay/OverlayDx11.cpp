@@ -9,6 +9,7 @@
 
 // Minimal Dear ImGui loader includes (stubbed or vendored)
 #include "third_party/imgui/imgui.h"
+#include "third_party/imgui_filebrowser/imfilebrowser.h"
 #include "third_party/imgui/imgui_internal.h" // for ImGui::ClearActiveID
 #include "third_party/imgui/backends/imgui_impl_win32.h"
 #include "third_party/imgui/backends/imgui_impl_dx11.h"
@@ -74,6 +75,11 @@ static bool g_OverlayConsoleScrollToBottom = false;
 static bool  g_uiFovInit   = false; static float  g_uiFov = 90.0f;   static float g_uiFovDefault = 90.0f;
 static bool  g_uiRollInit  = false; static float  g_uiRoll = 0.0f;   static float g_uiRollDefault = 0.0f;
 static bool  g_uiKsensInit = false; static float  g_uiKsens = 1.0f;  static float g_uiKsensDefault = 1.0f;
+
+// Overlay UI scale (DPI) control
+// - s_UiScale drives ImGui IO FontGlobalScale and style sizes via ScaleAllSizes
+// - We keep previous value to scale relatively and avoid cumulative drift
+static float g_UiScale = 1.0f;
 
 OverlayDx11::OverlayDx11(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* swapchain, HWND hwnd)
     : m_Device(device), m_Context(context), m_Swapchain(swapchain), m_Hwnd(hwnd) {}
@@ -262,29 +268,79 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     {
         static char s_recName[512] = {0};
         static bool recInit = false;
+
+        // One persistent folder browser (folder-only, close on Esc, allow path edit & create folder)
+        static ImGui::FileBrowser dirDialog(
+            ImGuiFileBrowserFlags_SelectDirectory |
+            ImGuiFileBrowserFlags_CloseOnEsc |
+            ImGuiFileBrowserFlags_EditPathString |
+            ImGuiFileBrowserFlags_CreateNewDir
+        );
+
+        // Set dialog title once
+        static bool dialogInit = false;
+        if (!dialogInit) {
+            dirDialog.SetTitle("Select record folder");
+            dialogInit = true;
+        }
+
         if (!recInit) {
             const char* rn = AfxStreams_GetRecordNameUtf8();
             if (rn) strncpy_s(s_recName, rn, _TRUNCATE);
             recInit = true;
         }
-        // Render label separately to avoid label width affecting input width calculation
+
+        // Label + input + two buttons: "Browse..." and "Set"
         ImGuiStyle& st = ImGui::GetStyle();
         ImGui::TextUnformatted("Record path");
         ImGui::SameLine(0.0f, st.ItemInnerSpacing.x);
+
         float avail = ImGui::GetContentRegionAvail().x; // remaining after label
-        float btnW = ImGui::CalcTextSize("Set").x + st.FramePadding.x * 2.0f;
-        // Ensure at least 2x standard spacing (plus a small margin) to the right of the box for the button
-        float extra = st.ItemInnerSpacing.x * 2.0f + 8.0f;
-        float boxW = avail - (btnW + extra);
-        if (boxW < 150.0f) boxW = 150.0f; // reasonable minimum
-        if (boxW > avail - (btnW + extra)) boxW = avail - (btnW + extra);
-        if (boxW < 50.0f) boxW = 50.0f; // last resort on very small windows
+        float btnBrowseW = ImGui::CalcTextSize("Browse...").x + st.FramePadding.x * 2.0f;
+        float btnSetW    = ImGui::CalcTextSize("Set").x       + st.FramePadding.x * 2.0f;
+        // spacing between input and first button, and between the two buttons
+        float gap1 = st.ItemInnerSpacing.x * 2.0f + 8.0f;
+        float gap2 = st.ItemInnerSpacing.x;
+
+        float boxW = avail - (btnBrowseW + btnSetW + gap1 + gap2);
+        if (boxW < 150.0f) boxW = 150.0f;                           // reasonable minimum
+        if (boxW > avail - (btnBrowseW + btnSetW + gap1 + gap2))
+            boxW = avail - (btnBrowseW + btnSetW + gap1 + gap2);
+        if (boxW < 50.0f) boxW = 50.0f;                             // last resort on very small windows
+
         ImGui::SetNextItemWidth(boxW);
         ImGui::InputText("##recname", s_recName, sizeof(s_recName));
-        ImGui::SameLine(0.0f, st.ItemInnerSpacing.x * 2.0f + 8.0f);
+
+        ImGui::SameLine(0.0f, gap1);
+        if (ImGui::Button("Browse...##recname")) {
+            // Optional: if you want to start from current s_recName:
+            // Depending on your version of imgui-filebrowser, SetPwd() may be available.
+            // Example (guard or remove if your version lacks it):
+            // std::error_code ec;
+            // if (std::filesystem::is_directory(s_recName, ec)) dirDialog.SetPwd(s_recName);
+
+            dirDialog.Open();
+        }
+
+        ImGui::SameLine(0.0f, gap2);
         if (ImGui::Button("Set##recname")) {
             AfxStreams_SetRecordNameUtf8(s_recName);
             advancedfx::Message("Overlay: mirv_streams record name set.\n");
+        }
+
+        // Render the dialog (should be called every frame)
+        dirDialog.Display();
+
+        // If the user picked a folder, copy it into s_recName and apply immediately
+        if (dirDialog.HasSelected()) {
+            const std::string selected = dirDialog.GetSelected().string();
+            strncpy_s(s_recName, selected.c_str(), _TRUNCATE);
+
+            // If you want auto-apply on selection:
+            AfxStreams_SetRecordNameUtf8(s_recName);
+            advancedfx::Message("Overlay: mirv_streams record name set via browser.\n");
+
+            dirDialog.ClearSelected();
         }
     }
 
@@ -317,12 +373,55 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     ImGuiIO& io = ImGui::GetIO();
     ImGui::Text("FPS: %.1f", io.Framerate);
 
+    // UI scale (DPI) controls
+    {
+        // Slider controls the global scale from 50% .. 200%
+        float uiScaleTmp = g_UiScale;
+        ImGui::SetNextItemWidth(ImGui::CalcTextSize("000.00x").x + ImGui::GetStyle().FramePadding.x * 6.0f);
+        if (ImGui::SliderFloat("UI scale", &uiScaleTmp, 0.50f, 2.00f, "%.2fx", ImGuiSliderFlags_AlwaysClamp)) {
+            g_UiScale = uiScaleTmp;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("90%"))  g_UiScale = 0.90f;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("100%")) g_UiScale = 1.00f;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("125%")) g_UiScale = 1.25f;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("150%")) g_UiScale = 1.50f;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("200%")) g_UiScale = 2.00f;
+
+        // Apply font-only scaling to avoid breaking spacing/padding
+        io.FontGlobalScale = g_UiScale;
+    }
+
     // Toggle overlay console
     ImGui::Checkbox("Show Console", &g_ShowOverlayConsole);
+
+    ImGui::SameLine();
+    // Hide HUD toggle
+    {
+        static bool s_hideHud = false;
+        if (ImGui::Checkbox("Hide HUD", &s_hideHud)) {
+            if (s_hideHud) Afx_ExecClientCmd("cl_drawhud 0");
+            else           Afx_ExecClientCmd("cl_drawhud 1");
+        }
+    }
 
     // Sequencer toggle
     static bool g_ShowSequencer = false;
     ImGui::Checkbox("Show Sequencer", &g_ShowSequencer);
+
+    ImGui::SameLine();
+    // Only Deathnotices toggle
+    {
+        static bool s_onlyDeathnotices = false;
+        if (ImGui::Checkbox("Only Deathnotices", &s_onlyDeathnotices)) {
+            if (s_onlyDeathnotices) Afx_ExecClientCmd("cl_draw_only_deathnotices 1");
+            else                    Afx_ExecClientCmd("cl_draw_only_deathnotices 0");
+        }
+    }
 
     // Campath information (if any)
     extern CamPath g_CamPath;
@@ -383,22 +482,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             advancedfx::Warning("Overlay: No campath points available.\n");
         }
     }
-    // Interpolation toggle: Cubic (default) <-> Linear
-    ImGui::SameLine();
-    {
-        static bool s_interpCubic = true; // default UI state: Cubic
-        const char* interpLabel = s_interpCubic ? "Interp: Cubic" : "Interp: Linear";
-        if (ImGui::Button(interpLabel)) {
-            s_interpCubic = !s_interpCubic;
-            if (s_interpCubic) {
-                Afx_ExecClientCmd(
-                    "mirv_campath edit interp position default; mirv_campath edit interp rotation default; mirv_campath edit interp fov default");
-            } else {
-                Afx_ExecClientCmd(
-                    "mirv_campath edit interp position linear; mirv_campath edit interp rotation sLinear; mirv_campath edit interp fov linear");
-            }
-        }
-    }
+
     // Recording FPS override and screen enable
     {
         static char s_fpsText[64] = {0};
@@ -428,6 +512,23 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     advancedfx::Message("Overlay: mirv_streams record fps %.2f\n", v);
                 } else {
                     advancedfx::Warning("Overlay: Invalid FPS value.\n");
+                }
+            }
+        }
+
+        // Interpolation toggle: Cubic (default) <-> Linear
+        ImGui::SameLine();
+        {
+            static bool s_interpCubic = true; // default UI state: Cubic
+            const char* interpLabel = s_interpCubic ? "Interp: Cubic" : "Interp: Linear";
+            if (ImGui::Button(interpLabel)) {
+                s_interpCubic = !s_interpCubic;
+                if (s_interpCubic) {
+                    Afx_ExecClientCmd(
+                        "mirv_campath edit interp position default; mirv_campath edit interp rotation default; mirv_campath edit interp fov default");
+                } else {
+                    Afx_ExecClientCmd(
+                        "mirv_campath edit interp position linear; mirv_campath edit interp rotation sLinear; mirv_campath edit interp fov linear");
                 }
             }
         }
@@ -570,15 +671,19 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             float trackRowH    = ImGui::GetFrameHeight()*1.2f;
             float margins      = st.ItemSpacing.y + st.FramePadding.y;
 
-            // Add extra space for per-keyframe labels drawn below the markers
+            // Add extra space for per-keyframe labels drawn below the markers.
+            // Account for font global scale since layout metrics don't grow with it.
             float labelExtra   = ImGui::GetTextLineHeightWithSpacing();
-            float desiredSeqH  = headerH + trackCount * trackRowH + margins + labelExtra;
+            float fontScale    = ImMax(1.0f, ImGui::GetIO().FontGlobalScale);
+            float desiredSeqH  = headerH + trackCount * trackRowH + margins + labelExtra * fontScale;
 
             // Clamp: at least 100 px, at most what’s left after the controls row
-            float maxSeqHAvail = ImMax(55.0f, availY - btnRowH);
-            float seqH         = ImClamp(desiredSeqH, 70.0f, maxSeqHAvail);
+            float minSeqH      = 85.0f * fontScale; // ensure room for labels at higher DPI
+            float maxSeqHAvail = ImMax(minSeqH, ImMax(55.0f, availY - btnRowH));
+            float seqH         = ImClamp(desiredSeqH, minSeqH, maxSeqHAvail);
 
-            ImGui::BeginChild("seq_child", ImVec2(0.0f, 90.0f), false); // scrolling lives inside this child
+            // Use dynamic sequencer height so labels have space across DPI scales
+            ImGui::BeginChild("seq_child", ImVec2(0.0f, seqH), false); // scrolling lives inside this child
             {
                 const ImVec2 seqSize(ImGui::GetContentRegionAvail().x, 0.0f);
                 const ImGuiNeoSequencerFlags seqFlags =
@@ -840,6 +945,10 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 Afx_ExecClientCmd("demo_togglepause");
             }
             ImGui::SameLine();
+            if (ImGui::SmallButton("0.2x")) {
+                Afx_ExecClientCmd("demo_timescale 0.2");
+            }
+            ImGui::SameLine();
             if (ImGui::SmallButton("0.5x")) {
                 Afx_ExecClientCmd("demo_timescale 0.5");
             }
@@ -852,9 +961,12 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 Afx_ExecClientCmd("demo_timescale 2");
             }
             ImGui::SameLine();
+            if (ImGui::SmallButton("5x")) {
+                Afx_ExecClientCmd("demo_timescale 5");
+            }
+            ImGui::SameLine();
             ImGui::Text("Start: %d  End: %d  Current: %d",
                         (int)s_seqStart, (int)s_seqEnd, (int)s_seqFrame);
-
 
             // Follow current tick to keep pointer in view when not interacting.
             // If users drag the pointer, we respect their new position and seek.
