@@ -38,6 +38,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <filesystem>
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -88,6 +89,33 @@ static bool  g_uiKsensInit = false; static float  g_uiKsens = 1.0f;  static floa
 // - We keep previous value to scale relatively and avoid cumulative drift
 static float g_UiScale = 1.0f;
 
+// Persisted last-used directories (saved in imgui.ini via custom settings handler)
+struct OverlayPathsSettings {
+    std::string campathDir;
+    std::string recordBrowseDir;
+};
+static OverlayPathsSettings g_OverlayPaths;
+
+// ImGui ini handler for persisting overlay paths
+static void* OverlayPaths_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
+    return (0 == strcmp(name, "Paths")) ? (void*)&g_OverlayPaths : nullptr;
+}
+static void OverlayPaths_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line) {
+    OverlayPathsSettings* s = (OverlayPathsSettings*)entry;
+    const char* eq = strchr(line, '=');
+    if (!eq) return;
+    std::string key(line, eq - line);
+    std::string val(eq + 1);
+    if (key == "CampathDir") s->campathDir = val;
+    else if (key == "RecordBrowseDir") s->recordBrowseDir = val;
+}
+static void OverlayPaths_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out_buf) {
+    out_buf->appendf("[%s][%s]\n", handler->TypeName, "Paths");
+    if (!g_OverlayPaths.campathDir.empty()) out_buf->appendf("CampathDir=%s\n", g_OverlayPaths.campathDir.c_str());
+    if (!g_OverlayPaths.recordBrowseDir.empty()) out_buf->appendf("RecordBrowseDir=%s\n", g_OverlayPaths.recordBrowseDir.c_str());
+    out_buf->append("\n");
+}
+
 OverlayDx11::OverlayDx11(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* swapchain, HWND hwnd)
     : m_Device(device), m_Context(context), m_Swapchain(swapchain), m_Hwnd(hwnd) {}
 
@@ -107,6 +135,21 @@ bool OverlayDx11::Initialize() {
     if (!ImGui_ImplWin32_Init(m_Hwnd)) return false;
     if (!ImGui_ImplDX11_Init(m_Device, m_Context)) return false;
     advancedfx::Message("Overlay: renderer=DX11\n");
+
+    // Register custom ImGui ini settings handler for last-used directories
+    if (!ImGui::FindSettingsHandler("HLAEOverlayPaths")) {
+        ImGuiSettingsHandler ini;
+        ini.TypeName = "HLAEOverlayPaths";
+        ini.TypeHash = ImHashStr(ini.TypeName);
+        ini.ReadOpenFn = OverlayPaths_ReadOpen;
+        ini.ReadLineFn = OverlayPaths_ReadLine;
+        ini.WriteAllFn = OverlayPaths_WriteAll;
+        ImGui::AddSettingsHandler(&ini);
+        ImGuiIO& io2 = ImGui::GetIO();
+        if (io2.IniFilename && io2.IniFilename[0]) {
+            ImGui::LoadIniSettingsFromDisk(io2.IniFilename);
+        }
+    }
 
     // Route Win32 messages to ImGui when visible
     if (!Overlay::Get().GetInputRouter()) {
@@ -344,6 +387,68 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         Afx_ExecClientCmd("mirv_campath edit interp position linear; mirv_campath edit interp rotation sLinear; mirv_campath edit interp fov linear");
                     }
                 }
+                // File operations next to Interp button
+                ImGui::SameLine();
+                {
+                    // Persistent file dialogs for load/save
+                    static ImGui::FileBrowser s_campathOpenDialog(
+                        ImGuiFileBrowserFlags_CloseOnEsc |
+                        ImGuiFileBrowserFlags_EditPathString |
+                        ImGuiFileBrowserFlags_CreateNewDir
+                    );
+                    static ImGui::FileBrowser s_campathSaveDialog(
+                        ImGuiFileBrowserFlags_CloseOnEsc |
+                        ImGuiFileBrowserFlags_EditPathString |
+                        ImGuiFileBrowserFlags_CreateNewDir |
+                        ImGuiFileBrowserFlags_EnterNewFilename
+                    );
+                    static bool s_dialogsInit = false;
+                    if (!s_dialogsInit) {
+                        s_campathOpenDialog.SetTitle("Load Campath");
+                        s_campathSaveDialog.SetTitle("Save Campath");
+                        s_dialogsInit = true;
+                    }
+
+                    // Load Campath button
+                    if (ImGui::Button("Load Campath")) {
+                        if (!g_OverlayPaths.campathDir.empty())
+                            s_campathOpenDialog.SetDirectory(g_OverlayPaths.campathDir);
+                        s_campathOpenDialog.Open();
+                    }
+                    ImGui::SameLine();
+                    // Save Campath button
+                    if (ImGui::Button("Save Campath")) {
+                        if (!g_OverlayPaths.campathDir.empty())
+                            s_campathSaveDialog.SetDirectory(g_OverlayPaths.campathDir);
+                        s_campathSaveDialog.Open();
+                    }
+
+                    // Render dialogs
+                    s_campathOpenDialog.Display();
+                    s_campathSaveDialog.Display();
+
+                    // Handle selections
+                    if (s_campathOpenDialog.HasSelected()) {
+                        const std::string path = s_campathOpenDialog.GetSelected().string();
+                        char cmd[2048];
+                        snprintf(cmd, sizeof(cmd), "mirv_campath load \"%s\"", path.c_str());
+                        Afx_ExecClientCmd(cmd);
+                        // remember directory
+                        try { g_OverlayPaths.campathDir = std::filesystem::path(path).parent_path().string(); } catch(...) {}
+                        ImGui::MarkIniSettingsDirty();
+                        s_campathOpenDialog.ClearSelected();
+                    }
+                    if (s_campathSaveDialog.HasSelected()) {
+                        const std::string path = s_campathSaveDialog.GetSelected().string();
+                        char cmd[2048];
+                        snprintf(cmd, sizeof(cmd), "mirv_campath save \"%s\"", path.c_str());
+                        Afx_ExecClientCmd(cmd);
+                        // remember directory
+                        try { g_OverlayPaths.campathDir = std::filesystem::path(path).parent_path().string(); } catch(...) {}
+                        ImGui::MarkIniSettingsDirty();
+                        s_campathSaveDialog.ClearSelected();
+                    }
+                }
             }
 
             // Sequencer toggle
@@ -383,7 +488,11 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 ImGui::SetNextItemWidth(boxW);
                 ImGui::InputText("##recname", s_recName, sizeof(s_recName));
                 ImGui::SameLine(0.0f, gap1);
-                if (ImGui::Button("Browse...##recname")) { dirDialog.Open(); }
+                if (ImGui::Button("Browse...##recname")) {
+                    if (!g_OverlayPaths.recordBrowseDir.empty())
+                        dirDialog.SetDirectory(g_OverlayPaths.recordBrowseDir);
+                    dirDialog.Open();
+                }
                 ImGui::SameLine(0.0f, gap2);
                 if (ImGui::Button("Set##recname")) {
                     AfxStreams_SetRecordNameUtf8(s_recName);
@@ -395,6 +504,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     strncpy_s(s_recName, selected.c_str(), _TRUNCATE);
                     AfxStreams_SetRecordNameUtf8(s_recName);
                     advancedfx::Message("Overlay: mirv_streams record name set via browser.\n");
+                    // remember directory
+                    g_OverlayPaths.recordBrowseDir = s_recName;
+                    ImGui::MarkIniSettingsDirty();
                     dirDialog.ClearSelected();
                 }
             }
