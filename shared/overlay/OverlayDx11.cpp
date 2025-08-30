@@ -45,6 +45,8 @@ LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARA
 // Recording/Take folder accessor from streams module
 extern const wchar_t* AfxStreams_GetTakeDir();
 extern const char* AfxStreams_GetRecordNameUtf8();
+// Global campath instance (provided by shared CamPath module)
+extern CamPath g_CamPath;
 #endif
 
 namespace advancedfx { namespace overlay {
@@ -69,6 +71,11 @@ static bool g_ShowOverlayConsole = false;
 static std::vector<std::string> g_OverlayConsoleLog;
 static char g_OverlayConsoleInput[512] = {0};
 static bool g_OverlayConsoleScrollToBottom = false;
+// Sequencer toggle state (shared between tabs and window)
+static bool g_ShowSequencer = false;
+
+// Helper: constrain window height while allowing horizontal resize
+// (removed: height clamp helper; switching to live auto-height adjustment per-frame)
 
 // UI state mirrored for Mirv camera sliders so external changes (e.g., wheel in passthrough)
 // stay in sync with the controls below.
@@ -253,363 +260,287 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     ImGui::GetForegroundDrawList()->AddText(ImVec2(8,8), IM_COL32(255,255,255,255), "HLAE Overlay 0.1", nullptr);
 
     // Minimal window content per requirements
-    ImGui::Begin("HLAE Overlay");
-    // Enable camera path preview toggle
-    extern CCampathDrawer g_CampathDrawer;
-    static bool enable_preview = false;
-    static bool preview_inited = false;
-    if (!preview_inited) { enable_preview = g_CampathDrawer.Draw_get(); preview_inited = true; }
-    if (ImGui::Checkbox("Enable camera path preview", &enable_preview)) {
-        g_CampathDrawer.Draw_set(enable_preview);
-        advancedfx::Message("Overlay: mirv_campath draw enabled %d\n", enable_preview ? 1 : 0);
-    }
-
-    // Record name (path) and Open recordings folder
-    {
-        static char s_recName[512] = {0};
-        static bool recInit = false;
-
-        // One persistent folder browser (folder-only, close on Esc, allow path edit & create folder)
-        static ImGui::FileBrowser dirDialog(
-            ImGuiFileBrowserFlags_SelectDirectory |
-            ImGuiFileBrowserFlags_CloseOnEsc |
-            ImGuiFileBrowserFlags_EditPathString |
-            ImGuiFileBrowserFlags_CreateNewDir
-        );
-
-        // Set dialog title once
-        static bool dialogInit = false;
-        if (!dialogInit) {
-            dirDialog.SetTitle("Select record folder");
-            dialogInit = true;
-        }
-
-        if (!recInit) {
-            const char* rn = AfxStreams_GetRecordNameUtf8();
-            if (rn) strncpy_s(s_recName, rn, _TRUNCATE);
-            recInit = true;
-        }
-
-        // Label + input + two buttons: "Browse..." and "Set"
-        ImGuiStyle& st = ImGui::GetStyle();
-        ImGui::TextUnformatted("Record path");
-        ImGui::SameLine(0.0f, st.ItemInnerSpacing.x);
-
-        float avail = ImGui::GetContentRegionAvail().x; // remaining after label
-        float btnBrowseW = ImGui::CalcTextSize("Browse...").x + st.FramePadding.x * 2.0f;
-        float btnSetW    = ImGui::CalcTextSize("Set").x       + st.FramePadding.x * 2.0f;
-        // spacing between input and first button, and between the two buttons
-        float gap1 = st.ItemInnerSpacing.x * 2.0f + 8.0f;
-        float gap2 = st.ItemInnerSpacing.x;
-
-        float boxW = avail - (btnBrowseW + btnSetW + gap1 + gap2);
-        if (boxW < 150.0f) boxW = 150.0f;                           // reasonable minimum
-        if (boxW > avail - (btnBrowseW + btnSetW + gap1 + gap2))
-            boxW = avail - (btnBrowseW + btnSetW + gap1 + gap2);
-        if (boxW < 50.0f) boxW = 50.0f;                             // last resort on very small windows
-
-        ImGui::SetNextItemWidth(boxW);
-        ImGui::InputText("##recname", s_recName, sizeof(s_recName));
-
-        ImGui::SameLine(0.0f, gap1);
-        if (ImGui::Button("Browse...##recname")) {
-            // Optional: if you want to start from current s_recName:
-            // Depending on your version of imgui-filebrowser, SetPwd() may be available.
-            // Example (guard or remove if your version lacks it):
-            // std::error_code ec;
-            // if (std::filesystem::is_directory(s_recName, ec)) dirDialog.SetPwd(s_recName);
-
-            dirDialog.Open();
-        }
-
-        ImGui::SameLine(0.0f, gap2);
-        if (ImGui::Button("Set##recname")) {
-            AfxStreams_SetRecordNameUtf8(s_recName);
-            advancedfx::Message("Overlay: mirv_streams record name set.\n");
-        }
-
-        // Render the dialog (should be called every frame)
-        dirDialog.Display();
-
-        // If the user picked a folder, copy it into s_recName and apply immediately
-        if (dirDialog.HasSelected()) {
-            const std::string selected = dirDialog.GetSelected().string();
-            strncpy_s(s_recName, selected.c_str(), _TRUNCATE);
-
-            // If you want auto-apply on selection:
-            AfxStreams_SetRecordNameUtf8(s_recName);
-            advancedfx::Message("Overlay: mirv_streams record name set via browser.\n");
-
-            dirDialog.ClearSelected();
-        }
-    }
-
-    // Open recordings folder (current take dir)
-    if (ImGui::Button("Open recordings folder")) {
-        // Prefer explicit record name folder; if empty, fallback to last take dir
-        const char* recUtf8 = AfxStreams_GetRecordNameUtf8();
-        std::wstring wPath;
-        if (recUtf8 && recUtf8[0]) {
-            int wlen = MultiByteToWideChar(CP_UTF8, 0, recUtf8, -1, nullptr, 0);
-            if (wlen > 0) {
-                wPath.resize((size_t)wlen - 1);
-                MultiByteToWideChar(CP_UTF8, 0, recUtf8, -1, &wPath[0], wlen);
+    // Make window non-resizable and auto-size to its content/DPI
+    ImGui::Begin("HLAE Overlay", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
+    if (ImGui::BeginTabBar("##hlae_tabs")) {
+        // Campath
+        if (ImGui::BeginTabItem("Campath")) {
+            // Enable camera path preview toggle
+            extern CCampathDrawer g_CampathDrawer;
+            static bool enable_preview = false;
+            static bool preview_inited = false;
+            if (!preview_inited) { enable_preview = g_CampathDrawer.Draw_get(); preview_inited = true; }
+            if (ImGui::Checkbox("Enable camera path preview", &enable_preview)) {
+                g_CampathDrawer.Draw_set(enable_preview);
+                advancedfx::Message("Overlay: mirv_campath draw enabled %d\n", enable_preview ? 1 : 0);
             }
-        }
-        if (wPath.empty()) {
-            const wchar_t* takeDir = AfxStreams_GetTakeDir();
-            if (takeDir && takeDir[0]) wPath = takeDir;
-        }
-        if (!wPath.empty()) {
-            HINSTANCE r = ShellExecuteW(nullptr, L"open", wPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            if ((INT_PTR)r <= 32) {
-                ShellExecuteW(nullptr, L"open", L"explorer.exe", wPath.c_str(), nullptr, SW_SHOWNORMAL);
+
+            // Campath information (if any)
+            extern CamPath g_CamPath;
+            size_t cpCount = g_CamPath.GetSize();
+            if (cpCount > 0) {
+                double seconds = 0.0;
+                if (cpCount >= 2) seconds = g_CamPath.GetDuration();
+                float tickInterval = g_MirvTime.interval_per_tick_get();
+                int ticks = (tickInterval > 0.0f) ? (int)round(seconds / (double)tickInterval) : 0;
+                ImGui::Separator();
+                ImGui::Text("Campath: points=%u, length=%d ticks (%.2f s)", (unsigned)cpCount, ticks, seconds);
             }
-        } else {
-            advancedfx::Warning("Overlay: No recordings folder set. Use 'mirv_streams record name <path>'.\n");
-        }
-    }
-    // FPS readout (ImGui IO updated in Overlay::UpdateDeltaTime via Framerate calc)
-    ImGuiIO& io = ImGui::GetIO();
-    ImGui::Text("FPS: %.1f", io.Framerate);
 
-    // UI scale (DPI) controls
-    {
-        // Slider controls the global scale from 50% .. 200%
-        float uiScaleTmp = g_UiScale;
-        ImGui::SetNextItemWidth(ImGui::CalcTextSize("000.00x").x + ImGui::GetStyle().FramePadding.x * 6.0f);
-        if (ImGui::SliderFloat("UI scale", &uiScaleTmp, 0.50f, 2.00f, "%.2fx", ImGuiSliderFlags_AlwaysClamp)) {
-            g_UiScale = uiScaleTmp;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("90%"))  g_UiScale = 0.90f;
-        ImGui::SameLine();
-        if (ImGui::SmallButton("100%")) g_UiScale = 1.00f;
-        ImGui::SameLine();
-        if (ImGui::SmallButton("125%")) g_UiScale = 1.25f;
-        ImGui::SameLine();
-        if (ImGui::SmallButton("150%")) g_UiScale = 1.50f;
-        ImGui::SameLine();
-        if (ImGui::SmallButton("200%")) g_UiScale = 2.00f;
-
-        // Apply font-only scaling to avoid breaking spacing/padding
-        io.FontGlobalScale = g_UiScale;
-    }
-
-    // Toggle overlay console
-    ImGui::Checkbox("Show Console", &g_ShowOverlayConsole);
-
-    ImGui::SameLine();
-    // Hide HUD toggle
-    {
-        static bool s_hideHud = false;
-        if (ImGui::Checkbox("Hide HUD", &s_hideHud)) {
-            if (s_hideHud) Afx_ExecClientCmd("cl_drawhud 0");
-            else           Afx_ExecClientCmd("cl_drawhud 1");
-        }
-    }
-
-    // Sequencer toggle
-    static bool g_ShowSequencer = false;
-    ImGui::Checkbox("Show Sequencer", &g_ShowSequencer);
-
-    ImGui::SameLine();
-    // Only Deathnotices toggle
-    {
-        static bool s_onlyDeathnotices = false;
-        if (ImGui::Checkbox("Only Deathnotices", &s_onlyDeathnotices)) {
-            if (s_onlyDeathnotices) Afx_ExecClientCmd("cl_draw_only_deathnotices 1");
-            else                    Afx_ExecClientCmd("cl_draw_only_deathnotices 0");
-        }
-    }
-
-    // Campath information (if any)
-    extern CamPath g_CamPath;
-    size_t cpCount = g_CamPath.GetSize();
-    if (cpCount > 0) {
-        double seconds = 0.0;
-        if (cpCount >= 2) {
-            // Use reported duration when 2+ points exist
-            seconds = g_CamPath.GetDuration();
-        }
-        float tickInterval = g_MirvTime.interval_per_tick_get();
-        int ticks = (tickInterval > 0.0f) ? (int)round(seconds / (double)tickInterval) : 0;
-        ImGui::Separator();
-        ImGui::Text("Campath: points=%u, length=%d ticks (%.2f s)", (unsigned)cpCount, ticks, seconds);
-    }
-
-    // Campath controls
-    bool campathEnabled = g_CamPath.Enabled_get();
-    if (ImGui::Checkbox("Campath enabled", &campathEnabled)) {
-        g_CamPath.Enabled_set(campathEnabled);
-        advancedfx::Message("Overlay: mirv_campath enabled %d\n", campathEnabled ? 1 : 0);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Add point")) {
-        double x,y,z,rx,ry,rz; float fov;
-        Afx_GetLastCameraData(x,y,z,rx,ry,rz,fov);
-        double t = g_MirvTime.curtime_get() - g_CamPath.GetOffset();
-        g_CamPath.Add(t, CamPathValue(x,y,z, rx, ry, rz, fov));
-        advancedfx::Message("Overlay: mirv_campath add (t=%.3f)\n", t);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Clear")) {
-        g_CamPath.Clear();
-        advancedfx::Message("Overlay: mirv_campath clear\n");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Goto Start")) {
-        if (g_CamPath.GetSize() > 0) {
-            double firstT = g_CamPath.GetBegin().GetTime();
-            double targetClientTime = g_CamPath.GetOffset() + firstT;
-            double curTime = g_MirvTime.curtime_get();
-            double demoNow = 0.0;
-            float ipt = g_MirvTime.interval_per_tick_get();
-            int targetTick = 0;
-            if (ipt > 0.0f && g_MirvTime.GetCurrentDemoTime(demoNow)) {
-                double targetDemoTime = targetClientTime - (curTime - demoNow);
-                targetTick = (int)round(targetDemoTime / (double)ipt);
-                Afx_GotoDemoTick(targetTick);
-                advancedfx::Message("Overlay: mirv_skip tick to %d\n", targetTick);
-            } else if (ipt > 0.0f) {
-                targetTick = (int)round(targetClientTime / (double)ipt);
-                Afx_GotoDemoTick(targetTick);
-                advancedfx::Message("Overlay: mirv_skip tick to %d (approx)\n", targetTick);
-            } else {
-                advancedfx::Warning("Overlay: Failed to compute demo tick for campath start.\n");
+            // Campath controls
+            bool campathEnabled = g_CamPath.Enabled_get();
+            if (ImGui::Checkbox("Campath enabled", &campathEnabled)) {
+                g_CamPath.Enabled_set(campathEnabled);
+                advancedfx::Message("Overlay: mirv_campath enabled %d\n", campathEnabled ? 1 : 0);
             }
-        } else {
-            advancedfx::Warning("Overlay: No campath points available.\n");
-        }
-    }
-
-    // Recording FPS override and screen enable
-    {
-        static char s_fpsText[64] = {0};
-        static bool fpsInit = false;
-        if (!fpsInit) {
-            if (AfxStreams_GetOverrideFps()) {
-                snprintf(s_fpsText, sizeof(s_fpsText), "%.2f", AfxStreams_GetOverrideFpsValue());
-            } else {
-                s_fpsText[0] = 0;
+            ImGui::SameLine();
+            if (ImGui::Button("Add point")) {
+                double x,y,z,rx,ry,rz; float fov;
+                Afx_GetLastCameraData(x,y,z,rx,ry,rz,fov);
+                double t = g_MirvTime.curtime_get() - g_CamPath.GetOffset();
+                g_CamPath.Add(t, CamPathValue(x,y,z, rx, ry, rz, fov));
+                advancedfx::Message("Overlay: mirv_campath add (t=%.3f)\n", t);
             }
-            fpsInit = true;
-        }
-        // Fixed-size FPS box to fit at least 5 characters
-        ImGuiStyle& st2 = ImGui::GetStyle();
-        float fiveChars = ImGui::CalcTextSize("00000").x + st2.FramePadding.x * 2.0f + 2.0f;
-        ImGui::SetNextItemWidth(fiveChars);
-        ImGui::InputText("Record FPS", s_fpsText, sizeof(s_fpsText));
-        ImGui::SameLine(0.0f, st2.ItemInnerSpacing.x);
-        if (ImGui::Button("Apply FPS")) {
-            if (s_fpsText[0] == 0) {
-                AfxStreams_SetOverrideFpsDefault();
-                advancedfx::Message("Overlay: mirv_streams record fps default\n");
-            } else {
-                float v = (float)atof(s_fpsText);
-                if (v > 0.0f) {
-                    AfxStreams_SetOverrideFpsValue(v);
-                    advancedfx::Message("Overlay: mirv_streams record fps %.2f\n", v);
+            ImGui::SameLine();
+            if (ImGui::Button("Clear")) {
+                g_CamPath.Clear();
+                advancedfx::Message("Overlay: mirv_campath clear\n");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Goto Start")) {
+                if (g_CamPath.GetSize() > 0) {
+                    double firstT = g_CamPath.GetBegin().GetTime();
+                    double targetClientTime = g_CamPath.GetOffset() + firstT;
+                    double curTime = g_MirvTime.curtime_get();
+                    double demoNow = 0.0;
+                    float ipt = g_MirvTime.interval_per_tick_get();
+                    int targetTick = 0;
+                    if (ipt > 0.0f && g_MirvTime.GetCurrentDemoTime(demoNow)) {
+                        double targetDemoTime = targetClientTime - (curTime - demoNow);
+                        targetTick = (int)round(targetDemoTime / (double)ipt);
+                        Afx_GotoDemoTick(targetTick);
+                        advancedfx::Message("Overlay: mirv_skip tick to %d\n", targetTick);
+                    } else if (ipt > 0.0f) {
+                        targetTick = (int)round(targetClientTime / (double)ipt);
+                        Afx_GotoDemoTick(targetTick);
+                        advancedfx::Message("Overlay: mirv_skip tick to %d (approx)\n", targetTick);
+                    } else {
+                        advancedfx::Warning("Overlay: Failed to compute demo tick for campath start.\n");
+                    }
                 } else {
-                    advancedfx::Warning("Overlay: Invalid FPS value.\n");
+                    advancedfx::Warning("Overlay: No campath points available.\n");
                 }
             }
-        }
 
-        // Interpolation toggle: Cubic (default) <-> Linear
-        ImGui::SameLine();
-        {
-            static bool s_interpCubic = true; // default UI state: Cubic
-            const char* interpLabel = s_interpCubic ? "Interp: Cubic" : "Interp: Linear";
-            if (ImGui::Button(interpLabel)) {
-                s_interpCubic = !s_interpCubic;
-                if (s_interpCubic) {
-                    Afx_ExecClientCmd(
-                        "mirv_campath edit interp position default; mirv_campath edit interp rotation default; mirv_campath edit interp fov default");
-                } else {
-                    Afx_ExecClientCmd(
-                        "mirv_campath edit interp position linear; mirv_campath edit interp rotation sLinear; mirv_campath edit interp fov linear");
+            // Interpolation toggle: Cubic (default) <-> Linear
+            {
+                static bool s_interpCubic = true;
+                const char* interpLabel = s_interpCubic ? "Interp: Cubic" : "Interp: Linear";
+                if (ImGui::Button(interpLabel)) {
+                    s_interpCubic = !s_interpCubic;
+                    if (s_interpCubic) {
+                        Afx_ExecClientCmd("mirv_campath edit interp position default; mirv_campath edit interp rotation default; mirv_campath edit interp fov default");
+                    } else {
+                        Afx_ExecClientCmd("mirv_campath edit interp position linear; mirv_campath edit interp rotation sLinear; mirv_campath edit interp fov linear");
+                    }
                 }
             }
+
+            // Sequencer toggle
+            ImGui::Checkbox("Show Sequencer", &g_ShowSequencer);
+
+            ImGui::EndTabItem();
         }
 
-        bool screenEnabled = AfxStreams_GetRecordScreenEnabled();
-        if (ImGui::Checkbox("Record screen enabled", &screenEnabled)) {
-            AfxStreams_SetRecordScreenEnabled(screenEnabled);
+        // Recording
+        if (ImGui::BeginTabItem("Recording")) {
+            // Record name (path) and Open recordings folder
+            {
+                static char s_recName[512] = {0};
+                static bool recInit = false;
+                static ImGui::FileBrowser dirDialog(
+                    ImGuiFileBrowserFlags_SelectDirectory |
+                    ImGuiFileBrowserFlags_CloseOnEsc |
+                    ImGuiFileBrowserFlags_EditPathString |
+                    ImGuiFileBrowserFlags_CreateNewDir
+                );
+                static bool dialogInit = false;
+                if (!dialogInit) { dirDialog.SetTitle("Select record folder"); dialogInit = true; }
+                if (!recInit) { const char* rn = AfxStreams_GetRecordNameUtf8(); if (rn) strncpy_s(s_recName, rn, _TRUNCATE); recInit = true; }
+
+                ImGuiStyle& st = ImGui::GetStyle();
+                ImGui::TextUnformatted("Record path");
+                ImGui::SameLine(0.0f, st.ItemInnerSpacing.x);
+                float avail = ImGui::GetContentRegionAvail().x;
+                float btnBrowseW = ImGui::CalcTextSize("Browse...").x + st.FramePadding.x * 2.0f;
+                float btnSetW    = ImGui::CalcTextSize("Set").x       + st.FramePadding.x * 2.0f;
+                float gap1 = st.ItemInnerSpacing.x * 2.0f + 8.0f;
+                float gap2 = st.ItemInnerSpacing.x;
+                float boxW = avail - (btnBrowseW + btnSetW + gap1 + gap2);
+                if (boxW < 150.0f) boxW = 150.0f;
+                if (boxW > avail - (btnBrowseW + btnSetW + gap1 + gap2)) boxW = avail - (btnBrowseW + btnSetW + gap1 + gap2);
+                if (boxW < 50.0f) boxW = 50.0f;
+                ImGui::SetNextItemWidth(boxW);
+                ImGui::InputText("##recname", s_recName, sizeof(s_recName));
+                ImGui::SameLine(0.0f, gap1);
+                if (ImGui::Button("Browse...##recname")) { dirDialog.Open(); }
+                ImGui::SameLine(0.0f, gap2);
+                if (ImGui::Button("Set##recname")) {
+                    AfxStreams_SetRecordNameUtf8(s_recName);
+                    advancedfx::Message("Overlay: mirv_streams record name set.\n");
+                }
+                dirDialog.Display();
+                if (dirDialog.HasSelected()) {
+                    const std::string selected = dirDialog.GetSelected().string();
+                    strncpy_s(s_recName, selected.c_str(), _TRUNCATE);
+                    AfxStreams_SetRecordNameUtf8(s_recName);
+                    advancedfx::Message("Overlay: mirv_streams record name set via browser.\n");
+                    dirDialog.ClearSelected();
+                }
+            }
+
+            if (ImGui::Button("Open recordings folder")) {
+                const char* recUtf8 = AfxStreams_GetRecordNameUtf8();
+                std::wstring wPath;
+                if (recUtf8 && recUtf8[0]) {
+                    int wlen = MultiByteToWideChar(CP_UTF8, 0, recUtf8, -1, nullptr, 0);
+                    if (wlen > 0) { wPath.resize((size_t)wlen - 1); MultiByteToWideChar(CP_UTF8, 0, recUtf8, -1, &wPath[0], wlen); }
+                }
+                if (wPath.empty()) {
+                    const wchar_t* takeDir = AfxStreams_GetTakeDir();
+                    if (takeDir && takeDir[0]) wPath = takeDir;
+                }
+                if (!wPath.empty()) {
+                    HINSTANCE r = ShellExecuteW(nullptr, L"open", wPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    if ((INT_PTR)r <= 32) { ShellExecuteW(nullptr, L"open", L"explorer.exe", wPath.c_str(), nullptr, SW_SHOWNORMAL); }
+                } else {
+                    advancedfx::Warning("Overlay: No recordings folder set. Use 'mirv_streams record name <path>'.\n");
+                }
+            }
+
+            // Recording FPS override and screen enable
+            {
+                static char s_fpsText[64] = {0};
+                static bool fpsInit = false;
+                if (!fpsInit) {
+                    if (AfxStreams_GetOverrideFps()) snprintf(s_fpsText, sizeof(s_fpsText), "%.2f", AfxStreams_GetOverrideFpsValue());
+                    else s_fpsText[0] = 0; fpsInit = true;
+                }
+                ImGuiStyle& st2 = ImGui::GetStyle();
+                float fiveChars = ImGui::CalcTextSize("00000").x + st2.FramePadding.x * 2.0f + 2.0f;
+                ImGui::SetNextItemWidth(fiveChars);
+                ImGui::InputText("Record FPS", s_fpsText, sizeof(s_fpsText));
+                ImGui::SameLine(0.0f, st2.ItemInnerSpacing.x);
+                if (ImGui::Button("Apply FPS")) {
+                    if (s_fpsText[0] == 0) { AfxStreams_SetOverrideFpsDefault(); advancedfx::Message("Overlay: mirv_streams record fps default\n"); }
+                    else {
+                        float v = (float)atof(s_fpsText);
+                        if (v > 0.0f) { AfxStreams_SetOverrideFpsValue(v); advancedfx::Message("Overlay: mirv_streams record fps %.2f\n", v); }
+                        else { advancedfx::Warning("Overlay: Invalid FPS value.\n"); }
+                    }
+                }
+                bool screenEnabled = AfxStreams_GetRecordScreenEnabled();
+                if (ImGui::Checkbox("Record screen enabled", &screenEnabled)) { AfxStreams_SetRecordScreenEnabled(screenEnabled); }
+                ImGui::SameLine();
+                {
+                    static bool s_toggleXray = true;
+                    const char* xrayLabel = s_toggleXray ? "Disable X-Ray" : "Enable X-Ray";
+                    if (ImGui::Button(xrayLabel)) {
+                        s_toggleXray = !s_toggleXray;
+                        if (s_toggleXray) {
+                            Afx_ExecClientCmd("spec_show_xray 1");
+                        } else {
+                            Afx_ExecClientCmd("spec_show_xray 0");
+                        }
+                    }
+                }
+            }
+
+            static bool s_hideHud = false;
+            if (ImGui::Checkbox("Hide HUD", &s_hideHud)) {
+                if (s_hideHud) Afx_ExecClientCmd("cl_drawhud 0"); else Afx_ExecClientCmd("cl_drawhud 1");
+            }
+            ImGui::SameLine();
+            static bool s_onlyDeathnotices = false;
+            if (ImGui::Checkbox("Only Deathnotices", &s_onlyDeathnotices)) {
+                if (s_onlyDeathnotices) Afx_ExecClientCmd("cl_draw_only_deathnotices 1"); else Afx_ExecClientCmd("cl_draw_only_deathnotices 0");
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("FFmpeg profiles");
+            ImGui::SameLine();
+            static const char* s_selectedProfile = "Select profile...";
+            if (ImGui::BeginCombo("##ffmpeg_profiles", s_selectedProfile)) {
+                if (ImGui::Selectable("TGA Sequence")) { s_selectedProfile = "TGA Sequence"; Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings afxClassic;echo [Current Record Setting];echo afxClassic - �-��?Y .tga �>�%Ά�?�^-)" ); }
+                if (ImGui::Selectable("ProRes 4444")) { s_selectedProfile = "ProRes 4444"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg p0  "-c:v prores  -profile:v 4 {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings p0  ;echo [Current Record Setting];echo p0 - ProRes 4444)" ); }
+                if (ImGui::Selectable("ProRes 422 HQ")) { s_selectedProfile = "ProRes 422 HQ"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg phq "-c:v prores  -profile:v 3 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings phq ;echo [Current Record Setting];echo phq - ProRes 422 HQ)" ); }
+                if (ImGui::Selectable("ProRes 422")) { s_selectedProfile = "ProRes 422"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg p1  "-c:v prores  -profile:v 2 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings p1  ;echo [Current Record Setting];echo p1 - ProRes 422)" ); }
+                if (ImGui::Selectable("x264 Lossless")) { s_selectedProfile = "x264 Lossless"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg c0  "-c:v libx264 -preset 0 -qp  0  -g 120 -keyint_min 1 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings c0  ;echo [Current Record Setting];echo c0 - x264 �-��?Y)" ); }
+                if (ImGui::Selectable("x264 HQ")) { s_selectedProfile = "x264 HQ"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg c1  "-c:v libx264 -preset 1 -crf 4  -qmax 20 -g 120 -keyint_min 1 -pix_fmt yuv420p -x264-params ref=3:me=hex:subme=3:merange=12:b-adapt=1:aq-mode=2:aq-strength=0.9:no-fast-pskip=1 {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings c1  ;echo [Current Record Setting];echo c1 - x264 ��~�"����)" ); }
+                if (ImGui::Selectable("x265 Lossless")) { s_selectedProfile = "x265 Lossless"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg he0  "-c:v libx265 -x265-params no-sao=1 -preset 0 -lossless -g 120 -keyint_min 1 -pix_fmt yuv422p {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings he0 ;echo [Current Record Setting];echo he0 - x265 �-��?Y)" ); }
+                if (ImGui::Selectable("x265 HQ")) { s_selectedProfile = "x265 HQ"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg he1  "-c:v libx265 -x265-params no-sao=1 -preset 1 -crf 8  -qmax 20 -g 120 -keyint_min 1 -pix_fmt yuv422p {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings he1 ;echo [Current Record Setting];echo he1 - x265 ��~�"����)" ); }
+                ImGui::EndCombo();
+            }
+            ImGui::TextUnformatted("Depth Stream");
+            ImGui::SameLine();
+            static const char* s_selectedDepthProfile = "Disabled";
+            if (ImGui::BeginCombo("##depth_profiles", s_selectedDepthProfile)) {
+                if (ImGui::Selectable("Disabled")) { s_selectedDepthProfile = "Disabled"; Afx_ExecClientCmd(R"(mirv_streams remove ddepth; mirv_streams remove exr)" ); }
+                if (ImGui::Selectable("Default")) { s_selectedDepthProfile = "Default"; Afx_ExecClientCmd(R"(mirv_streams remove ddepth; mirv_streams remove exr; mirv_streams add depth ddepth)" ); }
+                if (ImGui::Selectable("EXR")) { s_selectedDepthProfile = "EXR"; Afx_ExecClientCmd(R"(mirv_streams remove ddepth; mirv_streams remove exr; mirv_streams add depth exr; mirv_streams edit exr depthMode linear; mirv_streams edit exr depthVal 0; mirv_streams edit exr depthValMax 0; mirv_streams edit exr depthChannels gray; mirv_streams edit exr captureType depthF; mirv_streams edit exr settings afxClassic);echo [Current Depth Setting];echo EXR)" ); }
+                if (ImGui::Selectable("ProRes 4444")) { s_selectedDepthProfile = "ProRes 4444"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg p0  "-c:v prores  -profile:v 4 {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams remove ddepth; mirv_streams remove exr;mirv_streams add depth ddepth; mirv_streams edit ddepth settings p0  ;echo [Current Depth Setting];echo p0 - ProRes 4444)" ); }
+                if (ImGui::Selectable("ProRes 422 HQ")) { s_selectedDepthProfile = "ProRes 422 HQ"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg phq "-c:v prores  -profile:v 3 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams remove ddepth; mirv_streams remove exr;mirv_streams add depth ddepth; mirv_streams edit ddepth settings phq ;echo [Current Depth Setting];echo phq - ProRes 422 HQ)" ); }
+                if (ImGui::Selectable("ProRes 422")) { s_selectedDepthProfile = "ProRes 422"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg p1  "-c:v prores  -profile:v 2 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams remove ddepth; mirv_streams remove exr;mirv_streams add depth ddepth; mirv_streams edit ddepth settings p1  ;echo [Current Depth Setting];echo p1 - ProRes 422)" ); }
+                if (ImGui::Selectable("x264 Lossless")) { s_selectedDepthProfile = "x264 Lossless"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg c0  "-c:v libx264 -preset 0 -qp  0  -g 120 -keyint_min 1 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams remove ddepth; mirv_streams remove exr;mirv_streams add depth ddepth; mirv_streams edit ddepth settings c0  ;echo [Current Depth Setting];echo c0 - x264 �-��?Y)" ); }
+                if (ImGui::Selectable("x264 HQ")) { s_selectedDepthProfile = "x264 HQ"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg c1  "-c:v libx264 -preset 1 -crf 4  -qmax 20 -g 120 -keyint_min 1 -pix_fmt yuv420p -x264-params ref=3:me=hex:subme=3:merange=12:b-adapt=1:aq-mode=2:aq-strength=0.9:no-fast-pskip=1 {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams remove ddepth; mirv_streams remove exr;mirv_streams add depth ddepth; mirv_streams edit ddepth settings c1  ;echo [Current Depth Setting];echo c1 - x264 ��~�"����)" ); }
+                if (ImGui::Selectable("x265 Lossless")) { s_selectedDepthProfile = "x265 Lossless"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg he0  "-c:v libx265 -x265-params no-sao=1 -preset 0 -lossless -g 120 -keyint_min 1 -pix_fmt yuv422p {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams remove ddepth; mirv_streams remove exr;mirv_streams add depth ddepth; mirv_streams edit ddepth settings he0 ;echo [Current Depth Setting];echo he0 - x265 �-��?Y)" ); }
+                if (ImGui::Selectable("x265 HQ")) { s_selectedDepthProfile = "x265 HQ"; Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg he1  "-c:v libx265 -x265-params no-sao=1 -preset 1 -crf 8  -qmax 20 -g 120 -keyint_min 1 -pix_fmt yuv422p {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")"); Afx_ExecClientCmd(R"(mirv_streams remove ddepth; mirv_streams remove exr;mirv_streams add depth ddepth; mirv_streams edit ddepth settings he1 ;echo [Current Depth Setting];echo he1 - x265 ��~�"����)" ); }
+                ImGui::EndCombo();
+            }
+
+            if (ImGui::Button("Start Recording")) { Afx_ExecClientCmd("demo_resume"); Afx_ExecClientCmd("mirv_streams record start"); }
+            ImGui::SameLine();
+            if (ImGui::Button("End Recording")) {
+                Afx_ExecClientCmd("demo_pause");
+                Afx_ExecClientCmd("mirv_streams record end");
+                //AfxStreams_RecordEnd();
+            }
+
+            ImGui::EndTabItem();
         }
 
-        // FFmpeg HLAE profiles dropdown
-        ImGui::Separator();
-        ImGui::TextUnformatted("FFmpeg profiles");
-        ImGui::SameLine();
-        static const char* s_selectedProfile = "Select profile...";
-        if (ImGui::BeginCombo("##ffmpeg_profiles", s_selectedProfile)) {
-            if (ImGui::Selectable("TGA Sequence")) {
-                s_selectedProfile = "TGA Sequence";
-                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings afxClassic;echo [Current Record Setting];echo afxClassic - 无损 .tga 图片序列)"
-                );
-            }
-            if (ImGui::Selectable("ProRes 4444")) {
-                s_selectedProfile = "ProRes 4444";
-                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg p0  "-c:v prores  -profile:v 4 {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")");
-                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings p0  ;echo [Current Record Setting];echo p0 - ProRes 4444)"
-                );
-            }
-            if (ImGui::Selectable("ProRes 422 HQ")) {
-                s_selectedProfile = "ProRes 422 HQ";
-                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg phq "-c:v prores  -profile:v 3 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")");
-                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings phq ;echo [Current Record Setting];echo phq - ProRes 422 HQ)"
-                );
-            }
-            if (ImGui::Selectable("ProRes 422")) {
-                s_selectedProfile = "ProRes 422";
-                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg p1  "-c:v prores  -profile:v 2 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mov{QUOTE}")");
-                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings p1  ;echo [Current Record Setting];echo p1 - ProRes 422)"
-                );
-            }
-            if (ImGui::Selectable("x264 Lossless")) {
-                s_selectedProfile = "x264 Lossless";
-                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg c0  "-c:v libx264 -preset 0 -qp  0  -g 120 -keyint_min 1 -pix_fmt yuv422p10le {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")");
-                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings c0  ;echo [Current Record Setting];echo c0 - x264 无损)"
-                );
-            }
-            if (ImGui::Selectable("x264 HQ")) {
-                s_selectedProfile = "x264 HQ";
-                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg c1  "-c:v libx264 -preset 1 -crf 4  -qmax 20 -g 120 -keyint_min 1 -pix_fmt yuv420p -x264-params ref=3:me=hex:subme=3:merange=12:b-adapt=1:aq-mode=2:aq-strength=0.9:no-fast-pskip=1 {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")");
-                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings c1  ;echo [Current Record Setting];echo c1 - x264 高画质)"
-                );
-            }
-            if (ImGui::Selectable("x265 Lossless")) {
-                s_selectedProfile = "x265 Lossless";
-                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg he0  "-c:v libx265 -x265-params no-sao=1 -preset 0 -lossless -g 120 -keyint_min 1 -pix_fmt yuv422p {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")");
-                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings he0 ;echo [Current Record Setting];echo he0 - x265 无损)"
-                );
-            }
-            if (ImGui::Selectable("x265 HQ")) {
-                s_selectedProfile = "x265 HQ";
-                Afx_ExecClientCmd(R"(mirv_streams settings add ffmpeg he1  "-c:v libx265 -x265-params no-sao=1 -preset 1 -crf 8  -qmax 20 -g 120 -keyint_min 1 -pix_fmt yuv422p {QUOTE}{AFX_STREAM_PATH}\video.mp4{QUOTE}")");
-                Afx_ExecClientCmd(R"(mirv_streams settings edit afxDefault settings he1 ;echo [Current Record Setting];echo he1 - x265 高画质)"
-                );
-            }
-            ImGui::EndCombo();
+        // Settings
+        if (ImGui::BeginTabItem("Settings")) {
+            // FPS readout
+            ImGuiIO& io = ImGui::GetIO();
+            ImGui::Text("FPS: %.1f", io.Framerate);
+
+            // UI scale (DPI) controls
+            float uiScaleTmp = g_UiScale;
+            ImGui::SetNextItemWidth(ImGui::CalcTextSize("000.00x").x + ImGui::GetStyle().FramePadding.x * 6.0f);
+            if (ImGui::SliderFloat("UI scale", &uiScaleTmp, 0.50f, 2.00f, "%.2fx", ImGuiSliderFlags_AlwaysClamp)) g_UiScale = uiScaleTmp;
+            ImGui::SameLine(); if (ImGui::SmallButton("90%"))  g_UiScale = 0.90f;
+            ImGui::SameLine(); if (ImGui::SmallButton("100%")) g_UiScale = 1.00f;
+            ImGui::SameLine(); if (ImGui::SmallButton("125%")) g_UiScale = 1.25f;
+            ImGui::SameLine(); if (ImGui::SmallButton("150%")) g_UiScale = 1.50f;
+            ImGui::SameLine(); if (ImGui::SmallButton("200%")) g_UiScale = 2.00f;
+            io.FontGlobalScale = g_UiScale;
+
+            // Toggle overlay console
+            ImGui::Checkbox("Show Console", &g_ShowOverlayConsole);
+
+            ImGui::EndTabItem();
         }
 
-        if (ImGui::Button("Start Recording")) {
-            Afx_ExecClientCmd("demo_resume");
-            AfxStreams_RecordStart();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("End Recording")) {
-            Afx_ExecClientCmd("demo_pause");
-            Afx_ExecClientCmd("mirv_streams record end");
-            //AfxStreams_RecordEnd();
-        }
+        ImGui::EndTabBar();
     }
+
 
     ImGui::End();
 
     // Sequencer window (ImGui Neo Sequencer)
     if (g_ShowSequencer) {
+        // Sequencer: horizontally resizable; adjust height to content each frame
         ImGui::SetNextWindowSize(ImVec2(720, 260), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("HLAE Sequencer", &g_ShowSequencer, ImGuiWindowFlags_NoCollapse)) {
             static ImGui::FrameIndexType s_seqFrame = 0;
@@ -1002,12 +933,23 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
 
 
+            // Auto-height: shrink/grow to fit current content while preserving user-set width
+            {
+                ImVec2 cur = ImGui::GetWindowSize();
+                float remain = ImGui::GetContentRegionAvail().y; // remaining vertical space
+                float desired = cur.y - remain;
+                // Optional: clamp to a sensible minimum
+                float min_h = ImGui::GetFrameHeightWithSpacing() * 6.0f;
+                if (desired < min_h) desired = min_h;
+                ImGui::SetWindowSize(ImVec2(cur.x, desired));
+            }
             ImGui::End();
         }
     }
 
     // Mirv input camera controls/indicator
     if (MirvInput* pMirv = Afx_GetMirvInput()) {
+        // Mirv Camera: horizontally resizable; adjust height to content each frame
         ImGui::Begin("Mirv Camera");
         bool camEnabled = pMirv->GetCameraControlMode();
         ImGui::Text("mirv_input camera: %s", camEnabled ? "enabled" : "disabled");
@@ -1096,6 +1038,15 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
         ImGui::Text("Scroll: ksens | +Shift: FOV | +Ctrl: Roll");
 
+        // Auto-height: shrink/grow to fit current content while preserving user-set width
+        {
+            ImVec2 cur = ImGui::GetWindowSize();
+            float remain = ImGui::GetContentRegionAvail().y;
+            float desired = cur.y - remain;
+            float min_h = ImGui::GetFrameHeightWithSpacing() * 6.0f; // camera panel needs a bit more
+            if (desired < min_h) desired = min_h;
+            ImGui::SetWindowSize(ImVec2(cur.x, desired));
+        }
         ImGui::End();
     }
 
