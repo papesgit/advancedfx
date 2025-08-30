@@ -6,13 +6,48 @@
 
 <release>
 <name>AfxHookSource2</name>
+<version>0.36.13</version>
+<time>2025-08-27T22:30Z</time>
+<changes>
+<change type="fixed">Fixed mirv_colors teamid - toggle sv_teamid_overhead 0/1 to update.</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
+<version>0.36.12</version>
+<time>2025-08-27T12:30Z</time>
+<changes>
+<change type="fixed">Adjusted mirv_replace_name to CS2 update.</change>
+<change type="fixed">Adjusted mirv_colors teamid to CS2 update - toggle sv_teamid_overhead 0/1 to update.</change>
+<comments>
+Please note that usage of HLAE with external VConsole is not recommended, even though it's common with observers.
+(There's bugs in regards for that, for us it even crashes frequently, even when using without HLAE.)
+If you only need netconport you can use -afxFixNetCon launch parameter to make it work without VConsole.
+</comments>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
+<version>0.36.11</version>
+<time>2025-08-25T13:00Z</time>
+<changes>
+<change type="fixed">Fixed mirv_fix animations 1 causing (a lot of) duplicate particles / shells.</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
 <version>0.36.10</version>
 <time>2025-08-19T13:00Z</time>
 <changes>
 <change type="fixed">Adjusted to CS2 update / fixed mirv_input camera FOV related problems, thanks to @1mpulse</change>
 </changes>
 </release>
-
 
 
 <release>
