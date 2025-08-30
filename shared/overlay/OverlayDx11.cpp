@@ -795,10 +795,45 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
                         int rightClickedIndex = -1;
                         static CampathCtx s_ctxMenuPending; // holds context menu target until action chosen
+                        // Collect selection while rendering keyframes
+                        static std::vector<int> s_lastUiSelection; // indices from UI last frame
+                        std::vector<int> curUiSelection;
+                        curUiSelection.reserve(s_cache.ticks.size());
                         for (int i = 0; i < (int)s_cache.ticks.size(); ++i) {
                             ImGui::NeoKeyframe(&s_cache.ticks[i]);
+                            if (ImGui::IsNeoKeyframeSelected()) curUiSelection.push_back(i);
                             if (ImGui::IsNeoKeyframeRightClicked())
                                 rightClickedIndex = i;
+                        }
+                        // Sync UI selection to mirv_campath selection when selection state stabilizes
+                        if (!ImGui::NeoIsSelecting() && !ImGui::NeoIsDraggingSelection()) {
+                            auto normalized = [](std::vector<int>& v){ std::sort(v.begin(), v.end()); v.erase(std::unique(v.begin(), v.end()), v.end()); };
+                            normalized(curUiSelection);
+                            std::vector<int> last = s_lastUiSelection; normalized(last);
+                            if (last != curUiSelection) {
+                                // Update in-memory selection immediately and mirror to engine
+                                g_CamPath.SelectNone();
+                                std::string cmd = "mirv_campath select none;";
+                                int rangeStart = -1, prev = -1000000;
+                                for (int idx : curUiSelection) {
+                                    if (rangeStart < 0) { rangeStart = prev = idx; continue; }
+                                    if (idx == prev + 1) { prev = idx; continue; }
+                                    g_CamPath.SelectAdd((size_t)rangeStart, (size_t)prev);
+                                    char tmp[128];
+                                    snprintf(tmp, sizeof(tmp), " mirv_campath select add #%d #%d;", rangeStart, prev);
+                                    cmd += tmp;
+                                    rangeStart = prev = idx;
+                                }
+                                if (rangeStart >= 0) {
+                                    g_CamPath.SelectAdd((size_t)rangeStart, (size_t)prev);
+                                    char tmp[128];
+                                    snprintf(tmp, sizeof(tmp), " mirv_campath select add #%d #%d;", rangeStart, prev);
+                                    cmd += tmp;
+                                }
+                                Afx_ExecClientCmd(cmd.c_str());
+                                g_SequencerNeedsRefresh = true;
+                                s_lastUiSelection = curUiSelection;
+                            }
                         }
                         if (rightClickedIndex >= 0) {
                             // Do not immediately activate gizmo; defer to context menu action
@@ -936,15 +971,26 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                                 std::sort(newSelected.begin(), newSelected.end());
                                 newSelected.erase(std::unique(newSelected.begin(), newSelected.end()), newSelected.end());
                                 int rangeStart = -1, prev = -1000000;
+                                // Update in-memory selection immediately
                                 g_CamPath.SelectNone();
+                                // Mirror selection to engine via mirv_campath commands
+                                std::string cmd = "mirv_campath select none;";
                                 for (int idx : newSelected) {
                                     if (rangeStart < 0) { rangeStart = prev = idx; continue; }
                                     if (idx == prev + 1) { prev = idx; continue; }
-                                    // commit previous range
                                     g_CamPath.SelectAdd((size_t)rangeStart, (size_t)prev);
+                                    char tmp[128];
+                                    snprintf(tmp, sizeof(tmp), " mirv_campath select add #%d #%d;", rangeStart, prev);
+                                    cmd += tmp;
                                     rangeStart = prev = idx;
                                 }
-                                if (rangeStart >= 0) g_CamPath.SelectAdd((size_t)rangeStart, (size_t)prev);
+                                if (rangeStart >= 0) {
+                                    g_CamPath.SelectAdd((size_t)rangeStart, (size_t)prev);
+                                    char tmp[128];
+                                    snprintf(tmp, sizeof(tmp), " mirv_campath select add #%d #%d;", rangeStart, prev);
+                                    cmd += tmp;
+                                }
+                                Afx_ExecClientCmd(cmd.c_str());
                             }
 
                             g_CamPath.Enabled_set(prevEnabled);
@@ -1460,26 +1506,45 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 }
             }
             if (foundIndex >= 0) {
+                // Count currently selected keyframes
+                int selCount = 0;
+                for (CamPathIterator it = g_CamPath.GetBegin(); it != g_CamPath.GetEnd(); ++it) {
+                    if (it.GetValue().Selected) ++selCount;
+                }
+
                 char buf[1024];
-                // Select the single key
-                snprintf(buf, sizeof(buf), "mirv_campath select none; mirv_campath select #%d #%d", foundIndex, foundIndex);
-                Afx_ExecClientCmd(buf);
-                // Apply position
-                snprintf(buf, sizeof(buf), "mirv_campath edit position %.*f %.*f %.*f",
-                        6, (float)newVal.X, 6, (float)newVal.Y, 6, (float)newVal.Z);
-                Afx_ExecClientCmd(buf);
-                // Apply angles (Pitch,Yaw,Roll)
-                snprintf(buf, sizeof(buf), "mirv_campath edit angles %.*f %.*f %.*f",
-                        6, (float)newVal.R.ToQREulerAngles().ToQEulerAngles().Pitch,
-                        6, (float)newVal.R.ToQREulerAngles().ToQEulerAngles().Yaw,
-                        6, (float)newVal.R.ToQREulerAngles().ToQEulerAngles().Roll);
-                Afx_ExecClientCmd(buf);
-                // Apply FOV
-                snprintf(buf, sizeof(buf), "mirv_campath edit fov %.*f", 6, (float)newVal.Fov);
-                Afx_ExecClientCmd(buf);
-                Afx_ExecClientCmd("mirv_campath select none");
-                g_SequencerNeedsRefresh = true;
-            } 
+                if (selCount > 1) {
+                    // Bulk edit via anchor transform: apply same translation/rotation delta to all selected
+                    const auto e = newVal.R.ToQREulerAngles().ToQEulerAngles();
+                    snprintf(buf, sizeof(buf), "mirv_campath edit anchor #%d %.*f %.*f %.*f %.*f %.*f %.*f",
+                        foundIndex,
+                        6, (float)newVal.X,
+                        6, (float)newVal.Y,
+                        6, (float)newVal.Z,
+                        6, (float)e.Pitch,
+                        6, (float)e.Yaw,
+                        6, (float)e.Roll);
+                    Afx_ExecClientCmd(buf);
+                    // Note: FOV intentionally not changed for bulk edit
+                    g_SequencerNeedsRefresh = true;
+                } else {
+                    // Single-key edit: keep previous behavior and update FOV
+                    snprintf(buf, sizeof(buf), "mirv_campath select none; mirv_campath select #%d #%d", foundIndex, foundIndex);
+                    Afx_ExecClientCmd(buf);
+                    snprintf(buf, sizeof(buf), "mirv_campath edit position %.*f %.*f %.*f",
+                            6, (float)newVal.X, 6, (float)newVal.Y, 6, (float)newVal.Z);
+                    Afx_ExecClientCmd(buf);
+                    snprintf(buf, sizeof(buf), "mirv_campath edit angles %.*f %.*f %.*f",
+                            6, (float)newVal.R.ToQREulerAngles().ToQEulerAngles().Pitch,
+                            6, (float)newVal.R.ToQREulerAngles().ToQEulerAngles().Yaw,
+                            6, (float)newVal.R.ToQREulerAngles().ToQEulerAngles().Roll);
+                    Afx_ExecClientCmd(buf);
+                    snprintf(buf, sizeof(buf), "mirv_campath edit fov %.*f", 6, (float)newVal.Fov);
+                    Afx_ExecClientCmd(buf);
+                    Afx_ExecClientCmd("mirv_campath select none");
+                    g_SequencerNeedsRefresh = true;
+                }
+            }
 
             g_LastCampathCtx.value = newVal;
             s_hasModelOverride = false;
