@@ -74,6 +74,11 @@ static char g_OverlayConsoleInput[512] = {0};
 static bool g_OverlayConsoleScrollToBottom = false;
 // Sequencer toggle state (shared between tabs and window)
 static bool g_ShowSequencer = false;
+// Sequencer preview behavior: when true, keep the preview pose after releasing slider;
+// when false, restore prior pose if Mirv Camera was enabled before preview.
+static bool g_PreviewFollow = false;
+// Sequencer preview normalized position [0..1]
+static float g_PreviewNorm = 0.0f;
 
 // Helper: constrain window height while allowing horizontal resize
 // (removed: height clamp helper; switching to live auto-height adjustment per-frame)
@@ -1056,6 +1061,105 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             ImGui::SameLine();
             ImGui::Text("Start: %d  End: %d  Current: %d",
                         (int)s_seqStart, (int)s_seqEnd, (int)s_seqFrame);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(g_PreviewFollow ? "Detach Preview" : "Follow Preview")) {
+                g_PreviewFollow = !g_PreviewFollow;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Add keyframe at preview")) {
+                // Compute preview time based on normalized slider and current campath bounds
+                if (g_CamPath.GetSize() >= 2 && g_CamPath.CanEval()) {
+                    double tMin = g_CamPath.GetLowerBound();
+                    double tMax = g_CamPath.GetUpperBound();
+                    if (tMax <= tMin) tMax = tMin + 1.0;
+                    double tEval = tMin + (double)g_PreviewNorm * (tMax - tMin);
+                    double cx, cy, cz, rX, rY, rZ; float cfov;
+                    Afx_GetLastCameraData(cx, cy, cz, rX, rY, rZ, cfov);
+                    CamPathValue nv(cx, cy, cz, rX, rY, rZ, cfov);
+                    extern CCampathDrawer g_CampathDrawer;
+                    bool prevDraw = g_CampathDrawer.Draw_get();
+                    g_CampathDrawer.Draw_set(false);
+                    g_CamPath.Add(tEval, nv);
+                    g_CampathDrawer.Draw_set(prevDraw);
+                    g_SequencerNeedsRefresh = true;
+                    advancedfx::Message("Overlay: mirv_campath add at preview (t=%.3f)\n", tEval);
+                } else {
+                    advancedfx::Warning("Overlay: Not enough campath keyframes to add at preview.\n");
+                }
+            }
+            // Preview slider (scrub camera along campath without playing demo)
+            {
+                size_t cpCountPrev = g_CamPath.GetSize();
+                if (cpCountPrev >= 2 && g_CamPath.CanEval()) {
+                    // Normalized position [0..1] across first..last key time
+                    static bool  s_previewActive = false;
+                    static bool  s_prevCamEnabled = false;
+                    static bool  s_havePrevCamPose = false;
+                    static double s_prevX = 0.0, s_prevY = 0.0, s_prevZ = 0.0,
+                                  s_prevRx = 0.0, s_prevRy = 0.0, s_prevRz = 0.0;
+                    static float  s_prevFov = 90.0f;
+
+                    double tMin = g_CamPath.GetLowerBound();
+                    double tMax = g_CamPath.GetUpperBound();
+                    if (tMax <= tMin) tMax = tMin + 1.0;
+
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                    if (ImGui::SliderFloat("##previewcampath", &g_PreviewNorm, 0.0f, 1.0f, "%.3f")) {
+                        // value changed; if actively dragging we'll update camera below
+                    }
+
+                    bool activeNow = ImGui::IsItemActive();
+                    bool activated = ImGui::IsItemActivated();
+                    bool deactivated = ImGui::IsItemDeactivated();
+
+                    if (activated) {
+                        s_previewActive = true;
+                        if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                            s_prevCamEnabled = pMirv->GetCameraControlMode();
+                            // If user was already in Mirv Camera mode, snapshot current pose to restore later
+                            s_havePrevCamPose = false;
+                            if (s_prevCamEnabled) {
+                                Afx_GetLastCameraData(s_prevX, s_prevY, s_prevZ, s_prevRx, s_prevRy, s_prevRz, s_prevFov);
+                                s_havePrevCamPose = true;
+                            }
+                            pMirv->SetCameraControlMode(true);
+                        }
+                    }
+
+                    if (activeNow) {
+                        double tEval = tMin + (double)g_PreviewNorm * (tMax - tMin);
+                        CamPathValue v = g_CamPath.Eval(tEval);
+                        if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                            pMirv->SetTx((float)v.X);
+                            pMirv->SetTy((float)v.Y);
+                            pMirv->SetTz((float)v.Z);
+                            using namespace Afx::Math;
+                            QEulerAngles ea = v.R.ToQREulerAngles().ToQEulerAngles();
+                            pMirv->SetRx((float)ea.Pitch);
+                            pMirv->SetRy((float)ea.Yaw);
+                            pMirv->SetRz((float)ea.Roll);
+                            pMirv->SetFov((float)v.Fov);
+                        }
+                    }
+
+                    if (deactivated && s_previewActive) {
+                        if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                            // If we started in Mirv Camera mode and user chose Detach, restore the previous pose
+                            if (!g_PreviewFollow && s_prevCamEnabled && s_havePrevCamPose) {
+                                pMirv->SetTx((float)s_prevX);
+                                pMirv->SetTy((float)s_prevY);
+                                pMirv->SetTz((float)s_prevZ);
+                                pMirv->SetRx((float)s_prevRx);
+                                pMirv->SetRy((float)s_prevRy);
+                                pMirv->SetRz((float)s_prevRz);
+                                pMirv->SetFov((float)s_prevFov);
+                            }
+                            pMirv->SetCameraControlMode(s_prevCamEnabled);
+                        }
+                        s_previewActive = false;
+                    }
+                }
+            }
 
             // Follow current tick to keep pointer in view when not interacting.
             // If users drag the pointer, we respect their new position and seek.
@@ -1110,12 +1214,16 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         // Mirv Camera: horizontally resizable; adjust height to content each frame
         ImGui::Begin("Mirv Camera");
         bool camEnabled = pMirv->GetCameraControlMode();
-        ImGui::Text("mirv_input camera: %s", camEnabled ? "enabled" : "disabled");
+        ImGui::Text("Mirv Camera (C): %s", camEnabled ? "enabled" : "disabled");
         ImGui::SameLine();
         if (ImGui::Button(camEnabled ? "Disable" : "Enable")) {
             pMirv->SetCameraControlMode(!camEnabled);
         }
-
+        if (ImGui::GetActiveID() == 0) {
+            if (ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+                pMirv->SetCameraControlMode(!camEnabled);
+            }
+        }
         // FOV slider (reserve right space so label is always visible)
         {
             ImGuiStyle& st3 = ImGui::GetStyle();
