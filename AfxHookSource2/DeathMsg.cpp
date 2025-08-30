@@ -19,6 +19,8 @@
 #include "SchemaSystem.h"
 #include "MirvColors.h" //
 
+#include <set>
+
 currentGameCamera g_CurrentGameCamera;
 
 namespace CS2 {
@@ -491,7 +493,9 @@ struct myPanoramaWrapper {
 		}
 	}
 
+	/*
 	void updateHudPanelStyles() {
+		// currently not required.
 		const auto hudPanel = ((u_char***)pHudPanel)[0][1];
 		if (hudPanel) {
 			// Function is called also in if after refrence to "CUIPanel::AddClassesInternal - apply old dirty styles":
@@ -500,6 +504,7 @@ struct myPanoramaWrapper {
 			applyStyleFn(hudPanel, 0);
 		}
 	}
+	*/
 
 } g_myPanoramaWrapper;
 
@@ -907,20 +912,36 @@ void __fastcall handleDeathnotice(u_char* hudDeathNotice, SOURCESDK::CS2::IGameE
 
 typedef int (__fastcall * Panorama_CLayoutFile_LoadFromFile_t)(void * This, const char * pFilePath, unsigned char _unk02);
 typedef unsigned char (__fastcall * Panorama_CStyleProperty_Parse_t)(void * This, void* _unk01, const char * pValueStr);
+typedef void (__fastcall * Panorama_CStyleProperty_Clone_t)(void * This, void * pTarget);
 
 bool g_b_In_Panorama_CLayoutFile_LoadFromFile = false;
 bool g_b_In_Panorama_CLayoutFile_LoadFromFile_HudReticle = false;
+
 Panorama_CLayoutFile_LoadFromFile_t g_Org_Panorama_CLayoutFile_LoadFromFile = nullptr;
 Panorama_CStyleProperty_Parse_t g_Org_Panorama_CStylePropertyForegroundColor_Parse = nullptr;
 Panorama_CStyleProperty_Parse_t g_Org_Panorama_CStylePropertyBackgroundColor_Parse = nullptr;
 Panorama_CStyleProperty_Parse_t g_Org_Panorama_CStylePropertyBorder_Parse = nullptr;
-Panorama_CStyleProperty_Parse_t g_Org_Panorama_CStylePropertyWashColor_Parse = nullptr;
 
-u_char* g_pHudReticle_WashColor_T = nullptr;
-u_char* g_pHudReticle_WashColor_CT = nullptr;
+Panorama_CStyleProperty_Parse_t g_Org_Panorama_CStylePropertyWashColor_Parse = nullptr;
+Panorama_CStyleProperty_Clone_t g_Org_Panorama_CStylePropertyWashColor_Clone = nullptr;
+
+std::set<u_char*> g_pHudReticle_WashColor_T;
+std::set<u_char*> g_pHudReticle_WashColor_CT;
+
+void SetHudReticleWashColorT(uint32_t value) {
+	for(auto it= g_pHudReticle_WashColor_T.begin(); it != g_pHudReticle_WashColor_T.end(); it++) {
+		*(uint32_t*)(*it + 0x10) = value;
+	}
+}
+
+void SetHudReticleWashColorCT(uint32_t value) {
+	for(auto it= g_pHudReticle_WashColor_CT.begin(); it != g_pHudReticle_WashColor_CT.end(); it++) {
+		*(uint32_t*)(*it + 0x10) = value;
+	}
+}
 
 int __fastcall My_Panorama_CLayoutFile_LoadFromFile(void * This, const char * pFilePath, unsigned char _unk02) {
-	if(0 == strcmp("panorama\\layout\\hud\\huddeathnotice.xml",pFilePath)) {
+	if(0 == strcmp("panorama\\layout\\hud\\huddeathnotice.xml",pFilePath)) {		
 		g_b_In_Panorama_CLayoutFile_LoadFromFile = true;
 		int result = g_Org_Panorama_CLayoutFile_LoadFromFile(This,pFilePath,_unk02);
 		g_b_In_Panorama_CLayoutFile_LoadFromFile = false;
@@ -928,6 +949,8 @@ int __fastcall My_Panorama_CLayoutFile_LoadFromFile(void * This, const char * pF
 	}
 
 	if(0 == strcmp("panorama\\layout\\hud\\hudreticle.xml",pFilePath)) {
+		g_pHudReticle_WashColor_T.clear();
+		g_pHudReticle_WashColor_CT.clear();
 		g_b_In_Panorama_CLayoutFile_LoadFromFile_HudReticle = true;
 		int result = g_Org_Panorama_CLayoutFile_LoadFromFile(This,pFilePath,_unk02);
 		g_b_In_Panorama_CLayoutFile_LoadFromFile_HudReticle = false;
@@ -973,21 +996,32 @@ unsigned char __fastcall My_Panorama_CStylePropertyBorder_Parse(void * This, voi
 	return result;
 }
 
+
 unsigned char __fastcall My_Panorama_CStylePropertyWashColor_Parse(void * This, void* _unk01, const char * pValueStr) {
 	unsigned char result = g_Org_Panorama_CStylePropertyWashColor_Parse(This,_unk01,pValueStr);
 	if(g_b_In_Panorama_CLayoutFile_LoadFromFile_HudReticle) {
 		if(0 == strcmp(pValueStr,"rgb(150, 200, 250)")) {
-			g_pHudReticle_WashColor_CT = (u_char*)This;
+			g_pHudReticle_WashColor_CT.emplace((u_char*)This);
 		}
 		else if(0 == strcmp(pValueStr,"#eabe54")) {
-			g_pHudReticle_WashColor_T = (u_char*)This;
+			g_pHudReticle_WashColor_T.emplace((u_char*)This);
 		}		
 	}
 	return result;
 }
 
-void ReloadHudPanelStyles(){
-	g_myPanoramaWrapper.updateHudPanelStyles();
+void __fastcall My_Panorama_CStylePropertyWashColor_Clone(void * This, void * pTarget) {
+	g_Org_Panorama_CStylePropertyWashColor_Clone(This, pTarget);
+	if(g_b_In_Panorama_CLayoutFile_LoadFromFile_HudReticle) {
+		auto itCT = g_pHudReticle_WashColor_CT.find((u_char*)This);
+		if(itCT != g_pHudReticle_WashColor_CT.end()) {
+			g_pHudReticle_WashColor_CT.emplace((u_char*)pTarget);
+		}
+		auto itT = g_pHudReticle_WashColor_T.find((u_char*)This);
+		if(itT != g_pHudReticle_WashColor_T.end()) {
+			g_pHudReticle_WashColor_T.emplace((u_char*)pTarget);
+		}
+	}
 }
 
 bool getDeathMsgAddrs(HMODULE clientDll) {
@@ -1032,23 +1066,51 @@ bool getDeathMsgAddrs(HMODULE clientDll) {
 bool getPanoramaAddrsFromClient(HMODULE clientDll) {
 	// credit https://github.com/danielkrupinski/Osiris
 	
-	// in the middle of big function with "Attempted to cast panel \'%s\' to type \'%s\'"
-	//
-    //  if (DAT_181e15c18 != (longlong *)0x0) {
-    //    local_230 = FUN_1809b2650; <--------- next 2 sigs in this one
-    //    local_238 = lVar12;
-    //    (**(code **)(*DAT_181e15c18 + 0x138))(DAT_181e15c18,DAT_181b4fb44,plVar11,&local_238);
-    //  }
-    //}
-	if (auto addr = getAddress(clientDll,"12 48 8B 01 FF 90 ?? ?? ?? ?? 48 8B ?? 48 85 C0 74 ?? 80 38 00 74 ?? 48 8D 4C"); addr != 0) {
-		CS2::PanoramaUIPanel::getAttributeString = *(int32_t*)((unsigned char*)addr + 6);
+/* In the middle of big function with MULTIPLE (3+) references to "Attempted to cast panel '%s' to type '%s'" and multiple to "file://{images}/%s.png":
+        }
+LAB_1809a7daf:
+        if (DAT_181fc46d8 != (longlong *)0x0) {
+          local_230 = FUN_1809bf960; <-- next 2 sigs in this one!!!
+          local_238 = lVar12;
+          (**(code **)(*DAT_181fc46d8 + 0x120))(DAT_181fc46d8,DAT_181c51f4c,plVar11,&local_238);
+        }
+      }
+LAB_1809a7de1
+*/
+/*
+                             LAB_1809bf9e6                                   XREF[1]:     1809bf9d9(j)  
+       1809bf9e6 48 8b 4f 08     MOV        RCX,qword ptr [RDI + 0x8]
+       1809bf9ea 4c 8d 05        LEA        R8,[DAT_1814ed000]
+                 0f d6 b2 00
+       1809bf9f1 0f b7 12        MOVZX      EDX=>DAT_181e808b8,word ptr [RDX]
+       1809bf9f4 48 8b 01        MOV        RAX,qword ptr [RCX]
+       1809bf9f7 ff 90 d0        CALL       qword ptr [RAX + 0x8d0]
+                 08 00 00
+       1809bf9fd 48 8b f0        MOV        RSI,RAX
+       1809bfa00 48 85 c0        TEST       RAX,RAX
+*/
+	if (auto addr = getAddress(clientDll,"48 8b 4f 08 4c 8d 05 ?? ?? ?? ?? 0f b7 12 48 8b 01 ff 90 ?? ?? ?? ?? 48 8b f0 48 85 c0"); addr != 0) {
+		CS2::PanoramaUIPanel::getAttributeString = *(int32_t*)((unsigned char*)addr + 19);
 	} else {
 		ErrorBox(MkErrStr(__FILE__, __LINE__));
 		return false;
 	}
 
-	if (auto addr = getAddress(clientDll,"FF 90 ?? ?? ?? ?? 48 83 C6 ?? 48 3B ?? 75 ?? 4C"); addr != 0) {
-		CS2::PanoramaUIPanel::setAttributeString = *(int32_t*)((unsigned char*)addr + 2);
+/*
+                             LAB_1809bfa6a                                   XREF[1]:     1809bfa5d(j)  
+       1809bfa6a 48 8b 4f 08     MOV        RCX,qword ptr [RDI + 0x8]
+       1809bfa6e 4c 8d 05        LEA        R8,[DAT_1814ed000]
+                 8b d5 b2 00
+       1809bfa75 0f b7 13        MOVZX      EDX,word ptr [RBX]=>DAT_181e808b8
+       1809bfa78 48 8b 01        MOV        RAX,qword ptr [RCX]
+       1809bfa7b ff 90 00        CALL       qword ptr [RAX + 0x900]
+                 09 00 00
+       1809bfa81 b0 01           MOV        AL,0x1
+       1809bfa83 e9 1a ff        JMP        LAB_1809bf9a2
+                 ff ff
+*/
+	if (auto addr = getAddress(clientDll,"48 8b 4f 08 4c 8d 05 ?? ?? ?? ?? 0f b7 13 48 8b 01 ff 90 ?? ?? ?? ?? b0 01 e9 ?? ?? ?? ??"); addr != 0) {
+		CS2::PanoramaUIPanel::setAttributeString = *(int32_t*)((unsigned char*)addr + 19);
 	} else {
 		ErrorBox(MkErrStr(__FILE__, __LINE__));
 		return false;
@@ -1127,7 +1189,7 @@ bool getPanoramaAddrs(HMODULE panoramaDll) {
 			return false;
 		}
 		g_Org_Panorama_CStylePropertyBorder_Parse = (Panorama_CStyleProperty_Parse_t)vtable[6];
-	}		
+	}
 
 	{
 		void **vtable = (void**)Afx::BinUtils::FindClassVtable(panoramaDll,".?AVCStylePropertyWashColor@panorama@@",0,0);
@@ -1135,6 +1197,7 @@ bool getPanoramaAddrs(HMODULE panoramaDll) {
 			ErrorBox(MkErrStr(__FILE__, __LINE__));	
 			return false;
 		}
+		g_Org_Panorama_CStylePropertyWashColor_Clone = (Panorama_CStyleProperty_Clone_t)vtable[1];
 		g_Org_Panorama_CStylePropertyWashColor_Parse = (Panorama_CStyleProperty_Parse_t)vtable[6];
 	}		
 
@@ -1154,6 +1217,7 @@ void HookPanorama(HMODULE panoramaDll)
 	DetourAttach(&(PVOID&)g_Org_Panorama_CStylePropertyForegroundColor_Parse, My_Panorama_CStylePropertyForegroundColor_Parse);
 	DetourAttach(&(PVOID&)g_Org_Panorama_CStylePropertyBackgroundColor_Parse, My_Panorama_CStylePropertyBackgroundColor_Parse);
 	DetourAttach(&(PVOID&)g_Org_Panorama_CStylePropertyBorder_Parse, My_Panorama_CStylePropertyBorder_Parse);
+	DetourAttach(&(PVOID&)g_Org_Panorama_CStylePropertyWashColor_Clone, My_Panorama_CStylePropertyWashColor_Clone);
 	DetourAttach(&(PVOID&)g_Org_Panorama_CStylePropertyWashColor_Parse, My_Panorama_CStylePropertyWashColor_Parse);
 
 	if(NO_ERROR != DetourTransactionCommit()) {
