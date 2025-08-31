@@ -1479,14 +1479,13 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         else if (ds.y > 0.0f) aspect = ds.x / ds.y;
         if (aspect <= 0.0f) aspect = 16.0f/9.0f;
 
-        // Convert engine-reported horizontal FOV (scaled from 4:3) to vertical FOV for GL projection
+        // Convert game FOV to a vertical FOV for our GL-style projection.
         float fovyDeg = cfovDeg;
         {
-            const float defaultAspect = 4.0f/3.0f;
-            const float ratio = aspect / defaultAspect;
+            const float baseAspect = 4.0f/3.0f;
             const float fovRad = (float)(cfovDeg * 3.14159265358979323846/180.0);
             const float half = 0.5f * fovRad;
-            const float halfVert = atanf(tanf(half) / ratio);
+            const float halfVert = atanf(tanf(half) / baseAspect);
             fovyDeg = (float)(2.0f * (halfVert) * 180.0 / 3.14159265358979323846);
         }
         PerspectiveGlRh(fovyDeg, aspect, 0.1f, 100000.0f, proj);
