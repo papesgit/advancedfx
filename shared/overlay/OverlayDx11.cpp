@@ -24,6 +24,8 @@
 #include "../../AfxHookSource2/CampathDrawer.h"
 #include "../MirvInput.h"
 #include "../../AfxHookSource2/RenderSystemDX11Hooks.h"
+// For default game folder (…/game/) resolution
+#include "../../AfxHookSource2/hlaeFolder.h"
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -217,8 +219,16 @@ static float g_UiScale = 1.0f;
 struct OverlayPathsSettings {
     std::string campathDir;
     std::string recordBrowseDir;
+    std::string demoDir;
 };
 static OverlayPathsSettings g_OverlayPaths;
+// Persistent demo file dialog (Settings → Open demo)
+static ImGui::FileBrowser g_DemoOpenDialog(
+    ImGuiFileBrowserFlags_CloseOnEsc |
+    ImGuiFileBrowserFlags_EditPathString |
+    ImGuiFileBrowserFlags_CreateNewDir
+);
+static bool g_DemoDialogInit = false;
 
 // ImGui ini handler for persisting overlay paths
 static void* OverlayPaths_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
@@ -232,11 +242,13 @@ static void OverlayPaths_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* en
     std::string val(eq + 1);
     if (key == "CampathDir") s->campathDir = val;
     else if (key == "RecordBrowseDir") s->recordBrowseDir = val;
+    else if (key == "DemoDir") s->demoDir = val;
 }
 static void OverlayPaths_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out_buf) {
     out_buf->appendf("[%s][%s]\n", handler->TypeName, "Paths");
     if (!g_OverlayPaths.campathDir.empty()) out_buf->appendf("CampathDir=%s\n", g_OverlayPaths.campathDir.c_str());
     if (!g_OverlayPaths.recordBrowseDir.empty()) out_buf->appendf("RecordBrowseDir=%s\n", g_OverlayPaths.recordBrowseDir.c_str());
+    if (!g_OverlayPaths.demoDir.empty()) out_buf->appendf("DemoDir=%s\n", g_OverlayPaths.demoDir.c_str());
     out_buf->append("\n");
 }
 
@@ -789,8 +801,41 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             ImGui::SameLine(); if (ImGui::SmallButton("200%")) g_UiScale = 2.00f;
             io.FontGlobalScale = g_UiScale;
 
-            // Toggle overlay console
+            // Toggle overlay console + Open demo button (same line)
             ImGui::Checkbox("Show Console", &g_ShowOverlayConsole);
+            ImGui::SameLine();
+            {
+                if (!g_DemoDialogInit) { g_DemoOpenDialog.SetTitle("Open demo"); g_DemoDialogInit = true; }
+
+                if (ImGui::Button("Open demo")) {
+                    // Prefer last-used demo directory, otherwise default to game\csgo
+                    if (!g_OverlayPaths.demoDir.empty()) {
+                        g_DemoOpenDialog.SetDirectory(g_OverlayPaths.demoDir);
+                    } else {
+                        const char* gameRoot = GetProcessFolder(); // typically ends with ...\\game\\
+                        if (gameRoot && gameRoot[0]) {
+                            std::string def = std::string(gameRoot);
+                            // Default to ...\\game\\csgo if present
+                            def += "csgo";
+                            g_DemoOpenDialog.SetDirectory(def);
+                        }
+                    
+                    g_DemoOpenDialog.Open();
+                }
+
+                // Render and handle selection
+                g_DemoOpenDialog.Display();
+                if (g_DemoOpenDialog.HasSelected()) {
+                    const std::string path = g_DemoOpenDialog.GetSelected().string();
+                    char cmd[2048];
+                    snprintf(cmd, sizeof(cmd), "playdemo \"%s\"", path.c_str());
+                    Afx_ExecClientCmd(cmd);
+                    // remember directory
+                    try { g_OverlayPaths.demoDir = std::filesystem::path(path).parent_path().string(); } catch(...) {}
+                    ImGui::MarkIniSettingsDirty();
+                    g_DemoOpenDialog.ClearSelected();
+                }
+            }
 
             ImGui::EndTabItem();
         }
