@@ -434,17 +434,16 @@ namespace ImGui
 
             ImColor color = getKeyframeColor(context, hovered, inSelection);
 
-            // Draw keyframe circle
-            const float radius = currentTimelineHeight / 3.0f;
+            // Draw keyframe circle (slightly larger for readability)
+            const float radius = ImMax(currentTimelineHeight * 0.40f, 5.0f);
             const ImVec2 center = pos + ImVec2{0, currentTimelineHeight / 2.f};
             drawList->AddCircleFilled(center, radius, color, 4);
 
-            // Draw numeric label under the keyframe (0,1,2,... per timeline)
+            // Draw numeric label centered on the keyframe (no extra vertical space needed)
             char lbl[16];
             snprintf(lbl, sizeof(lbl), "%d", keyLabelCounter);
             const ImVec2 textSize = CalcTextSize(lbl);
-            const float paddingY = GetStyle().ItemInnerSpacing.y * 0.25f + 2.0f;
-            ImVec2 textPos = ImVec2(center.x - textSize.x * 0.5f, center.y + radius + paddingY);
+            ImVec2 textPos = ImVec2(center.x - textSize.x * 0.5f, center.y - textSize.y * 0.5f);
             drawList->AddText(textPos, IM_COL32_WHITE, lbl);
             keyLabelCounter++;
         }
@@ -1012,8 +1011,8 @@ namespace ImGui
 
         const auto clipMin = context.TopBarStartCursor + ImVec2(0, context.TopBarSize.y);
 
-        // Extend bottom clipping slightly to allow labels drawn below keyframes
-        const float labelBottomPad = GetFontSize() * 1.20f;
+        // No extra bottom clipping needed when labels are drawn on-keyframe
+        const float labelBottomPad = 0.0f;
         drawList->PushClipRect(clipMin,
                                clipMin + backgroundSize - ImVec2(0, context.TopBarSize.y) -
                                ImVec2{0, GetFontSize() * style.ZoomHeightScale} + ImVec2{0, labelBottomPad}, true);
@@ -1157,8 +1156,6 @@ namespace ImGui
         auto labelSize = CalcTextSize(label);
 
         labelSize.y += imStyle.FramePadding.y * 2 + style.ItemSpacing.y * 2;
-        // Reserve extra vertical space under the timeline row for keyframe labels
-        labelSize.y += GetFontSize() * 1.10f;
         labelSize.x += imStyle.FramePadding.x * 2 + style.ItemSpacing.x * 2 +
                        (float) currentTimelineDepth * style.DepthItemSpacing;
 
