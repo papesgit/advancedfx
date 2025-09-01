@@ -415,7 +415,7 @@ double MirvInput::GetCamDYaw(void)
 
 double MirvInput::GetCamDRoll(void)
 {
-	return m_CamSpeed * (m_CamRoll -m_CamRollI);
+	return m_CamSpeed * (m_CamRoll -m_CamRollI + m_MouseInput.GetRoll());
 }
 
 double MirvInput::GetCamDFov(void)
@@ -881,34 +881,42 @@ void MirvInput::ProcessRawInputData(PRAWINPUT pData) {
 		m_MouseInput.Raw.RightButtonDown = m_MouseInput.Raw.RightButtonDown || (rawmouse->usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN);
 
 
-		if (m_CameraControlMode) {
-			if (!(m_MMove && (m_MouseInput.Raw.LeftButtonDown || m_MouseInput.Raw.RightButtonDown)))
-			{
-				m_MouseInput.Raw.Yaw += m_MouseSens * m_MouseYawSpeed * -dX;
-				m_MouseInput.Raw.Pitch += m_MouseSens * m_MousePitchSpeed * dY;
-			}
-			else
-			{
-				m_MouseInput.Raw.Left += m_MouseSens * (dX < 0 ? m_MouseLeftSpeed : m_MouseRightSpeed) * -dX;
-
-				if (m_MouseInput.Raw.LeftButtonDown)
+			if (m_CameraControlMode) {
+				if (!(m_MMove && (m_MouseInput.Raw.LeftButtonDown || m_MouseInput.Raw.RightButtonDown)))
 				{
-					m_MouseInput.Raw.Forward += m_MouseSens * (dY < 0 ? m_MouseForwardSpeed : m_MouseBackwardSpeed) * -dY;
+					if (!(m_MouseRollMode || m_MouseFovMode)) {
+						m_MouseInput.Raw.Yaw += m_MouseSens * m_MouseYawSpeed * -dX;
+						m_MouseInput.Raw.Pitch += m_MouseSens * m_MousePitchSpeed * dY;
+					} else if (m_MouseRollMode) {
+						// Roll-modifier mode: map horizontal mouse to roll, suppress yaw/pitch (invert direction)
+						m_MouseInput.Raw.Roll += m_MouseSens * m_MouseYawSpeed * dX;
+					} else if (m_MouseFovMode) {
+						// FOV-modifier mode: map horizontal mouse to FOV, suppress yaw/pitch
+						m_MouseInput.Raw.Fov += m_MouseSens * m_MouseYawSpeed * -dX;
+					}
 				}
-				if (m_MouseInput.Raw.RightButtonDown)
+				else
 				{
-					m_MouseInput.Raw.Up += m_MouseSens * (dY < 0 ? m_MouseUpSpeed : m_MouseDownSpeed) * -dY;
-				}
-			}
+					m_MouseInput.Raw.Left += m_MouseSens * (dX < 0 ? m_MouseLeftSpeed : m_MouseRightSpeed) * -dX;
 
-			if (m_MMove) {
-				if (rawmouse->usButtonFlags & RI_MOUSE_WHEEL) {
-					float delta = (float)(short)rawmouse->usButtonData;
-					m_MouseInput.Raw.Fov = m_MouseSens * (0 < delta ? m_MouseFovNegativeSpeed : m_MouseFovPositiveSpeed) * -delta;
-					rawmouse->usButtonData = 0;
+					if (m_MouseInput.Raw.LeftButtonDown)
+					{
+						m_MouseInput.Raw.Forward += m_MouseSens * (dY < 0 ? m_MouseForwardSpeed : m_MouseBackwardSpeed) * -dY;
+					}
+					if (m_MouseInput.Raw.RightButtonDown)
+					{
+						m_MouseInput.Raw.Up += m_MouseSens * (dY < 0 ? m_MouseUpSpeed : m_MouseDownSpeed) * -dY;
+					}
+				}
+
+				if (m_MMove) {
+					if (rawmouse->usButtonFlags & RI_MOUSE_WHEEL) {
+						float delta = (float)(short)rawmouse->usButtonData;
+						m_MouseInput.Raw.Fov = m_MouseSens * (0 < delta ? m_MouseFovNegativeSpeed : m_MouseFovPositiveSpeed) * -delta;
+						rawmouse->usButtonData = 0;
+					}
 				}
 			}
-		}
 
 		if (rawmouse->usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP) m_MouseInput.Raw.LeftButtonDown = false;
 		if (rawmouse->usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP) m_MouseInput.Raw.RightButtonDown = false;
@@ -1027,8 +1035,16 @@ void MirvInput::Supply_GetCursorPos(LPPOINT lpPoint)
 
 		if (!(m_MMove && (m_MNormalLeftButtonWasDown || m_MouseInput.Normal.RightButtonDown)))
 		{
-			m_MouseInput.Normal.Yaw += m_MouseSens * m_MouseYawSpeed * -dX;
-			m_MouseInput.Normal.Pitch += m_MouseSens * m_MousePitchSpeed * dY;
+			if (!(m_MouseRollMode || m_MouseFovMode)) {
+				m_MouseInput.Normal.Yaw += m_MouseSens * m_MouseYawSpeed * -dX;
+				m_MouseInput.Normal.Pitch += m_MouseSens * m_MousePitchSpeed * dY;
+			} else if (m_MouseRollMode) {
+				// Roll-modifier mode: map horizontal mouse to roll, suppress yaw/pitch (invert direction)
+				m_MouseInput.Normal.Roll += m_MouseSens * m_MouseYawSpeed * dX;
+			} else if (m_MouseFovMode) {
+				// FOV-modifier mode: map horizontal mouse to FOV, suppress yaw/pitch
+				m_MouseInput.Normal.Fov += m_MouseSens * m_MouseYawSpeed * -dX;
+			}
 		}
 		else
 		{

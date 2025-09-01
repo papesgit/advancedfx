@@ -315,55 +315,81 @@ bool OverlayDx11::Initialize() {
                 bool passThrough = overlayVisible && s_rmbDown && !wantCaptureMouse;
                 Overlay::Get().SetRmbPassthroughActive(passThrough);
 
+                // While in RMB passthrough, allow holding 'R' to switch mouse horizontal motion to camera roll control.
+                static bool s_rollModeActive = false;
+                static bool s_rollPrevCamEnabled = false;
+                bool rHeld = (GetKeyState('R') & 0x8000) != 0;
+                bool wantRollMode = passThrough && rHeld;
+                if (wantRollMode != s_rollModeActive) {
+                    s_rollModeActive = wantRollMode;
+                    if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                        // Ensure cursor lock like mirv camera mode by enabling it temporarily if needed
+                        if (s_rollModeActive) {
+                            s_rollPrevCamEnabled = pMirv->GetCameraControlMode();
+                            if (!s_rollPrevCamEnabled) pMirv->SetCameraControlMode(true);
+                            // Exclusivity: disable FOV-mode if it was on
+                            if (pMirv->GetMouseFovMode()) pMirv->SetMouseFovMode(false);
+                            pMirv->SetMouseRollMode(true);
+                        } else {
+                            pMirv->SetMouseRollMode(false);
+                            // Restore previous camera control mode only if no other modifier mode is active
+                            if (!pMirv->GetMouseFovMode())
+                                pMirv->SetCameraControlMode(s_rollPrevCamEnabled);
+                        }
+                    }
+                }
+
+                // While in RMB passthrough, allow holding 'F' to switch mouse horizontal motion to camera FOV control.
+                static bool s_fovModeActive = false;
+                static bool s_fovPrevCamEnabled = false;
+                bool fHeld = (GetKeyState('F') & 0x8000) != 0;
+                bool wantFovMode = passThrough && fHeld;
+                if (wantFovMode != s_fovModeActive) {
+                    s_fovModeActive = wantFovMode;
+                    if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                        if (s_fovModeActive) {
+                            s_fovPrevCamEnabled = pMirv->GetCameraControlMode();
+                            if (!s_fovPrevCamEnabled) pMirv->SetCameraControlMode(true);
+                            // Exclusivity: disable Roll-mode if it was on
+                            if (pMirv->GetMouseRollMode()) pMirv->SetMouseRollMode(false);
+                            pMirv->SetMouseFovMode(true);
+                        } else {
+                            pMirv->SetMouseFovMode(false);
+                            // Restore previous camera control mode only if no other modifier mode is active
+                            if (!pMirv->GetMouseRollMode())
+                                pMirv->SetCameraControlMode(s_fovPrevCamEnabled);
+                        }
+                    }
+                }
+
                 // While in RMB passthrough mode, intercept scroll wheel to control mirv camera instead of passing to game
                 if (passThrough && msg == WM_MOUSEWHEEL) {
                     int zDelta = GET_WHEEL_DELTA_WPARAM((WPARAM)wparam);
                     int steps = zDelta / WHEEL_DELTA;
                     if (steps != 0) {
                         if (MirvInput* pMirv = Afx_GetMirvInput()) {
-                            const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                            const bool ctrlDown  = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-                            if (ctrlDown) {
-                                // Adjust Roll
-                                float roll = GetLastCameraRoll();
-                                float stepDeg = 1.0f;
-                                roll += stepDeg * (float)steps;
-                                // Clamp to [-180, 180]
-                                if (roll < -180.0f) roll = -180.0f;
-                                if (roll >  180.0f) roll =  180.0f;
-                                pMirv->SetRz(roll);
-                                g_uiRoll = roll; g_uiRollInit = true; // sync UI
-                            } else if (shiftDown) {
-                                // Adjust FOV
-                                float fov = GetLastCameraFov();
-                                float stepDeg = 1.0f;
-                                fov += stepDeg * (float)steps;
-                                if (fov < 1.0f)   fov = 1.0f;
-                                if (fov > 179.0f) fov = 179.0f;
-                                pMirv->SetFov(fov);
-                                g_uiFov = fov; g_uiFovInit = true; // sync UI
-                            } else {
-                                // Adjust keyboard sensitivity (ksens)
-                                double ks = pMirv->GetKeyboardSensitivty();
-                                double step = 0.25; // fine-grained
-                                ks += step * (double)steps;
-                                if (ks < 0.01) ks = 0.01;
-                                if (ks > 10.0) ks = 10.0;
-                                pMirv->SetKeyboardSensitivity(ks);
-                                g_uiKsens = (float)ks; g_uiKsensInit = true; // sync UI
-                            }
+                            // Adjust keyboard sensitivity (ksens)
+                            double ks = pMirv->GetKeyboardSensitivty();
+                            double step = 0.25; // fine-grained
+                            ks += step * (double)steps;
+                            if (ks < 0.01) ks = 0.01;
+                            if (ks > 10.0) ks = 10.0;
+                            pMirv->SetKeyboardSensitivity(ks);
+                            g_uiKsens = (float)ks; g_uiKsensInit = true; // sync UI
                         }
                     }
                     return true; // consume wheel
                 }
 
-                // In passthrough, swallow Shift/Ctrl so they don't reach the game (used only for our scroll modifiers)
+                // In passthrough, swallow Shift/Ctrl (used for scroll modifiers) and swallow 'R'/'F' while in modifier modes
                 if (passThrough) {
                     switch (msg) {
                         case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_SYSKEYUP: {
                             WPARAM vk = (WPARAM)wparam;
                             if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_LCONTROL || vk == VK_RCONTROL)
                                 return true; // consume modifiers
+                            if ((s_rollModeActive && vk == 'R') || (s_fovModeActive && vk == 'F'))
+                                return true; // consume R to avoid in-game actions while roll-mode active
                             break;
                         }
                         default: break;
@@ -1353,9 +1379,14 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
         // FOV slider (synced with RMB+wheel in passthrough)
         if (!g_uiFovInit) { g_uiFov = GetLastCameraFov(); g_uiFovDefault = g_uiFov; g_uiFovInit = true; }
+        // While using RMB+F FOV-modifier, reflect live FOV into the slider value
+        if (pMirv->GetMouseFovMode()) {
+            g_uiFov = GetLastCameraFov();
+            g_uiFovInit = true;
+        }
         {
             float tmp = g_uiFov;
-            bool changed = ImGui::SliderFloat("FOV", &tmp, 1.0f, 179.0f, "%.1f deg");
+            bool changed = ImGui::SliderFloat("FOV (F)", &tmp, 1.0f, 179.0f, "%.1f deg");
             bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
             if (reset) {
                 g_uiFov = g_uiFovDefault;
@@ -1379,9 +1410,14 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             ImGui::SetNextItemWidth(width);
         }
         if (!g_uiRollInit) { g_uiRoll = GetLastCameraRoll(); g_uiRollDefault = g_uiRoll; g_uiRollInit = true; }
+        // While using RMB+R roll-modifier, reflect live roll into the slider value
+        if (pMirv->GetMouseRollMode()) {
+            g_uiRoll = GetLastCameraRoll();
+            g_uiRollInit = true;
+        }
         {
             float tmp = g_uiRoll;
-            bool changed = ImGui::SliderFloat("Roll", &tmp, -180.0f, 180.0f, "%.1f deg");
+            bool changed = ImGui::SliderFloat("Roll (R)", &tmp, -180.0f, 180.0f, "%.1f deg");
             bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
             if (reset) {
                 g_uiRoll = g_uiRollDefault;
@@ -1397,8 +1433,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         {
             ImGuiStyle& st3 = ImGui::GetStyle();
             float avail = ImGui::GetContentRegionAvail().x;
-            const char* lbl = "ksens";
-            float lblW = ImGui::CalcTextSize(lbl).x;
+            const char* lbl = "ksenss";
+            float lblW = ImGui::CalcTextSize(lbl).x * g_UiScale;
             float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
             float width = avail - (lblW + rightGap);
             if (width < 100.0f) width = avail * 0.6f; // fallback
@@ -1407,7 +1443,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         if (!g_uiKsensInit) { g_uiKsens = (float)pMirv->GetKeyboardSensitivty(); g_uiKsensDefault = g_uiKsens; g_uiKsensInit = true; }
         {
             float tmp = g_uiKsens;
-            bool changed = ImGui::SliderFloat("ksens", &tmp, 0.01f, 10.0f, "%.2f");
+            bool changed = ImGui::SliderFloat("ksens (Scroll)", &tmp, 0.01f, 10.0f, "%.2f");
             bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
             if (reset) {
                 g_uiKsens = g_uiKsensDefault;
@@ -1418,14 +1454,12 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 pMirv->SetKeyboardSensitivity(g_uiKsens);
             }
         }
-        ImGui::Text("Scroll: ksens | +Shift: FOV | +Ctrl: Roll");
-
         // Auto-height: shrink/grow to fit current content while preserving user-set width
         {
             ImVec2 cur = ImGui::GetWindowSize();
             float remain = ImGui::GetContentRegionAvail().y;
             float desired = cur.y - remain;
-            float min_h = ImGui::GetFrameHeightWithSpacing() * 6.0f; // camera panel needs a bit more
+            float min_h = ImGui::GetFrameHeightWithSpacing() * 4.0f; // camera panel needs a bit more
             if (desired < min_h) desired = min_h;
             ImGui::SetWindowSize(ImVec2(cur.x, desired));
         }

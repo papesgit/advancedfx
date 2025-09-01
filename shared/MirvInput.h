@@ -319,12 +319,13 @@ private:
 		double Up = 0;
 		double Pitch = 0;
 		double Yaw = 0;
+		double Roll = 0;
 		double Fov = 0;
 		bool LeftButtonDown = false;
 		bool RightButtonDown = false;
 
 		bool HasInput() {
-			return Forward != 0 || Left != 0 || Up != 0 || Pitch != 0 || Yaw != 0 || Fov != 0;
+			return Forward != 0 || Left != 0 || Up != 0 || Pitch != 0 || Yaw != 0 || Roll != 0 || Fov != 0;
 		}
 
 		void Clear() {
@@ -333,6 +334,7 @@ private:
 			Up = 0;
 			Pitch = 0;
 			Yaw = 0;
+			Roll = 0;
 			Fov = 0;
 		}
 	};
@@ -362,6 +364,10 @@ private:
 
 		bool HasInput() {
 			return Normal.HasInput() || Raw.HasInput();
+		}
+
+		double GetRoll() {
+			return Raw.HasInput() ? Raw.Roll : Normal.Roll;
 		}
 
 		void Clear() {
@@ -431,6 +437,18 @@ private:
 	// END Smooth feature related
 
 	bool m_RotLocalSpace = false;
+
+	// When true, suspend yaw/pitch mouse-look and convert horizontal mouse motion into roll instead.
+	bool m_MouseRollMode = false;
+
+	// When true, suspend yaw/pitch mouse-look and convert horizontal mouse motion into FOV instead.
+	bool m_MouseFovMode = false;
+
+public:
+	bool GetMouseRollMode() const { return m_MouseRollMode; }
+	void SetMouseRollMode(bool v) { m_MouseRollMode = v; }
+	bool GetMouseFovMode() const { return m_MouseFovMode; }
+	void SetMouseFovMode(bool v) { m_MouseFovMode = v; }
 
 	void DoCamSpeedDecrease(void);
 	void DoCamSpeedIncrease(void);
