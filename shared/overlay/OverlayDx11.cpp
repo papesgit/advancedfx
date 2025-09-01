@@ -52,6 +52,125 @@ extern CamPath g_CamPath;
 
 namespace advancedfx { namespace overlay {
 
+// Apply a sleek dark style for the HLAE overlay.
+static void ApplyHlaeDarkStyle()
+{
+#ifdef _WIN32
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+
+    // Layout and rounding for a modern look
+    style.WindowPadding     = ImVec2(10.0f, 10.0f);
+    style.FramePadding      = ImVec2(8.0f, 6.0f);
+    style.ItemSpacing       = ImVec2(8.0f, 6.0f);
+    style.ItemInnerSpacing  = ImVec2(6.0f, 4.0f);
+    style.CellPadding       = ImVec2(6.0f, 6.0f);
+    style.ScrollbarSize     = 14.0f;
+    style.GrabMinSize       = 10.0f;
+
+    style.WindowRounding    = 8.0f;
+    style.ChildRounding     = 6.0f;
+    style.FrameRounding     = 6.0f;
+    style.PopupRounding     = 6.0f;
+    style.ScrollbarRounding = 12.0f;
+    style.GrabRounding      = 6.0f;
+    style.TabRounding       = 6.0f;
+
+    style.WindowBorderSize  = 1.0f;
+    style.FrameBorderSize   = 1.0f;
+    style.PopupBorderSize   = 1.0f;
+    style.TabBorderSize     = 0.0f;
+    style.WindowTitleAlign  = ImVec2(0.0f, 0.5f);
+
+    auto C = [](int r, int g, int b, int a = 255) {
+        return ImVec4(r/255.0f, g/255.0f, b/255.0f, a/255.0f);
+    };
+
+    // Accent color (teal)
+    const ImVec4 ACCENT      = C(32, 208, 194);
+    const ImVec4 ACCENT_HOV  = C(42, 223, 208);
+    const ImVec4 ACCENT_ACT  = C(26, 178, 165);
+
+    // Neutral palette
+    const ImVec4 BG0 = C(17, 19, 24);   // window background
+    const ImVec4 BG1 = C(24, 27, 33);   // child/popup background
+    const ImVec4 BG2 = C(28, 32, 39);   // header/active frame
+    const ImVec4 BG3 = C(36, 41, 49);   // hovered frame/header
+    const ImVec4 BG4 = C(45, 51, 61);   // buttons hovered
+    const ImVec4 FG0 = C(224, 224, 224);// text
+    const ImVec4 FG1 = C(136, 136, 136);// text disabled
+    const ImVec4 BRD = C(58, 64, 74);   // border
+
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_Text]                  = FG0;
+    colors[ImGuiCol_TextDisabled]          = FG1;
+    colors[ImGuiCol_WindowBg]              = BG0;
+    colors[ImGuiCol_ChildBg]               = C(0,0,0,0);
+    colors[ImGuiCol_PopupBg]               = ImVec4(BG1.x, BG1.y, BG1.z, 0.98f);
+    colors[ImGuiCol_Border]                = BRD;
+    colors[ImGuiCol_BorderShadow]          = C(0,0,0,0);
+
+    colors[ImGuiCol_FrameBg]               = BG2;
+    colors[ImGuiCol_FrameBgHovered]        = BG3;
+    colors[ImGuiCol_FrameBgActive]         = BG4;
+
+    colors[ImGuiCol_TitleBg]               = C(14, 16, 20);
+    colors[ImGuiCol_TitleBgActive]         = C(20, 24, 28);
+    colors[ImGuiCol_TitleBgCollapsed]      = C(14, 16, 20);
+
+    colors[ImGuiCol_MenuBarBg]             = C(22, 25, 31);
+
+    colors[ImGuiCol_ScrollbarBg]           = ImVec4(BG0.x, BG0.y, BG0.z, 0.60f);
+    colors[ImGuiCol_ScrollbarGrab]         = C(51, 56, 65);
+    colors[ImGuiCol_ScrollbarGrabHovered]  = C(62, 68, 78);
+    colors[ImGuiCol_ScrollbarGrabActive]   = C(76, 84, 96);
+
+    colors[ImGuiCol_CheckMark]             = ACCENT;
+    colors[ImGuiCol_SliderGrab]            = ACCENT;
+    colors[ImGuiCol_SliderGrabActive]      = ACCENT_ACT;
+
+    colors[ImGuiCol_Button]                = C(45, 50, 59);
+    colors[ImGuiCol_ButtonHovered]         = BG4;
+    colors[ImGuiCol_ButtonActive]          = C(54, 60, 70);
+
+    colors[ImGuiCol_Header]                = BG3;
+    colors[ImGuiCol_HeaderHovered]         = BG4;
+    colors[ImGuiCol_HeaderActive]          = BG2;
+
+    colors[ImGuiCol_Separator]             = BRD;
+    colors[ImGuiCol_SeparatorHovered]      = C(72, 80, 92);
+    colors[ImGuiCol_SeparatorActive]       = C(72, 80, 92);
+
+    colors[ImGuiCol_ResizeGrip]            = C(51, 56, 65);
+    colors[ImGuiCol_ResizeGripHovered]     = C(62, 68, 78);
+    colors[ImGuiCol_ResizeGripActive]      = C(76, 84, 96);
+
+    colors[ImGuiCol_Tab]                   = C(27, 31, 38);
+    colors[ImGuiCol_TabHovered]            = C(40, 45, 53);
+    colors[ImGuiCol_TabActive]             = C(32, 36, 44);
+    colors[ImGuiCol_TabUnfocused]          = C(27, 31, 38);
+    colors[ImGuiCol_TabUnfocusedActive]    = C(32, 36, 44);
+
+    colors[ImGuiCol_PlotLines]             = C(156, 156, 156);
+    colors[ImGuiCol_PlotLinesHovered]      = ACCENT_HOV;
+    colors[ImGuiCol_PlotHistogram]         = C(156, 135, 0);
+    colors[ImGuiCol_PlotHistogramHovered]  = C(196, 175, 40);
+
+    colors[ImGuiCol_TableHeaderBg]         = C(28, 32, 39);
+    colors[ImGuiCol_TableBorderStrong]     = C(52, 58, 70);
+    colors[ImGuiCol_TableBorderLight]      = C(46, 52, 62);
+    colors[ImGuiCol_TableRowBg]            = ImVec4(1,1,1,0.00f);
+    colors[ImGuiCol_TableRowBgAlt]         = ImVec4(1,1,1,0.06f);
+
+    colors[ImGuiCol_TextSelectedBg]        = ImVec4(ACCENT.x, ACCENT.y, ACCENT.z, 0.35f);
+    colors[ImGuiCol_DragDropTarget]        = ImVec4(ACCENT.x, ACCENT.y, ACCENT.z, 0.90f);
+    colors[ImGuiCol_NavHighlight]          = ImVec4(ACCENT.x, ACCENT.y, ACCENT.z, 0.80f);
+    colors[ImGuiCol_NavWindowingHighlight] = ImVec4(1,1,1,0.70f);
+    colors[ImGuiCol_NavWindowingDimBg]     = ImVec4(0,0,0,0.60f);
+    colors[ImGuiCol_ModalWindowDimBg]      = ImVec4(0,0,0,0.50f);
+#endif
+}
+
 struct CampathCtx {
     bool active = false;
     double time = 0.0;
@@ -133,6 +252,7 @@ bool OverlayDx11::Initialize() {
 
     // Ensure an ImGui context exists (stub is idempotent)
     if (!ImGui::GetCurrentContext()) ImGui::CreateContext();
+    ApplyHlaeDarkStyle();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
@@ -658,7 +778,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     // Sequencer window (ImGui Neo Sequencer)
     if (g_ShowSequencer) {
         // Sequencer: horizontally resizable; adjust height to content each frame
-        ImGui::SetNextWindowSize(ImVec2(720, 260), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(720, 200), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("HLAE Sequencer", &g_ShowSequencer, ImGuiWindowFlags_NoCollapse)) {
             static ImGui::FrameIndexType s_seqFrame = 0;
             static ImGui::FrameIndexType s_seqStart = 0;
@@ -713,27 +833,22 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             // Keep just one row for the controls (no extra spacing baked in)
             float btnRowH   = ImGui::GetFrameHeight();
 
-            // Estimate a compact sequencer height: header + 1 track + small margins
-            int   trackCount   = 1;                          // you draw only "Campath"
-            float headerH      = ImGui::GetFrameHeight();    // ruler/header bar
-            float trackRowH    = ImGui::GetFrameHeight()*1.2f;
-            float margins      = st.ItemSpacing.y + st.FramePadding.y;
-
-            // Add extra space for per-keyframe labels drawn below the markers.
-            // Account for font global scale since layout metrics don't grow with it.
-            float labelExtra   = ImGui::GetTextLineHeightWithSpacing();
-            float fontScale    = ImMax(1.0f, ImGui::GetIO().FontGlobalScale);
-            float desiredSeqH  = headerH + trackCount * trackRowH + margins + labelExtra * fontScale;
+            // Compute a tight sequencer height: topbar + spacing + zoom + exactly one timeline row
+            const ImGuiNeoSequencerStyle& neo = ImGui::GetNeoSequencerStyle();
+            float topBarH = neo.TopBarHeight > 0.0f ? neo.TopBarHeight : (ImGui::CalcTextSize("100").y + st.FramePadding.y * 2.0f);
+            float zoomH   = ImGui::GetFontSize() * neo.ZoomHeightScale + st.FramePadding.y * 2.0f;
+            float rowLabelH = ImGui::CalcTextSize("Campath").y + st.FramePadding.y * 2.0f + neo.ItemSpacing.y * 2.0f;
+            float desiredSeqH  = topBarH + neo.TopBarSpacing + zoomH + rowLabelH;
 
             // Clamp: at least 100 px, at most what’s left after the controls row
-            float minSeqH      = 85.0f * fontScale; // ensure room for labels at higher DPI
+            float minSeqH      = ImMax(60.0f, topBarH + neo.TopBarSpacing + zoomH + rowLabelH);
             float maxSeqHAvail = ImMax(minSeqH, ImMax(55.0f, availY - btnRowH));
             float seqH         = ImClamp(desiredSeqH, minSeqH, maxSeqHAvail);
 
-            // Use dynamic sequencer height so labels have space across DPI scales
+            // Use an explicit child height sized to sequencer content for stable layout across DPI scales
             ImGui::BeginChild("seq_child", ImVec2(0.0f, seqH), false); // scrolling lives inside this child
             {
-                const ImVec2 seqSize(ImGui::GetContentRegionAvail().x, 0.0f);
+                const ImVec2 seqSize(ImVec2(ImGui::GetContentRegionAvail().x, seqH));
                 const ImGuiNeoSequencerFlags seqFlags =
                     ImGuiNeoSequencerFlags_AlwaysShowHeader |
                     ImGuiNeoSequencerFlags_EnableSelection |
@@ -1200,8 +1315,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 ImVec2 cur = ImGui::GetWindowSize();
                 float remain = ImGui::GetContentRegionAvail().y; // remaining vertical space
                 float desired = cur.y - remain;
-                // Optional: clamp to a sensible minimum
-                float min_h = ImGui::GetFrameHeightWithSpacing() * 6.0f;
+                // Optional: clamp to a small minimum to avoid collapse
+                // Lowered to reduce excess bottom gap when preview slider is hidden
+                float min_h = ImGui::GetFrameHeightWithSpacing() * 3.0f;
                 if (desired < min_h) desired = min_h;
                 ImGui::SetWindowSize(ImVec2(cur.x, desired));
             }
@@ -1359,9 +1475,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
     // Tiny panel to pick operation/mode
     ImGui::Begin("Gizmo", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-    if (ImGui::RadioButton("Translate (G)", g_GizmoOp == ImGuizmo::TRANSLATE)) g_GizmoOp = ImGuizmo::TRANSLATE;
+    if (ImGui::RadioButton("Pos (G)", g_GizmoOp == ImGuizmo::TRANSLATE)) g_GizmoOp = ImGuizmo::TRANSLATE;
     ImGui::SameLine();
-    if (ImGui::RadioButton("Rotate (R)",    g_GizmoOp == ImGuizmo::ROTATE))    g_GizmoOp = ImGuizmo::ROTATE;
+    if (ImGui::RadioButton("Rot (R)",    g_GizmoOp == ImGuizmo::ROTATE))    g_GizmoOp = ImGuizmo::ROTATE;
     if (ImGui::RadioButton("Local",     g_GizmoMode == ImGuizmo::LOCAL))   g_GizmoMode = ImGuizmo::LOCAL;
     ImGui::SameLine();
     if (ImGui::RadioButton("World",     g_GizmoMode == ImGuizmo::WORLD))   g_GizmoMode = ImGuizmo::WORLD;
