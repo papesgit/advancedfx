@@ -33,3 +33,6 @@
 [submodule "deps/release/injector"]
 	path = deps/release/injector
 	url = https://github.com/advancedfx/injector.git
+[submodule "shared/overlay/third_party/imgui"]
+	path = shared/overlay/third_party/imgui
+	url = https://github.com/ocornut/imgui
