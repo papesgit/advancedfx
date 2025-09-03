@@ -10,15 +10,21 @@ using namespace Afx::Math;
 
 struct CamPathValue
 {
-	double X;
-	double Y;
-	double Z;
+    double X;
+    double Y;
+    double Z;
 
-	Quaternion R;
+    Quaternion R;
 
-	double Fov;
+    double Fov;
 
-	bool Selected;
+    bool Selected;
+
+    // Per-key tangents and modes (for Hermite interpolation)
+    double TxIn, TxOut; unsigned char TxModeIn, TxModeOut;
+    double TyIn, TyOut; unsigned char TyModeIn, TyModeOut;
+    double TzIn, TzOut; unsigned char TzModeIn, TzModeOut;
+    double TfovIn, TfovOut; unsigned char TfovModeIn, TfovModeOut;
 
 	CamPathValue();
 
@@ -52,12 +58,13 @@ typedef void (*CamPathChanged)(void * pUserData);
 class CamPath
 {
 public:
-	enum DoubleInterp {
-		DI_DEFAULT = 0,
-		DI_LINEAR = 1,
-		DI_CUBIC = 2,
-		_DI_COUNT = 3
-	};
+    enum DoubleInterp {
+        DI_DEFAULT = 0,
+        DI_LINEAR = 1,
+        DI_CUBIC = 2,
+        DI_CUSTOM = 3,
+        _DI_COUNT = 4
+    };
 
 	enum QuaternionInterp {
 		QI_DEFAULT = 0,
@@ -69,8 +76,19 @@ public:
 	static bool DoubleInterp_FromString(char const * value, DoubleInterp & outValue);
 	static char const * DoubleInterp_ToString(DoubleInterp value);
 
-	static bool QuaternionInterp_FromString(char const * value, QuaternionInterp & outValue);
-	static char const * QuaternionInterp_ToString(QuaternionInterp value);
+    static bool QuaternionInterp_FromString(char const * value, QuaternionInterp & outValue);
+    static char const * QuaternionInterp_ToString(QuaternionInterp value);
+
+    // Tangent editing support (for custom Hermite interpolation)
+    enum TangentMode : unsigned char {
+        TM_AUTO = 0,
+        TM_FLAT = 1,
+        TM_LINEAR = 2,
+        TM_FREE = 3
+    };
+
+    static bool TangentMode_FromString(char const* value, unsigned char& outValue);
+    static char const* TangentMode_ToString(unsigned char value);
 
 	CamPath();
 	
@@ -129,7 +147,12 @@ public:
 
 	void SetAngles(double yPitch, double zYaw, double xRoll, bool setY = true, bool setZ = true, bool setX = true);
 
-	void SetFov(double fov);
+    void SetFov(double fov);
+
+    // Custom tangent editing APIs (apply to selected keys if any, otherwise all)
+    enum Channel { CH_X = 0, CH_Y = 1, CH_Z = 2, CH_FOV = 3 };
+    void SetTangent(Channel ch, bool setIn, bool setOut, double slopeIn, double slopeOut);
+    void SetTangentMode(Channel ch, bool setIn, bool setOut, unsigned char mode);
 
 	void Rotate(double yPitch, double zYaw, double xRoll);
 
@@ -214,10 +237,31 @@ private:
 		return value.Fov;
 	}
 
-	static bool SelectedSelector(CamPathValue const & value)
-	{
-		return value.Selected;
-	}
+    static bool SelectedSelector(CamPathValue const & value)
+    {
+        return value.Selected;
+    }
+
+    // Tangent selectors for Hermite interpolation (double channels)
+    static double XTanInSelector(CamPathValue const& v) { return v.TxIn; }
+    static double XTanOutSelector(CamPathValue const& v) { return v.TxOut; }
+    static unsigned char XTanModeInSelector(CamPathValue const& v) { return v.TxModeIn; }
+    static unsigned char XTanModeOutSelector(CamPathValue const& v) { return v.TxModeOut; }
+
+    static double YTanInSelector(CamPathValue const& v) { return v.TyIn; }
+    static double YTanOutSelector(CamPathValue const& v) { return v.TyOut; }
+    static unsigned char YTanModeInSelector(CamPathValue const& v) { return v.TyModeIn; }
+    static unsigned char YTanModeOutSelector(CamPathValue const& v) { return v.TyModeOut; }
+
+    static double ZTanInSelector(CamPathValue const& v) { return v.TzIn; }
+    static double ZTanOutSelector(CamPathValue const& v) { return v.TzOut; }
+    static unsigned char ZTanModeInSelector(CamPathValue const& v) { return v.TzModeIn; }
+    static unsigned char ZTanModeOutSelector(CamPathValue const& v) { return v.TzModeOut; }
+
+    static double FovTanInSelector(CamPathValue const& v) { return v.TfovIn; }
+    static double FovTanOutSelector(CamPathValue const& v) { return v.TfovOut; }
+    static unsigned char FovTanModeInSelector(CamPathValue const& v) { return v.TfovModeIn; }
+    static unsigned char FovTanModeOutSelector(CamPathValue const& v) { return v.TfovModeOut; }
 
 	bool m_Enabled;
 	bool m_Hold = false;

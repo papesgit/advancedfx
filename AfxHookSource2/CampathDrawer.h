@@ -221,8 +221,18 @@ private:
 	public:
 		CCampathDrawerFunctor(CCampathDrawer * drawer) {
 			m_DynamicProperties = new CDynamicProperties(drawer);
-			m_LessDynamicProperties = drawer->m_LessDynamicProperties;
-			m_LessDynamicProperties->AddRef();
+			// Safely capture LessDynamicProperties with AddRef while avoiding races with CamPathChanged.
+			{
+				std::lock_guard<std::mutex> lock(drawer->m_LessDynamicPropertiesMutex);
+				if (nullptr != drawer->m_LessDynamicProperties) {
+					m_LessDynamicProperties = drawer->m_LessDynamicProperties;
+					m_LessDynamicProperties->AddRef();
+				} else {
+					// Build a private snapshot for this functor if drawer has none at the moment.
+					m_LessDynamicProperties = new CLessDynamicProperties(drawer);
+					m_LessDynamicProperties->AddRef();
+				}
+			}
 		}
 
 		virtual ~CCampathDrawerFunctor() {
@@ -288,6 +298,7 @@ private:
 	ID3D11PixelShader * m_DrawTextureShader = nullptr;
 
 	CLessDynamicProperties * m_LessDynamicProperties = nullptr;
+	std::mutex m_LessDynamicPropertiesMutex;
 
 	static void CampathChangedFn(void * pUserData);
 

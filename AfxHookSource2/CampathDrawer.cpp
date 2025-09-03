@@ -477,6 +477,7 @@ void CCampathDrawer::CampathChangedFn(void * pUserData) {
 
 void CCampathDrawer::CamPathChanged()
 {
+	std::lock_guard<std::mutex> lock(m_LessDynamicPropertiesMutex);
 	if(m_LessDynamicProperties) {
 		m_LessDynamicProperties->Release();
 		m_LessDynamicProperties = nullptr;
@@ -777,9 +778,12 @@ void CCampathDrawer::OnEngineThread_SetupViewDone() {
 	if(!m_Draw)
 		return;
 
-	if(nullptr == m_LessDynamicProperties) {
-		m_LessDynamicProperties = new CLessDynamicProperties(this); // CPU expensive.
-		m_LessDynamicProperties->AddRef();		
+	{
+		std::lock_guard<std::mutex> lock(m_LessDynamicPropertiesMutex);
+		if(nullptr == m_LessDynamicProperties) {
+			m_LessDynamicProperties = new CLessDynamicProperties(this); // CPU expensive.
+			m_LessDynamicProperties->AddRef();		
+		}
 	}
 
 	{

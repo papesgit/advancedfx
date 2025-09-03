@@ -195,6 +195,33 @@ static char g_OverlayConsoleInput[512] = {0};
 static bool g_OverlayConsoleScrollToBottom = false;
 // Sequencer toggle state (shared between tabs and window)
 static bool g_ShowSequencer = false;
+// Curve editor state (Campath)
+static bool g_ShowCurveEditor = false;
+static int g_CurveChannel = 0; // 0=X,1=Y,2=Z,3=FOV
+static float g_CurvePadding = 12.0f;
+static float g_CurveValueScale = 1.0f;
+static float g_CurveValueOffset = 0.0f;
+static std::vector<int> g_CurveSelection;
+
+// Standalone curve editor cache (times and values only; relative time from campath)
+struct CurveCache {
+    bool valid = false;
+    std::vector<double> times;
+    std::vector<CamPathValue> values;
+} g_CurveCache;
+
+static void CurveCache_Rebuild()
+{
+    g_CurveCache.valid = true;
+    g_CurveCache.times.clear();
+    g_CurveCache.values.clear();
+    g_CurveCache.times.reserve(g_CamPath.GetSize());
+    g_CurveCache.values.reserve(g_CamPath.GetSize());
+    for (CamPathIterator it = g_CamPath.GetBegin(); it != g_CamPath.GetEnd(); ++it) {
+        g_CurveCache.times.push_back(it.GetTime());
+        g_CurveCache.values.push_back(it.GetValue());
+    }
+}
 // Sequencer preview behavior: when true, keep the preview pose after releasing slider;
 // when false, restore prior pose if Mirv Camera was enabled before preview.
 static bool g_PreviewFollow = false;
@@ -971,6 +998,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         rebuild_cache_from_campath();
                         g_SequencerNeedsRefresh = false;
                         s_cache.valid = true;
+                        // Also invalidate standalone curve cache so it rebuilds with updated times
+                        g_CurveCache.valid = false;
                         // Also reset the drag sentinel so the next block doesn't think a user drag just ended
                         s_wasDragging = ImGui::NeoIsDraggingSelection();
                     }
@@ -1025,6 +1054,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                                 g_SequencerNeedsRefresh = true;
                                 s_lastUiSelection = curUiSelection;
                             }
+                            // Mirror to curve editor
+                            g_CurveSelection = curUiSelection;
                         }
                         if (rightClickedIndex >= 0) {
                             // Do not immediately activate gizmo; defer to context menu action
@@ -1190,6 +1221,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             // 5) Update cache times and mark invalid so the next frame refreshes from the authoritative state
                             for (size_t i = 0; i < newKeys.size(); ++i) s_cache.times[i] = newKeys[i].t;
                             s_cache.valid = false;
+                            g_CurveCache.valid = false;
 
                             // 6) Keep ImGuizmo target alive across the move by remapping to its new index
                             if (g_LastCampathCtx.active && prevGizmoIdx >= 0) {
@@ -1271,6 +1303,216 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     advancedfx::Message("Overlay: mirv_campath add at preview (t=%.3f)\n", tEval);
                 } else {
                     advancedfx::Warning("Overlay: Not enough campath keyframes to add at preview.\n");
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(g_ShowCurveEditor ? "Hide Curve Editor" : "Show Curve Editor"))
+                g_ShowCurveEditor = !g_ShowCurveEditor;
+            // Standalone Curve Editor (outside Neo timeline)
+            if (g_ShowCurveEditor) {
+                ImGui::Separator();
+                ImGui::SeparatorText("Curve Editor");
+                ImGui::RadioButton("X", &g_CurveChannel, 0); ImGui::SameLine();
+                ImGui::RadioButton("Y", &g_CurveChannel, 1); ImGui::SameLine();
+                ImGui::RadioButton("Z", &g_CurveChannel, 2); ImGui::SameLine();
+                ImGui::RadioButton("FOV", &g_CurveChannel, 3);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Use Custom")) {
+                    Afx_ExecClientCmd("mirv_campath edit interp position custom; mirv_campath edit interp fov custom");
+                }
+                // Sliders on same row with reserved right space
+                // Two equal-width sliders that grow/shrink with window size
+                ImGui::SameLine();
+                {
+                    const ImGuiStyle& st = ImGui::GetStyle();
+                    const float rightGap = 110.0f * g_UiScale; // small reserve at far right to avoid clipping
+                    float avail = ImGui::GetContentRegionAvail().x;
+                    float per = (avail - rightGap - st.ItemSpacing.x) * 0.5f;
+                    if (per < 100.0f) per = (avail > 0.0f ? avail * 0.45f : 100.0f);
+
+                    ImGui::SetNextItemWidth(per);
+                    ImGui::SliderFloat("Zoom Y", &g_CurveValueScale, 0.1f, 10.0f, "%.2fx");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(per);
+                    ImGui::SliderFloat("Offset Y", &g_CurveValueOffset, -1000.0f, 1000.0f, "%.1f");
+                }
+
+                // Keep cache fresh (standalone)
+                if (!g_CurveCache.valid || g_CurveCache.times.size() != g_CamPath.GetSize())
+                    CurveCache_Rebuild();
+
+                if (g_CurveCache.times.size() >= 2) {
+                    ImVec2 canvasSize(ImGui::GetContentRegionAvail().x, 220.0f);
+                    ImGui::BeginChild("##campath_curve2", canvasSize, true, ImGuiWindowFlags_NoScrollWithMouse);
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    ImVec2 p0 = ImGui::GetCursorScreenPos();
+                    ImVec2 p1 = ImVec2(p0.x + canvasSize.x, p0.y + canvasSize.y);
+                    // Background
+                    dl->AddRectFilled(p0, p1, IM_COL32(18,22,26,255));
+                    dl->AddRect(p0, p1, IM_COL32(60,70,80,255));
+                    auto toX = [&](double t){
+                        double tMin = g_CurveCache.times.front(); double tMax = g_CurveCache.times.back();
+                        double u = (t - tMin) / (tMax - tMin + 1e-12);
+                        return p0.x + (float)u * (canvasSize.x - 2*g_CurvePadding) + g_CurvePadding;
+                    };
+                    // Value bounds
+                    double vMin = 0.0, vMax = 0.0; bool firstV = true;
+                    for (size_t i = 0; i < g_CurveCache.values.size(); ++i) {
+                        const CamPathValue& v = g_CurveCache.values[i];
+                        double vv = (g_CurveChannel==0? v.X : g_CurveChannel==1? v.Y : g_CurveChannel==2? v.Z : v.Fov);
+                        if (firstV) { vMin = vMax = vv; firstV=false; }
+                        else { vMin = (std::min)(vMin, vv); vMax = (std::max)(vMax, vv); }
+                    }
+                    if (vMax - vMin < 1e-3) { vMax = vMin + 1.0; }
+                    double vCenter = 0.5 * (vMin + vMax) + (double)g_CurveValueOffset;
+                    double vHalf   = 0.5 * (vMax - vMin);
+                    if (vHalf < 1e-6) vHalf = 1e-6;
+                    auto toY = [&](double v){
+                        double norm = (v - vCenter) / vHalf; // -1..1
+                        double yNorm = (norm * 0.5 * (double)g_CurveValueScale + 0.5); // 0..1 (top to bottom inverted later)
+                        if (yNorm < 0.0) yNorm = 0.0; if (yNorm > 1.0) yNorm = 1.0;
+                        float y = p1.y - (float)yNorm * (canvasSize.y - 2.0f * g_CurvePadding) - g_CurvePadding;
+                        return y;
+                    };
+                    // Grid
+                    for (int i = 0; i <= 10; ++i) {
+                        float x = p0.x + i * (canvasSize.x - 2*g_CurvePadding)/10.0f + g_CurvePadding;
+                        dl->AddLine(ImVec2(x, p0.y + g_CurvePadding), ImVec2(x, p1.y - g_CurvePadding), IM_COL32(40,48,56,255));
+                    }
+                    for (int i = 0; i <= 6; ++i) {
+                        float y = p0.y + i * (canvasSize.y - 2*g_CurvePadding)/6.0f + g_CurvePadding;
+                        dl->AddLine(ImVec2(p0.x + g_CurvePadding, y), ImVec2(p1.x - g_CurvePadding, y), IM_COL32(40,48,56,255));
+                    }
+                    // Draw segments
+                    for (size_t i = 0; i + 1 < g_CurveCache.times.size(); ++i) {
+                        double t0 = g_CurveCache.times[i]; double t1 = g_CurveCache.times[i+1];
+                        const CamPathValue& cv0 = g_CurveCache.values[i];
+                        const CamPathValue& cv1 = g_CurveCache.values[i+1];
+                        double y0 = (g_CurveChannel==0? cv0.X : g_CurveChannel==1? cv0.Y : g_CurveChannel==2? cv0.Z : cv0.Fov);
+                        double y1 = (g_CurveChannel==0? cv1.X : g_CurveChannel==1? cv1.Y : g_CurveChannel==2? cv1.Z : cv1.Fov);
+                        // Fetch tangents and modes by index (stable against time jitter)
+                        auto getValueAt = [&](size_t idx)->CamPathValue {
+                            size_t j = 0; CamPathValue out{};
+                            for (CamPathIterator it = g_CamPath.GetBegin(); it != g_CamPath.GetEnd(); ++it, ++j) { if (j == idx) { out = it.GetValue(); break; } }
+                            return out;
+                        };
+                        CamPathValue vLeft  = getValueAt(i);
+                        CamPathValue vRight = getValueAt(i+1);
+
+                        // Helper to get chosen component from CamPathValue
+                        auto comp = [&](const CamPathValue& v)->double { return (g_CurveChannel==0? v.X : g_CurveChannel==1? v.Y : g_CurveChannel==2? v.Z : v.Fov); };
+                        // Numeric derivative sampling of actual campath Eval
+                        auto compEval = [&](double t)->double { CamPathValue vv = g_CamPath.Eval(t); return comp(vv); };
+
+                        double h = (t1 - t0);
+                        double eps = (std::max)(1e-6, (std::min)(h * 0.01, 0.05)); // step for derivative
+
+                        // Determine which interpolation method is active for this channel
+                        bool isCustom = (g_CurveChannel==3) ? (g_CamPath.FovInterpMethod_get() == CamPath::DI_CUSTOM)
+                                                           : (g_CamPath.PositionInterpMethod_get() == CamPath::DI_CUSTOM);
+
+                        // Effective OUT slope at left key
+                        double mOut;
+                        if (isCustom) {
+                            unsigned char modeOut = (g_CurveChannel==0? vLeft.TxModeOut : g_CurveChannel==1? vLeft.TyModeOut : g_CurveChannel==2? vLeft.TzModeOut : vLeft.TfovModeOut);
+                            if (modeOut == (unsigned char)CamPath::TM_FREE) mOut = (g_CurveChannel==0? vLeft.TxOut : g_CurveChannel==1? vLeft.TyOut : g_CurveChannel==2? vLeft.TzOut : vLeft.TfovOut);
+                            else if (modeOut == (unsigned char)CamPath::TM_FLAT) mOut = 0.0;
+                            else if (modeOut == (unsigned char)CamPath::TM_LINEAR) mOut = (y1 - y0) / h;
+                            else /* AUTO */ mOut = (compEval(t0 + eps) - y0) / eps;
+                        } else {
+                            // Non-custom interp: represent actual campath slope
+                            mOut = (compEval(t0 + eps) - y0) / eps;
+                        }
+
+                        // Effective IN slope at right key
+                        double mIn;
+                        if (isCustom) {
+                            unsigned char modeIn = (g_CurveChannel==0? vRight.TxModeIn : g_CurveChannel==1? vRight.TyModeIn : g_CurveChannel==2? vRight.TzModeIn : vRight.TfovModeIn);
+                            if (modeIn == (unsigned char)CamPath::TM_FREE) mIn = (g_CurveChannel==0? vRight.TxIn : g_CurveChannel==1? vRight.TyIn : g_CurveChannel==2? vRight.TzIn : vRight.TfovIn);
+                            else if (modeIn == (unsigned char)CamPath::TM_FLAT) mIn = 0.0;
+                            else if (modeIn == (unsigned char)CamPath::TM_LINEAR) mIn = (y1 - y0) / h;
+                            else /* AUTO */ mIn = (y1 - compEval(t1 - eps)) / eps;
+                        } else {
+                            mIn = (y1 - compEval(t1 - eps)) / eps;
+                        }
+                        ImVec2 P0(toX(t0), toY(y0));
+                        ImVec2 P3(toX(t1), toY(y1));
+                        ImVec2 P1(toX(t0 + h/3.0), toY(y0 + (h/3.0)*mOut));
+                        ImVec2 P2(toX(t1 - h/3.0), toY(y1 - (h/3.0)*mIn));
+                        dl->AddBezierCubic(P0, P1, P2, P3, IM_COL32(32,208,194,255), 2.0f);
+                        // Handles
+                        float r=4.0f; dl->AddCircleFilled(P0,r,IM_COL32(220,220,220,255)); dl->AddCircleFilled(P3,r,IM_COL32(220,220,220,255));
+                        dl->AddLine(P0,P1,IM_COL32(180,128,64,200)); dl->AddLine(P3,P2,IM_COL32(180,128,64,200));
+                        dl->AddCircleFilled(P1,r,IM_COL32(255,180,80,255)); dl->AddCircleFilled(P2,r,IM_COL32(255,180,80,255));
+                        // Drag handles (vertical only)
+                        ImGui::SetCursorScreenPos(ImVec2(P1.x-6,P1.y-6));
+                        char id1[32]; snprintf(id1, sizeof(id1), "##h1b_%zu", i);
+                        ImGui::InvisibleButton(id1, ImVec2(12,12));
+                        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) {
+                            ImVec2 mp = ImGui::GetIO().MousePos; float newY = (std::max)(p0.y+g_CurvePadding, (std::min)(mp.y, p1.y-g_CurvePadding));
+                            // Invert mapping to value using current Zoom/Offset
+                            double yNorm = (p1.y - newY - g_CurvePadding) / (canvasSize.y - 2*g_CurvePadding);
+                            double norm = (yNorm - 0.5) / (0.5 * (double)g_CurveValueScale);
+                            if (norm < -10.0) norm = -10.0; if (norm > 10.0) norm = 10.0; // guard
+                            double newV = vCenter + norm * vHalf;
+                            double newSlope = (newV - y0) / (h/3.0);
+                            CamPath::Channel ch = (g_CurveChannel==0? CamPath::CH_X : g_CurveChannel==1? CamPath::CH_Y : g_CurveChannel==2? CamPath::CH_Z : CamPath::CH_FOV);
+                            // Temporarily disable campath drawer to avoid concurrency during mutation
+                            extern CCampathDrawer g_CampathDrawer;
+                            bool prevDraw = g_CampathDrawer.Draw_get();
+                            g_CampathDrawer.Draw_set(false);
+                            g_CamPath.SelectNone(); g_CamPath.SelectAdd((size_t)i,(size_t)i);
+                            // If ALT held → edit only OUT; otherwise lock tangents (IN+OUT same slope)
+                            ImGuiIO& io = ImGui::GetIO();
+                            bool altHeld = io.KeyAlt;
+#ifdef ImGuiMod_Alt
+                            altHeld = altHeld || ((io.KeyMods & ImGuiMod_Alt) != 0);
+#endif
+                            if (altHeld) {
+                                g_CamPath.SetTangentMode(ch, false, true, (unsigned char)CamPath::TM_FREE);
+                                g_CamPath.SetTangent(ch, false, true, 0.0, newSlope);
+                            } else {
+                                g_CamPath.SetTangentMode(ch, true, true, (unsigned char)CamPath::TM_FREE);
+                                g_CamPath.SetTangent(ch, true, true, newSlope, newSlope);
+                            }
+                            g_CampathDrawer.Draw_set(prevDraw);
+                            g_SequencerNeedsRefresh = true;
+                        }
+                        ImGui::SetCursorScreenPos(ImVec2(P2.x-6,P2.y-6));
+                        char id2[32]; snprintf(id2, sizeof(id2), "##h2b_%zu", i);
+                        ImGui::InvisibleButton(id2, ImVec2(12,12));
+                        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) {
+                            ImVec2 mp = ImGui::GetIO().MousePos; float newY = (std::max)(p0.y+g_CurvePadding, (std::min)(mp.y, p1.y-g_CurvePadding));
+                            double yNorm = (p1.y - newY - g_CurvePadding) / (canvasSize.y - 2*g_CurvePadding);
+                            double norm = (yNorm - 0.5) / (0.5 * (double)g_CurveValueScale);
+                            if (norm < -10.0) norm = -10.0; if (norm > 10.0) norm = 10.0;
+                            double newV = vCenter + norm * vHalf;
+                            double newSlope = (y1 - newV) / (h/3.0);
+                            CamPath::Channel ch = (g_CurveChannel==0? CamPath::CH_X : g_CurveChannel==1? CamPath::CH_Y : g_CurveChannel==2? CamPath::CH_Z : CamPath::CH_FOV);
+                            extern CCampathDrawer g_CampathDrawer;
+                            bool prevDraw = g_CampathDrawer.Draw_get();
+                            g_CampathDrawer.Draw_set(false);
+                            g_CamPath.SelectNone(); g_CamPath.SelectAdd((size_t)(i+1),(size_t)(i+1));
+                            // If ALT held → edit only IN; otherwise lock tangents (IN+OUT same slope)
+                            ImGuiIO& io2 = ImGui::GetIO();
+                            bool altHeld2 = io2.KeyAlt;
+#ifdef ImGuiMod_Alt
+                            altHeld2 = altHeld2 || ((io2.KeyMods & ImGuiMod_Alt) != 0);
+#endif
+                            if (altHeld2) {
+                                g_CamPath.SetTangentMode(ch, true, false, (unsigned char)CamPath::TM_FREE);
+                                g_CamPath.SetTangent(ch, true, false, newSlope, 0.0);
+                            } else {
+                                g_CamPath.SetTangentMode(ch, true, true, (unsigned char)CamPath::TM_FREE);
+                                g_CamPath.SetTangent(ch, true, true, newSlope, newSlope);
+                            }
+                            g_CampathDrawer.Draw_set(prevDraw);
+                            g_SequencerNeedsRefresh = true;
+                        }
+                    }
+                    ImGui::EndChild();
+                } else {
+                    ImGui::TextDisabled("Add at least 2 keyframes to edit curves.");
                 }
             }
             // Preview slider (scrub camera along campath without playing demo)

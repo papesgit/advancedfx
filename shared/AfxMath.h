@@ -37,6 +37,9 @@ u x v = (u_1 X + u_2 Y + u_3 Z) x (v_1 X + v_2 Y + v_3 Z)
 
 #include "AfxRefCounted.h"
 #include <map>
+#include <vector>
+#include <atomic>
+#include <mutex>
 
 namespace Afx {
 namespace Math {
@@ -356,6 +359,232 @@ public:
 	/// Must not be called if CanEval() returns false!<br />
 	/// </remarks>
 	virtual T Eval(double t) = 0;
+};
+
+// Hermite (per-key slope) interpolation for doubles.
+// Uses per-key in/out slopes and modes resolved via provided selectors.
+// Selectors are free functions retrieving values from the TMap (e.g. CamPathValue).
+//
+// Requirements for callers:
+// - Provide selectors for: value, tangent-in, tangent-out, mode-in, mode-out.
+// - Modes are encoded as uint8_t: 0=Auto, 1=Flat, 2=Linear, 3=Free (caller convention).
+// - Interpolation clamps outside range (no extrapolation).
+template<class TMap>
+class CHermiteDoubleInterpolation
+: public CInterpolation<double>
+{
+public:
+    CHermiteDoubleInterpolation(
+        CInterpolationMap<TMap>* map,
+        double (* valueSelector)(const TMap&),
+        double (* tanInSelector)(const TMap&),
+        double (* tanOutSelector)(const TMap&),
+        unsigned char (* modeInSelector)(const TMap&),
+        unsigned char (* modeOutSelector)(const TMap&)
+    )
+    : CInterpolation<double>()
+    , m_Map(map)
+    , m_ValueSelector(valueSelector)
+    , m_TanInSelector(tanInSelector)
+    , m_TanOutSelector(tanOutSelector)
+    , m_ModeInSelector(modeInSelector)
+    , m_ModeOutSelector(modeOutSelector)
+    {
+        InterpolationMapChanged();
+    }
+
+    virtual ~CHermiteDoubleInterpolation()
+    {
+        Free();
+    }
+
+    virtual void InterpolationMapChanged(void)
+    {
+        m_Rebuild.store(true, std::memory_order_relaxed);
+    }
+
+    virtual bool CanEval(void) const
+    {
+        return 2 <= m_Map->size();
+    }
+
+    virtual double Eval(double t)
+    {
+        std::lock_guard<std::mutex> _lock(m_Lock);
+        size_t n = m_Map->size();
+        if (n < 2) throw "CHermiteDoubleInterpolation::Eval requires at least 2 points.";
+
+        if (m_Rebuild.load(std::memory_order_relaxed))
+        {
+            m_Rebuild.store(false, std::memory_order_relaxed);
+
+            Free();
+
+            m_Build.n = (int)n;
+            m_Build.T = new double[n];
+            m_Build.V = new double[n];
+            m_Build.MIn = new double[n];
+            m_Build.MOut = new double[n];
+            m_Build.Has = true;
+
+            // Copy values
+            size_t i = 0;
+            for (typename CInterpolationMap<TMap>::const_iterator it = m_Map->begin(); it != m_Map->end(); ++it)
+            {
+                m_Build.T[i] = it->first;
+                const TMap& val = it->second;
+                m_Build.V[i] = m_ValueSelector(val);
+                // Raw user-provided tangents (only used for Free mode)
+                double rawIn = m_TanInSelector(val);
+                double rawOut = m_TanOutSelector(val);
+                unsigned char modeIn = m_ModeInSelector(val);
+                unsigned char modeOut = m_ModeOutSelector(val);
+                // Initialize; actual resolution below (needs neighbors)
+                m_Build.MIn[i] = (modeIn == 3 /*Free*/) ? rawIn : 0.0;
+                m_Build.MOut[i] = (modeOut == 3 /*Free*/) ? rawOut : 0.0;
+                ++i;
+            }
+
+            // Compute natural cubic-spline (clamped with endpoint derivatives 0.0) second derivatives
+            // to match CCubicDoubleInterpolation's default behavior for Auto mode.
+            double* y2 = new double[n];
+            spline(m_Build.T, m_Build.V, (int)n, false, 0.0, false, 0.0, y2);
+
+            // Precompute auto in/out slopes per key from y2
+            std::vector<double> autoIn(n, 0.0), autoOut(n, 0.0);
+            for (size_t i = 0; i + 1 < n; ++i)
+            {
+                double h = m_Build.T[i + 1] - m_Build.T[i];
+                if (h <= 0.0) continue;
+                double sec = (m_Build.V[i + 1] - m_Build.V[i]) / h;
+                double d_i_right = sec - h * (2.0 * y2[i] + y2[i + 1]) / 6.0;       // derivative at x_i (segment i)
+                double d_ip1_left = sec + h * (2.0 * y2[i + 1] + y2[i]) / 6.0;      // derivative at x_{i+1} (segment i)
+                autoOut[i] = d_i_right;
+                autoIn[i + 1] = d_ip1_left;
+            }
+
+            // Resolve modes to effective slopes.
+            for (size_t k = 0; k < n; ++k)
+            {
+                // neighbors
+                bool hasPrev = k > 0;
+                bool hasNext = k + 1 < n;
+                double ti = m_Build.T[k];
+                double vi = m_Build.V[k];
+                double tim1 = hasPrev ? m_Build.T[k - 1] : ti;
+                double tip1 = hasNext ? m_Build.T[k + 1] : ti;
+                double vim1 = hasPrev ? m_Build.V[k - 1] : vi;
+                double vip1 = hasNext ? m_Build.V[k + 1] : vi;
+
+                const TMap& val = m_Map->find(m_Build.T[k])->second;
+                unsigned char modeIn = m_ModeInSelector(val);
+                unsigned char modeOut = m_ModeOutSelector(val);
+
+                // In slope
+                if (modeIn == 1 /*Flat*/)
+                {
+                    m_Build.MIn[k] = 0.0;
+                }
+                else if (modeIn == 2 /*Linear*/)
+                {
+                    if (hasPrev)
+                        m_Build.MIn[k] = (vi - vim1) / (ti - tim1);
+                    else if (hasNext)
+                        m_Build.MIn[k] = (vip1 - vi) / (tip1 - ti);
+                    else
+                        m_Build.MIn[k] = 0.0;
+                }
+                else if (modeIn == 0 /*Auto*/)
+                {
+                    m_Build.MIn[k] = autoIn[k];
+                }
+                // else Free already set from raw
+
+                // Out slope
+                if (modeOut == 1 /*Flat*/)
+                {
+                    m_Build.MOut[k] = 0.0;
+                }
+                else if (modeOut == 2 /*Linear*/)
+                {
+                    if (hasNext)
+                        m_Build.MOut[k] = (vip1 - vi) / (tip1 - ti);
+                    else if (hasPrev)
+                        m_Build.MOut[k] = (vi - vim1) / (ti - tim1);
+                    else
+                        m_Build.MOut[k] = 0.0;
+                }
+                else if (modeOut == 0 /*Auto*/)
+                {
+                    m_Build.MOut[k] = autoOut[k];
+                }
+                // else Free already set from raw
+            }
+
+            delete[] y2;
+        }
+
+        // Clamp for no extrapolation
+        if (t <= m_Build.T[0]) return m_Build.V[0];
+        if (t >= m_Build.T[m_Build.n - 1]) return m_Build.V[m_Build.n - 1];
+
+        // Binary search for interval
+        int klo = 0, khi = m_Build.n - 1;
+        while (khi - klo > 1)
+        {
+            int k = (khi + klo) >> 1;
+            if (m_Build.T[k] > t) khi = k; else klo = k;
+        }
+
+        double t0 = m_Build.T[klo];
+        double t1 = m_Build.T[khi];
+        double v0 = m_Build.V[klo];
+        double v1 = m_Build.V[khi];
+        double m0 = m_Build.MOut[klo];
+        double m1 = m_Build.MIn[khi];
+        double h = t1 - t0;
+        if (h <= 0.0) return v0; // guard
+
+        double u = (t - t0) / h; // 0..1
+        double u2 = u * u;
+        double u3 = u2 * u;
+        double h00 = 2.0*u3 - 3.0*u2 + 1.0;
+        double h10 = u3 - 2.0*u2 + u;
+        double h01 = -2.0*u3 + 3.0*u2;
+        double h11 = u3 - u2;
+
+        return h00 * v0 + h * h10 * m0 + h01 * v1 + h * h11 * m1;
+    }
+
+private:
+    CInterpolationMap<TMap>* m_Map;
+    double (* m_ValueSelector)(const TMap&);
+    double (* m_TanInSelector)(const TMap&);
+    double (* m_TanOutSelector)(const TMap&);
+    unsigned char (* m_ModeInSelector)(const TMap&);
+    unsigned char (* m_ModeOutSelector)(const TMap&);
+
+    struct Build_s
+    {
+        int n = 0;
+        bool Has = false;
+        double* T = 0;
+        double* V = 0;
+        double* MIn = 0;
+        double* MOut = 0;
+    } m_Build;
+
+    std::atomic_bool m_Rebuild{true};
+    std::mutex m_Lock;
+
+    void Free()
+    {
+        delete[] m_Build.MOut; m_Build.MOut = 0;
+        delete[] m_Build.MIn;  m_Build.MIn  = 0;
+        delete[] m_Build.V;    m_Build.V    = 0;
+        delete[] m_Build.T;    m_Build.T    = 0;
+        m_Build.n = 0;
+    }
 };
 
 template<class TMap>

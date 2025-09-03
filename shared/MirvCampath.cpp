@@ -351,6 +351,52 @@ void MirvCampath_ConCommand(advancedfx::ICommandArgs* args, advancedfx::Con_Prin
 			{
 				const char* arg2 = args->ArgV(2);
 
+				// Handle tangent commands early and explicitly to avoid nesting issues.
+				if (!_stricmp("tangent", arg2))
+				{
+					// mirv_campath edit tangent <x|y|z|fov> <in|out|both> <value>
+					if (5 <= argc)
+					{
+						const char* axis = args->ArgV(3);
+						const char* side = args->ArgV(4);
+						double val = argc >= 6 ? atof(args->ArgV(5)) : 0.0;
+						CamPath::Channel ch;
+						if (!_stricmp(axis, "x")) ch = CamPath::CH_X; else if (!_stricmp(axis, "y")) ch = CamPath::CH_Y; else if (!_stricmp(axis, "z")) ch = CamPath::CH_Z; else if (!_stricmp(axis, "fov")) ch = CamPath::CH_FOV; else ch = CamPath::CH_X;
+						bool setIn = false, setOut = false;
+						if (!_stricmp(side, "in")) setIn = true; else if (!_stricmp(side, "out")) setOut = true; else if (!_stricmp(side, "both")) { setIn = setOut = true; }
+
+						camPath->SetTangent(ch, setIn, setOut, val, val);
+						camPath->SetTangentMode(ch, setIn, setOut, (unsigned char)CamPath::TM_FREE);
+						return;
+					}
+
+					conMessage("%s edit tangent <x|y|z|fov> <in|out|both> <value> - Set per-key tangent(s) for selected keys (or all).\n", args->ArgV(0));
+					return;
+				}
+				else if (!_stricmp("tangentmode", arg2))
+				{
+					// mirv_campath edit tangentmode <x|y|z|fov> <in|out|both> <auto|flat|linear|free>
+					if (6 <= argc)
+					{
+						const char* axis = args->ArgV(3);
+						const char* side = args->ArgV(4);
+						const char* modeStr = args->ArgV(5);
+						CamPath::Channel ch;
+						if (!_stricmp(axis, "x")) ch = CamPath::CH_X; else if (!_stricmp(axis, "y")) ch = CamPath::CH_Y; else if (!_stricmp(axis, "z")) ch = CamPath::CH_Z; else if (!_stricmp(axis, "fov")) ch = CamPath::CH_FOV; else ch = CamPath::CH_X;
+						bool setIn = false, setOut = false;
+						if (!_stricmp(side, "in")) setIn = true; else if (!_stricmp(side, "out")) setOut = true; else if (!_stricmp(side, "both")) { setIn = setOut = true; }
+						unsigned char mode;
+						if (CamPath::TangentMode_FromString(modeStr, mode))
+						{
+							camPath->SetTangentMode(ch, setIn, setOut, mode);
+							return;
+						}
+					}
+
+					conMessage("%s edit tangentmode <x|y|z|fov> <in|out|both> <auto|flat|linear|free> - Set tangent mode(s) for selected keys (or all).\n", args->ArgV(0));
+					return;
+				}
+
 				if (!_stricmp("start", arg2))
 				{
 					if (3 == argc)
@@ -734,14 +780,18 @@ void MirvCampath_ConCommand(advancedfx::ICommandArgs* args, advancedfx::Con_Prin
 														}
 											}
 
-											conMessage(
-												"%s edit interp position [...]\n"
-												"%s edit interp rotation [...]\n"
-												"%s edit interp fov [...]\n"
-												, args->ArgV(0)
-												, args->ArgV(0)
-												, args->ArgV(0)
-											);
+											// tangent handled earlier
+											else
+											{
+												// Interp usage when no further args
+												conMessage("%s edit interp position [...]\n", args->ArgV(0));
+												conMessage("%s edit interp rotation [...]\n", args->ArgV(0));
+												conMessage("%s edit interp fov [...]\n", args->ArgV(0));
+												return;
+											}
+											// tangentmode handled earlier
+
+											// no sub-command matched in interp branch; return to outer help
 											return;
 										}
 			}
@@ -756,6 +806,8 @@ void MirvCampath_ConCommand(advancedfx::ICommandArgs* args, advancedfx::Con_Prin
 			conMessage("%s edit rotate <dPitchY> <dYawZ> <dRollX> - Rotate path [or selected keyframes] around the middle of their bounding box by the given angles in degrees.\n", args->ArgV(0));
 			conMessage("%s edit anchor #<anchorId>|(<anchorX > <anchorY> <anchorZ> <anchorPitchY> <anchorYawZ> <anchorRollX>) current|(<destX > <destY> <destZ> <destPitchY> <destYawZ> <destRollX>) - This translates and rotates a path using a given anchor (either a keyframe ID or actual values) and a destination for the anchor (use current for current camera view).\n", args->ArgV(0));
 			conMessage("%s edit interp [...] - Edit interpolation properties.\n", args->ArgV(0));
+			conMessage("%s edit tangent <x|y|z|fov> <in|out|both> <value> - Set per-key tangent(s) for selected keys (or all).\n", args->ArgV(0));
+			conMessage("%s edit tangentmode <x|y|z|fov> <in|out|both> <auto|flat|linear|free> - Set tangent mode(s) for selected keys (or all).\n", args->ArgV(0));
 			return;
 		}
 		else if (!_stricmp("select", subcmd))

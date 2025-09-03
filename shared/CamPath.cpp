@@ -39,6 +39,12 @@ bool CamPath::DoubleInterp_FromString(char const * value, DoubleInterp & outValu
 		outValue = DI_CUBIC;
 		return true;
 	}
+	else
+	if(!_stricmp(value,"custom"))
+	{
+		outValue = DI_CUSTOM;
+		return true;
+	}
 
 	return false;
 }
@@ -53,6 +59,8 @@ char const * CamPath::DoubleInterp_ToString(DoubleInterp value)
 		return "linear";
 	case DI_CUBIC:
 		return "cubic";
+	case DI_CUSTOM:
+		return "custom";
 	}
 
 	return "[unkown]";
@@ -96,8 +104,33 @@ char const * CamPath::QuaternionInterp_ToString(QuaternionInterp value)
 	return "[unkown]";
 }
 
+bool CamPath::TangentMode_FromString(char const* value, unsigned char& outValue)
+{
+	if(!_stricmp(value,"auto")) { outValue = (unsigned char)TM_AUTO; return true; }
+	if(!_stricmp(value,"flat")) { outValue = (unsigned char)TM_FLAT; return true; }
+	if(!_stricmp(value,"linear")) { outValue = (unsigned char)TM_LINEAR; return true; }
+	if(!_stricmp(value,"free")) { outValue = (unsigned char)TM_FREE; return true; }
+	return false;
+}
+
+char const* CamPath::TangentMode_ToString(unsigned char value)
+{
+	switch((TangentMode)value)
+	{
+	case TM_AUTO: return "auto";
+	case TM_FLAT: return "flat";
+	case TM_LINEAR: return "linear";
+	case TM_FREE: return "free";
+	}
+	return "[unknown]";
+}
+
 CamPathValue::CamPathValue()
 : X(0.0), Y(0.0), Z(0.0), R(), Fov(90.0), Selected(false)
+, TxIn(0.0), TxOut(0.0), TxModeIn(0), TxModeOut(0)
+, TyIn(0.0), TyOut(0.0), TyModeIn(0), TyModeOut(0)
+, TzIn(0.0), TzOut(0.0), TzModeIn(0), TzModeOut(0)
+, TfovIn(0.0), TfovOut(0.0), TfovModeIn(0), TfovModeOut(0)
 {
 }
 
@@ -108,11 +141,20 @@ CamPathValue::CamPathValue(double x, double y, double z, double pitch, double ya
 , R(Quaternion::FromQREulerAngles(QREulerAngles::FromQEulerAngles(QEulerAngles(pitch,yaw,roll))))
 , Fov(fov)
 , Selected(false)
+, TxIn(0.0), TxOut(0.0), TxModeIn(0), TxModeOut(0)
+, TyIn(0.0), TyOut(0.0), TyModeIn(0), TyModeOut(0)
+, TzIn(0.0), TzOut(0.0), TzModeIn(0), TzModeOut(0)
+, TfovIn(0.0), TfovOut(0.0), TfovModeIn(0), TfovModeOut(0)
 {
 }
 
 CamPathValue::CamPathValue(double x, double y, double z, double q_w, double q_x, double q_y, double q_z, double fov, bool selected)
-: X(x), Y(y), Z(z), R(Quaternion(q_w,q_x,q_y,q_z)), Fov(fov), Selected(selected) {
+: X(x), Y(y), Z(z), R(Quaternion(q_w,q_x,q_y,q_z)), Fov(fov), Selected(selected)
+, TxIn(0.0), TxOut(0.0), TxModeIn(0), TxModeOut(0)
+, TyIn(0.0), TyOut(0.0), TyModeIn(0), TyModeOut(0)
+, TzIn(0.0), TzOut(0.0), TzModeIn(0), TzModeOut(0)
+, TfovIn(0.0), TfovOut(0.0), TfovModeIn(0), TfovModeOut(0)
+{
 }
 
 CamPathIterator::CamPathIterator(CInterpolationMap<CamPathValue>::const_iterator & it) : wrapped(it)
@@ -227,6 +269,11 @@ void CamPath::PositionInterpMethod_set(DoubleInterp value)
 		m_YInterp = new CLinearDoubleInterpolation<CamPathValue>(&m_YView);
 		m_ZInterp = new CLinearDoubleInterpolation<CamPathValue>(&m_ZView);
 		break;
+	case DI_CUSTOM:
+		m_XInterp = new CHermiteDoubleInterpolation<CamPathValue>(&m_Map, XSelector, XTanInSelector, XTanOutSelector, XTanModeInSelector, XTanModeOutSelector);
+		m_YInterp = new CHermiteDoubleInterpolation<CamPathValue>(&m_Map, YSelector, YTanInSelector, YTanOutSelector, YTanModeInSelector, YTanModeOutSelector);
+		m_ZInterp = new CHermiteDoubleInterpolation<CamPathValue>(&m_Map, ZSelector, ZTanInSelector, ZTanOutSelector, ZTanModeInSelector, ZTanModeOutSelector);
+		break;
 	default:
 		m_XInterp = new CCubicDoubleInterpolation<CamPathValue>(&m_XView);
 		m_YInterp = new CCubicDoubleInterpolation<CamPathValue>(&m_YView);
@@ -276,6 +323,9 @@ void CamPath::FovInterpMethod_set(DoubleInterp value)
 	{
 	case DI_LINEAR:
 		m_FovInterp = new CLinearDoubleInterpolation<CamPathValue>(&m_FovView);
+		break;
+	case DI_CUSTOM:
+		m_FovInterp = new CHermiteDoubleInterpolation<CamPathValue>(&m_Map, FovSelector, FovTanInSelector, FovTanOutSelector, FovTanModeInSelector, FovTanModeOutSelector);
 		break;
 	default:
 		m_FovInterp = new CCubicDoubleInterpolation<CamPathValue>(&m_FovView);
@@ -451,6 +501,27 @@ bool CamPath::Save(wchar_t const * fileName)
 		pt->append_attribute(doc.allocate_attribute("qy", double2xml(doc,it.wrapped->second.R.Y)));
 		pt->append_attribute(doc.allocate_attribute("qz", double2xml(doc,it.wrapped->second.R.Z)));
 
+		// Tangents and modes (optional; always saved for completeness)
+		pt->append_attribute(doc.allocate_attribute("tx_in", double2xml(doc, it.wrapped->second.TxIn)));
+		pt->append_attribute(doc.allocate_attribute("tx_out", double2xml(doc, it.wrapped->second.TxOut)));
+		pt->append_attribute(doc.allocate_attribute("tx_mode_in", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TxModeIn))));
+		pt->append_attribute(doc.allocate_attribute("tx_mode_out", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TxModeOut))));
+
+		pt->append_attribute(doc.allocate_attribute("ty_in", double2xml(doc, it.wrapped->second.TyIn)));
+		pt->append_attribute(doc.allocate_attribute("ty_out", double2xml(doc, it.wrapped->second.TyOut)));
+		pt->append_attribute(doc.allocate_attribute("ty_mode_in", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TyModeIn))));
+		pt->append_attribute(doc.allocate_attribute("ty_mode_out", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TyModeOut))));
+
+		pt->append_attribute(doc.allocate_attribute("tz_in", double2xml(doc, it.wrapped->second.TzIn)));
+		pt->append_attribute(doc.allocate_attribute("tz_out", double2xml(doc, it.wrapped->second.TzOut)));
+		pt->append_attribute(doc.allocate_attribute("tz_mode_in", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TzModeIn))));
+		pt->append_attribute(doc.allocate_attribute("tz_mode_out", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TzModeOut))));
+
+		pt->append_attribute(doc.allocate_attribute("tfov_in", double2xml(doc, it.wrapped->second.TfovIn)));
+		pt->append_attribute(doc.allocate_attribute("tfov_out", double2xml(doc, it.wrapped->second.TfovOut)));
+		pt->append_attribute(doc.allocate_attribute("tfov_mode_in", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TfovModeIn))));
+		pt->append_attribute(doc.allocate_attribute("tfov_mode_out", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TfovModeOut))));
+
 		if(val.Selected)
 			pt->append_attribute(doc.allocate_attribute("selected"));
 
@@ -576,6 +647,27 @@ bool CamPath::Load(wchar_t const * fileName)
 						r.Fov = dFov;
 						r.Selected = 0 != selectedA;
 
+						// Optional tangents/modes
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tx_in")) r.TxIn = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tx_out")) r.TxOut = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tx_mode_in")) TangentMode_FromString(a->value(), r.TxModeIn);
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tx_mode_out")) TangentMode_FromString(a->value(), r.TxModeOut);
+
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("ty_in")) r.TyIn = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("ty_out")) r.TyOut = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("ty_mode_in")) TangentMode_FromString(a->value(), r.TyModeIn);
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("ty_mode_out")) TangentMode_FromString(a->value(), r.TyModeOut);
+
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tz_in")) r.TzIn = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tz_out")) r.TzOut = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tz_mode_in")) TangentMode_FromString(a->value(), r.TzModeIn);
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tz_mode_out")) TangentMode_FromString(a->value(), r.TzModeOut);
+
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_in")) r.TfovIn = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_out")) r.TfovOut = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_mode_in")) TangentMode_FromString(a->value(), r.TfovModeIn);
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_mode_out")) TangentMode_FromString(a->value(), r.TfovModeOut);
+
 						// Add point:
 						m_Map[dT] = r;
 					}
@@ -592,6 +684,27 @@ bool CamPath::Load(wchar_t const * fileName)
 						r.R = Quaternion::FromQREulerAngles(QREulerAngles::FromQEulerAngles(QEulerAngles(dRYpitch, dRZyaw, dRXroll)));
 						r.Fov = dFov;
 						r.Selected = 0 != selectedA;
+
+						// Optional tangents/modes
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tx_in")) r.TxIn = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tx_out")) r.TxOut = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tx_mode_in")) TangentMode_FromString(a->value(), r.TxModeIn);
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tx_mode_out")) TangentMode_FromString(a->value(), r.TxModeOut);
+
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("ty_in")) r.TyIn = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("ty_out")) r.TyOut = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("ty_mode_in")) TangentMode_FromString(a->value(), r.TyModeIn);
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("ty_mode_out")) TangentMode_FromString(a->value(), r.TyModeOut);
+
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tz_in")) r.TzIn = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tz_out")) r.TzOut = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tz_mode_in")) TangentMode_FromString(a->value(), r.TzModeIn);
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tz_mode_out")) TangentMode_FromString(a->value(), r.TzModeOut);
+
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_in")) r.TfovIn = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_out")) r.TfovOut = atof(a->value());
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_mode_in")) TangentMode_FromString(a->value(), r.TfovModeIn);
+						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_mode_out")) TangentMode_FromString(a->value(), r.TfovModeOut);
 
 						// Add point:
 						m_Map[dT] = r;
@@ -976,6 +1089,117 @@ void CamPath::SetFov(double fov)
 	m_FovInterp->InterpolationMapChanged();
 
 	Changed();
+}
+
+void CamPath::SetTangent(Channel ch, bool setIn, bool setOut, double slopeIn, double slopeOut)
+{
+    if (m_Map.size() < 1) return;
+
+    bool selectAll = true;
+    for (CInterpolationMap<CamPathValue>::const_iterator itc = m_Map.begin(); itc != m_Map.end(); ++itc)
+    {
+        if (itc->second.Selected) { selectAll = false; break; }
+    }
+
+    for (CInterpolationMap<CamPathValue>::iterator it = m_Map.begin(); it != m_Map.end(); ++it)
+    {
+        CamPathValue cur = it->second;
+        if (selectAll || cur.Selected)
+        {
+            switch (ch)
+            {
+            case CH_X:
+                if (setIn)  cur.TxIn = slopeIn;
+                if (setOut) cur.TxOut = slopeOut;
+                break;
+            case CH_Y:
+                if (setIn)  cur.TyIn = slopeIn;
+                if (setOut) cur.TyOut = slopeOut;
+                break;
+            case CH_Z:
+                if (setIn)  cur.TzIn = slopeIn;
+                if (setOut) cur.TzOut = slopeOut;
+                break;
+            case CH_FOV:
+                if (setIn)  cur.TfovIn = slopeIn;
+                if (setOut) cur.TfovOut = slopeOut;
+                break;
+            }
+            it->second = cur;
+        }
+    }
+
+    // Invalidate caches
+    if (ch == CH_X || ch == CH_Y || ch == CH_Z)
+    {
+        if (m_PositionInterpMethod == DI_CUSTOM)
+        {
+            m_XInterp->InterpolationMapChanged();
+            m_YInterp->InterpolationMapChanged();
+            m_ZInterp->InterpolationMapChanged();
+        }
+    }
+    if (ch == CH_FOV && m_FovInterpMethod == DI_CUSTOM)
+    {
+        m_FovInterp->InterpolationMapChanged();
+    }
+
+    Changed();
+}
+
+void CamPath::SetTangentMode(Channel ch, bool setIn, bool setOut, unsigned char mode)
+{
+    if (m_Map.size() < 1) return;
+
+    bool selectAll = true;
+    for (CInterpolationMap<CamPathValue>::const_iterator itc = m_Map.begin(); itc != m_Map.end(); ++itc)
+    {
+        if (itc->second.Selected) { selectAll = false; break; }
+    }
+
+    for (CInterpolationMap<CamPathValue>::iterator it = m_Map.begin(); it != m_Map.end(); ++it)
+    {
+        CamPathValue cur = it->second;
+        if (selectAll || cur.Selected)
+        {
+            switch (ch)
+            {
+            case CH_X:
+                if (setIn)  cur.TxModeIn = mode;
+                if (setOut) cur.TxModeOut = mode;
+                break;
+            case CH_Y:
+                if (setIn)  cur.TyModeIn = mode;
+                if (setOut) cur.TyModeOut = mode;
+                break;
+            case CH_Z:
+                if (setIn)  cur.TzModeIn = mode;
+                if (setOut) cur.TzModeOut = mode;
+                break;
+            case CH_FOV:
+                if (setIn)  cur.TfovModeIn = mode;
+                if (setOut) cur.TfovModeOut = mode;
+                break;
+            }
+            it->second = cur;
+        }
+    }
+
+    if (ch == CH_X || ch == CH_Y || ch == CH_Z)
+    {
+        if (m_PositionInterpMethod == DI_CUSTOM)
+        {
+            m_XInterp->InterpolationMapChanged();
+            m_YInterp->InterpolationMapChanged();
+            m_ZInterp->InterpolationMapChanged();
+        }
+    }
+    if (ch == CH_FOV && m_FovInterpMethod == DI_CUSTOM)
+    {
+        m_FovInterp->InterpolationMapChanged();
+    }
+
+    Changed();
 }
 
 void CamPath::Rotate(double yPitch, double zYaw, double xRoll)
