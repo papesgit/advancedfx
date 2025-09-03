@@ -131,6 +131,7 @@ CamPathValue::CamPathValue()
 , TyIn(0.0), TyOut(0.0), TyModeIn(0), TyModeOut(0)
 , TzIn(0.0), TzOut(0.0), TzModeIn(0), TzModeOut(0)
 , TfovIn(0.0), TfovOut(0.0), TfovModeIn(0), TfovModeOut(0)
+, TxWIn(1.0), TxWOut(1.0), TyWIn(1.0), TyWOut(1.0), TzWIn(1.0), TzWOut(1.0), TfovWIn(1.0), TfovWOut(1.0)
 {
 }
 
@@ -145,6 +146,7 @@ CamPathValue::CamPathValue(double x, double y, double z, double pitch, double ya
 , TyIn(0.0), TyOut(0.0), TyModeIn(0), TyModeOut(0)
 , TzIn(0.0), TzOut(0.0), TzModeIn(0), TzModeOut(0)
 , TfovIn(0.0), TfovOut(0.0), TfovModeIn(0), TfovModeOut(0)
+, TxWIn(1.0), TxWOut(1.0), TyWIn(1.0), TyWOut(1.0), TzWIn(1.0), TzWOut(1.0), TfovWIn(1.0), TfovWOut(1.0)
 {
 }
 
@@ -154,6 +156,7 @@ CamPathValue::CamPathValue(double x, double y, double z, double q_w, double q_x,
 , TyIn(0.0), TyOut(0.0), TyModeIn(0), TyModeOut(0)
 , TzIn(0.0), TzOut(0.0), TzModeIn(0), TzModeOut(0)
 , TfovIn(0.0), TfovOut(0.0), TfovModeIn(0), TfovModeOut(0)
+, TxWIn(1.0), TxWOut(1.0), TyWIn(1.0), TyWOut(1.0), TzWIn(1.0), TzWOut(1.0), TfovWIn(1.0), TfovWOut(1.0)
 {
 }
 
@@ -270,9 +273,28 @@ void CamPath::PositionInterpMethod_set(DoubleInterp value)
 		m_ZInterp = new CLinearDoubleInterpolation<CamPathValue>(&m_ZView);
 		break;
 	case DI_CUSTOM:
-		m_XInterp = new CHermiteDoubleInterpolation<CamPathValue>(&m_Map, XSelector, XTanInSelector, XTanOutSelector, XTanModeInSelector, XTanModeOutSelector);
-		m_YInterp = new CHermiteDoubleInterpolation<CamPathValue>(&m_Map, YSelector, YTanInSelector, YTanOutSelector, YTanModeInSelector, YTanModeOutSelector);
-		m_ZInterp = new CHermiteDoubleInterpolation<CamPathValue>(&m_Map, ZSelector, ZTanInSelector, ZTanOutSelector, ZTanModeInSelector, ZTanModeOutSelector);
+		m_XInterp = new CHermiteDoubleInterpolation<CamPathValue>(
+			&m_Map,
+			XSelector,
+			XTanInSelector, XTanOutSelector,
+			XTanModeInSelector, XTanModeOutSelector,
+			XTanWInSelector, XTanWOutSelector);
+
+		m_YInterp = new CHermiteDoubleInterpolation<CamPathValue>(
+			&m_Map,
+			YSelector,
+			YTanInSelector, YTanOutSelector,
+			YTanModeInSelector, YTanModeOutSelector,
+			YTanWInSelector, YTanWOutSelector);
+
+		m_ZInterp = new CHermiteDoubleInterpolation<CamPathValue>(
+			&m_Map,
+			ZSelector,
+			ZTanInSelector, ZTanOutSelector,
+			ZTanModeInSelector, ZTanModeOutSelector,
+			ZTanWInSelector, ZTanWOutSelector);
+
+
 		break;
 	default:
 		m_XInterp = new CCubicDoubleInterpolation<CamPathValue>(&m_XView);
@@ -325,7 +347,13 @@ void CamPath::FovInterpMethod_set(DoubleInterp value)
 		m_FovInterp = new CLinearDoubleInterpolation<CamPathValue>(&m_FovView);
 		break;
 	case DI_CUSTOM:
-		m_FovInterp = new CHermiteDoubleInterpolation<CamPathValue>(&m_Map, FovSelector, FovTanInSelector, FovTanOutSelector, FovTanModeInSelector, FovTanModeOutSelector);
+		m_FovInterp = new CHermiteDoubleInterpolation<CamPathValue>(
+			&m_Map,
+			FovSelector,
+			FovTanInSelector, FovTanOutSelector,
+			FovTanModeInSelector, FovTanModeOutSelector,
+			FovTanWInSelector, FovTanWOutSelector);
+
 		break;
 	default:
 		m_FovInterp = new CCubicDoubleInterpolation<CamPathValue>(&m_FovView);
@@ -522,6 +550,20 @@ bool CamPath::Save(wchar_t const * fileName)
 		pt->append_attribute(doc.allocate_attribute("tfov_mode_in", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TfovModeIn))));
 		pt->append_attribute(doc.allocate_attribute("tfov_mode_out", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TfovModeOut))));
 
+		pt->append_attribute(doc.allocate_attribute("tx_w_in",  double2xml(doc, it.wrapped->second.TxWIn)));
+		pt->append_attribute(doc.allocate_attribute("tx_w_out", double2xml(doc, it.wrapped->second.TxWOut)));
+
+		pt->append_attribute(doc.allocate_attribute("ty_w_in",  double2xml(doc, it.wrapped->second.TyWIn)));
+		pt->append_attribute(doc.allocate_attribute("ty_w_out", double2xml(doc, it.wrapped->second.TyWOut)));
+
+		pt->append_attribute(doc.allocate_attribute("tz_w_in",  double2xml(doc, it.wrapped->second.TzWIn)));
+		pt->append_attribute(doc.allocate_attribute("tz_w_out", double2xml(doc, it.wrapped->second.TzWOut)));
+
+		pt->append_attribute(doc.allocate_attribute("tfov_w_in",  double2xml(doc, it.wrapped->second.TfovWIn)));
+		pt->append_attribute(doc.allocate_attribute("tfov_w_out", double2xml(doc, it.wrapped->second.TfovWOut)));
+
+
+
 		if(val.Selected)
 			pt->append_attribute(doc.allocate_attribute("selected"));
 
@@ -668,6 +710,16 @@ bool CamPath::Load(wchar_t const * fileName)
 						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_mode_in")) TangentMode_FromString(a->value(), r.TfovModeIn);
 						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_mode_out")) TangentMode_FromString(a->value(), r.TfovModeOut);
 
+						if (auto* a = cur_node->first_attribute("tx_w_in"))   r.TxWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("tx_w_out"))  r.TxWOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("ty_w_in"))   r.TyWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("ty_w_out"))  r.TyWOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("tz_w_in"))   r.TzWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("tz_w_out"))  r.TzWOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("tfov_w_in"))  r.TfovWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("tfov_w_out")) r.TfovWOut = atof(a->value());
+
+
 						// Add point:
 						m_Map[dT] = r;
 					}
@@ -705,6 +757,16 @@ bool CamPath::Load(wchar_t const * fileName)
 						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_out")) r.TfovOut = atof(a->value());
 						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_mode_in")) TangentMode_FromString(a->value(), r.TfovModeIn);
 						if (rapidxml::xml_attribute<> * a = cur_node->first_attribute("tfov_mode_out")) TangentMode_FromString(a->value(), r.TfovModeOut);
+
+						if (auto* a = cur_node->first_attribute("tx_w_in"))   r.TxWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("tx_w_out"))  r.TxWOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("ty_w_in"))   r.TyWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("ty_w_out"))  r.TyWOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("tz_w_in"))   r.TzWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("tz_w_out"))  r.TzWOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("tfov_w_in"))  r.TfovWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("tfov_w_out")) r.TfovWOut = atof(a->value());
+
 
 						// Add point:
 						m_Map[dT] = r;
@@ -1196,6 +1258,43 @@ void CamPath::SetTangentMode(Channel ch, bool setIn, bool setOut, unsigned char 
     }
     if (ch == CH_FOV && m_FovInterpMethod == DI_CUSTOM)
     {
+        m_FovInterp->InterpolationMapChanged();
+    }
+
+    Changed();
+}
+
+void CamPath::SetTangentWeight(Channel ch, bool setIn, bool setOut, double wIn, double wOut)
+{
+    if (m_Map.empty()) return;
+
+    bool selectAll = true;
+    for (auto it = m_Map.begin(); it != m_Map.end(); ++it) {
+        if (it->second.Selected) { selectAll = false; break; }
+    }
+
+    for (auto it = m_Map.begin(); it != m_Map.end(); ++it) {
+        CamPathValue cur = it->second;
+        if (selectAll || cur.Selected) {
+            switch (ch) {
+            case CH_X:   if (setIn) cur.TxWIn = wIn;   if (setOut) cur.TxWOut = wOut; break;
+            case CH_Y:   if (setIn) cur.TyWIn = wIn;   if (setOut) cur.TyWOut = wOut; break;
+            case CH_Z:   if (setIn) cur.TzWIn = wIn;   if (setOut) cur.TzWOut = wOut; break;
+            case CH_FOV: if (setIn) cur.TfovWIn = wIn; if (setOut) cur.TfovWOut = wOut; break;
+            }
+            it->second = cur;
+        }
+    }
+
+    // weights affect only DI_CUSTOM paths (position/fov)
+    if (ch == CH_X || ch == CH_Y || ch == CH_Z) {
+        if (m_PositionInterpMethod == DI_CUSTOM) {
+            m_XInterp->InterpolationMapChanged();
+            m_YInterp->InterpolationMapChanged();
+            m_ZInterp->InterpolationMapChanged();
+        }
+    }
+    if (ch == CH_FOV && m_FovInterpMethod == DI_CUSTOM) {
         m_FovInterp->InterpolationMapChanged();
     }
 

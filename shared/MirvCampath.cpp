@@ -396,6 +396,37 @@ void MirvCampath_ConCommand(advancedfx::ICommandArgs* args, advancedfx::Con_Prin
 					conMessage("%s edit tangentmode <x|y|z|fov> <in|out|both> <auto|flat|linear|free> - Set tangent mode(s) for selected keys (or all).\n", args->ArgV(0));
 					return;
 				}
+				else if (!_stricmp("tangentweight", arg2))
+				{
+					// mirv_campath edit tangentweight <x|y|z|fov> <in|out|both> <value>
+					if (6 <= argc)
+					{
+						const char* axis = args->ArgV(3);
+						const char* side = args->ArgV(4);
+						double val = atof(args->ArgV(5));
+						CamPath::Channel ch;
+						if      (!_stricmp(axis, "x"))   ch = CamPath::CH_X;
+						else if (!_stricmp(axis, "y"))   ch = CamPath::CH_Y;
+						else if (!_stricmp(axis, "z"))   ch = CamPath::CH_Z;
+						else if (!_stricmp(axis, "fov")) ch = CamPath::CH_FOV;
+						else ch = CamPath::CH_X;
+
+						bool setIn = false, setOut = false;
+						if      (!_stricmp(side, "in"))   setIn = true;
+						else if (!_stricmp(side, "out"))  setOut = true;
+						else if (!_stricmp(side, "both")) { setIn = true; setOut = true; }
+
+						if (val < 0.01) val = 0.01;
+						if (val > 5.0)  val = 5.0;
+
+						camPath->SetTangentWeight(ch, setIn, setOut, val, val);
+						camPath->SetTangentMode(ch, setIn, setOut, (unsigned char)CamPath::TM_FREE);
+						return;
+					}
+
+					conMessage("%s edit tangentweight <x|y|z|fov> <in|out|both> <value> - Set tangent weight(s) for selected keys (or all). Default 1.0\n", args->ArgV(0));
+					return;
+				}
 
 				if (!_stricmp("start", arg2))
 				{

@@ -17,6 +17,15 @@
 #include "third_party/imguizmo/ImGuizmo.h"
 #include "../AfxConsole.h"
 #include "../AfxMath.h"
+static bool g_FreetypeOn =
+#ifdef IMGUI_ENABLE_FREETYPE
+    true;
+#else
+    false;
+#endif
+#ifdef IMGUI_ENABLE_FREETYPE
+#include "third_party/imgui/misc/freetype/imgui_freetype.h"
+#endif
 
 // Campath info (points and duration): access global campath and time.
 #include "../CamPath.h"
@@ -190,6 +199,8 @@ static bool g_SequencerNeedsRefresh = false;
 
 // Simple in-overlay console state
 static bool g_ShowOverlayConsole = false;
+static bool g_ShowCameraControl = false;
+static bool g_ShowGizmo = false;
 static std::vector<std::string> g_OverlayConsoleLog;
 static char g_OverlayConsoleInput[512] = {0};
 static bool g_OverlayConsoleScrollToBottom = false;
@@ -202,6 +213,20 @@ static float g_CurvePadding = 12.0f;
 static float g_CurveValueScale = 1.0f;
 static float g_CurveValueOffset = 0.0f;
 static std::vector<int> g_CurveSelection;
+
+// Fonts
+// Pointers to fonts we load at startup. We always have Default; the others
+// may be null if the system TTF file isn't found.
+static ImFont* g_FontDefault = nullptr;
+static ImFont* g_FontMono    = nullptr;
+static ImFont* g_FontSans    = nullptr;
+static ImFont* g_FontSilly   = nullptr;
+
+// Current choice in Settings tab: 0=Default, 1=Monospace, 2=Sans Serif, 3=Silly.
+static int g_FontChoice = 0;
+
+// Guard to run font loading once.
+static bool g_FontsLoaded = false;
 
 // Standalone curve editor cache (times and values only; relative time from campath)
 struct CurveCache {
@@ -293,8 +318,50 @@ bool OverlayDx11::Initialize() {
     if (!ImGui::GetCurrentContext()) ImGui::CreateContext();
     ApplyHlaeDarkStyle();
     ImGuiIO& io = ImGui::GetIO();
+
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
+    // Load our fonts once (before backend init so device objects match the atlas)
+    if (!g_FontsLoaded)
+    {
+        ImGuiIO& lio = ImGui::GetIO();
+        ImFontAtlas* atlas = lio.Fonts;
+    #ifdef IMGUI_ENABLE_FREETYPE
+        lio.Fonts->FontLoaderFlags |= ImGuiFreeTypeLoaderFlags_LightHinting;
+        //lio.Fonts->FontLoaderFlags |= ImGuiFreeTypeLoaderFlags_Monochrome;
+        lio.Fonts->FontLoaderFlags |= ImGuiFreeTypeLoaderFlags_MonoHinting;
+    #endif
+        // Always add the default ImGui font:
+        g_FontDefault = atlas->AddFontDefault();
+
+        // Helper to check if a Windows font file exists before adding:
+        auto addFontIfPresent = [&](const char* path, float size, ImFontConfig* cfg = nullptr)->ImFont*
+        {
+            FILE* f = nullptr;
+            if (0 == fopen_s(&f, path, "rb") && f) { fclose(f); return cfg ? atlas->AddFontFromFileTTF(path, size, cfg) : atlas->AddFontFromFileTTF(path, size); }
+            return nullptr;
+        };
+
+
+        // Reasonable base size (UI scaling is handled via FontGlobalScale elsewhere)
+        const float baseSize = 16.0f;
+
+        // Windows system fonts (best-effort):
+        ImFontConfig cfg{};
+        cfg.OversampleH = 1;
+        cfg.OversampleV = 1;
+        cfg.PixelSnapH  = true;
+        cfg.RasterizerMultiply = 1.05f;
+        g_FontMono = addFontIfPresent("C:\\Windows\\Fonts\\consola.ttf", baseSize, &cfg);
+        g_FontSans  = addFontIfPresent("C:\\Windows\\Fonts\\segoeui.ttf", baseSize, &cfg);   // Segoe UI (sans-serif)
+        g_FontSilly = addFontIfPresent("C:\\Windows\\Fonts\\comic.ttf",   baseSize, &cfg);   // Comic Sans (silly)
+
+        // Start with default:
+        lio.FontDefault = g_FontDefault ? g_FontDefault : lio.Fonts->Fonts.empty() ? nullptr : lio.Fonts->Fonts[0];
+
+        g_FontsLoaded = true;
+    }
+
 
     if (!ImGui_ImplWin32_Init(m_Hwnd)) return false;
     if (!ImGui_ImplDX11_Init(m_Device, m_Context)) return false;
@@ -490,7 +557,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     ImGui::NewFrame();
 
     // Diagnostic watermark always (when overlay visible)
-    ImGui::GetForegroundDrawList()->AddText(ImVec2(8,8), IM_COL32(255,255,255,255), "HLAE Overlay 0.1", nullptr);
+    ImGui::GetForegroundDrawList()->AddText(ImVec2(8,8), IM_COL32(255,255,255,255), "HLAE Overlay - Press F8 to toggle", nullptr);
 
     // Minimal window content per requirements
     // Make window non-resizable and auto-size to its content/DPI
@@ -643,7 +710,10 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
             // Sequencer toggle
             ImGui::Checkbox("Show Sequencer", &g_ShowSequencer);
-
+            ImGui::SameLine();
+            ImGui::Checkbox("Camera Control", &g_ShowCameraControl);
+            ImGui::SameLine();
+            ImGui::Checkbox("Show Gizmo", &g_ShowGizmo);
             ImGui::EndTabItem();
         }
 
@@ -826,7 +896,17 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             ImGui::SameLine(); if (ImGui::SmallButton("125%")) g_UiScale = 1.25f;
             ImGui::SameLine(); if (ImGui::SmallButton("150%")) g_UiScale = 1.50f;
             ImGui::SameLine(); if (ImGui::SmallButton("200%")) g_UiScale = 2.00f;
-            io.FontGlobalScale = g_UiScale;
+            float scale = g_UiScale;
+
+            // apply font-specific correction
+            if (g_FontChoice == 2) { // Sans
+                scale *= 1.2f;
+            }
+            else if (g_FontChoice == 3) { // Silly
+                scale *= 1.2f;
+            }
+            float snapped = floorf(scale * 16.0f + 0.5f) / 16.0f;
+            io.FontGlobalScale = snapped;
 
             // Toggle overlay console + Open demo button (same line)
             ImGui::Checkbox("Show Console", &g_ShowOverlayConsole);
@@ -863,6 +943,35 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     g_DemoOpenDialog.ClearSelected();
                 }
             }
+            // UI Font picker
+            ImGui::SameLine();
+            {
+                const char* items[] = { "Default (ImGui)", "Monospace", "Sans Serif", "Silly" };
+                int prevChoice = g_FontChoice;
+
+                ImGui::SetNextItemWidth(ImGui::CalcTextSize("Default (ImGui)   ").x + ImGui::GetStyle().FramePadding.x * 8.0f);
+                if (ImGui::Combo("UI Font", &g_FontChoice, items, (int)(sizeof(items)/sizeof(items[0]))))
+                {
+                    ImFont* chosen = g_FontDefault;
+
+                    if (g_FontChoice == 1)      chosen = g_FontMono  ? g_FontMono  : g_FontDefault; // Monospace
+                    else if (g_FontChoice == 2) chosen = g_FontSans  ? g_FontSans  : g_FontDefault; // Sans Serif
+                    else if (g_FontChoice == 3) chosen = g_FontSilly ? g_FontSilly : g_FontDefault; // Silly
+
+                    ImGui::GetIO().FontDefault = chosen ? chosen : g_FontDefault;
+                }
+
+                // If the user picked a font that wasn't found, inform them (non-intrusively).
+                if ((g_FontChoice == 1 && !g_FontMono)
+                || (g_FontChoice == 2 && !g_FontSans)
+                || (g_FontChoice == 3 && !g_FontSilly))
+                {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(font not found, using Default)");
+                }
+            }
+            if (g_FreetypeOn) {ImGui::TextUnformatted("Freetype on");}
+
 
             ImGui::EndTabItem();
         }
@@ -1355,6 +1464,14 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         double u = (t - tMin) / (tMax - tMin + 1e-12);
                         return p0.x + (float)u * (canvasSize.x - 2*g_CurvePadding) + g_CurvePadding;
                     };
+                    auto fromX = [&](float px)->double {
+                        double tMin = g_CurveCache.times.front();
+                        double tMax = g_CurveCache.times.back();
+                        double u = (px - (p0.x + g_CurvePadding)) / (canvasSize.x - 2*g_CurvePadding);
+                        if (u < 0.0) u = 0.0; if (u > 1.0) u = 1.0;
+                        return tMin + u * (tMax - tMin + 1e-12);
+                    };
+
                     // Value bounds
                     double vMin = 0.0, vMax = 0.0; bool firstV = true;
                     for (size_t i = 0; i < g_CurveCache.values.size(); ++i) {
@@ -1437,8 +1554,25 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         }
                         ImVec2 P0(toX(t0), toY(y0));
                         ImVec2 P3(toX(t1), toY(y1));
-                        ImVec2 P1(toX(t0 + h/3.0), toY(y0 + (h/3.0)*mOut));
-                        ImVec2 P2(toX(t1 - h/3.0), toY(y1 - (h/3.0)*mIn));
+                        // Per-side weights (default 1.0 unless side is TM_FREE)
+                        double wOut = 1.0, wIn = 1.0;
+                        {
+                            // Fetch tangents/modes/weights of left/right points for current channel
+                            auto vLeft  = getValueAt(i);
+                            auto vRight = getValueAt(i+1);
+                            unsigned char modeOut = (g_CurveChannel==0? vLeft.TxModeOut : g_CurveChannel==1? vLeft.TyModeOut : g_CurveChannel==2? vLeft.TzModeOut : vLeft.TfovModeOut);
+                            unsigned char modeIn  = (g_CurveChannel==0? vRight.TxModeIn : g_CurveChannel==1? vRight.TyModeIn : g_CurveChannel==2? vRight.TzModeIn : vRight.TfovModeIn);
+                            if (modeOut == 3 /*Free*/)
+                                wOut = (g_CurveChannel==0? vLeft.TxWOut : g_CurveChannel==1? vLeft.TyWOut : g_CurveChannel==2? vLeft.TzWOut : vLeft.TfovWOut);
+                            if (modeIn == 3 /*Free*/)
+                                wIn  = (g_CurveChannel==0? vRight.TxWIn : g_CurveChannel==1? vRight.TyWIn : g_CurveChannel==2? vRight.TzWIn : vRight.TfovWIn);
+                            if (wOut < 0.0) wOut = 0.0;
+                            if (wIn  < 0.0) wIn  = 0.0;
+                        }
+
+                        ImVec2 P1(toX(t0 + wOut * (h/3.0)), toY(y0 + wOut * (h/3.0) * mOut));
+                        ImVec2 P2(toX(t1 - wIn  * (h/3.0)), toY(y1 - wIn  * (h/3.0) * mIn));
+
                         dl->AddBezierCubic(P0, P1, P2, P3, IM_COL32(32,208,194,255), 2.0f);
                         // Handles
                         float r=4.0f; dl->AddCircleFilled(P0,r,IM_COL32(220,220,220,255)); dl->AddCircleFilled(P3,r,IM_COL32(220,220,220,255));
@@ -1465,12 +1599,32 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             // If ALT held → edit only OUT; otherwise lock tangents (IN+OUT same slope)
                             ImGuiIO& io = ImGui::GetIO();
                             bool altHeld = io.KeyAlt;
-#ifdef ImGuiMod_Alt
+                            bool shiftHeld = io.KeyShift;
+
                             altHeld = altHeld || ((io.KeyMods & ImGuiMod_Alt) != 0);
-#endif
+                            shiftHeld = shiftHeld || ((io.KeyMods & ImGuiMod_Shift) != 0);
+
                             if (altHeld) {
                                 g_CamPath.SetTangentMode(ch, false, true, (unsigned char)CamPath::TM_FREE);
                                 g_CamPath.SetTangent(ch, false, true, 0.0, newSlope);
+                            }
+                            else if (shiftHeld) {
+                                ImVec2 mp = ImGui::GetIO().MousePos;
+                                double tMouse = fromX(mp.x);
+                                double newW = (tMouse - t0) / (h/3.0);
+                                if (newW < 0.01) newW = 0.01;
+                                if (newW > 5.0)  newW = 5.0;
+
+                                CamPath::Channel ch = (g_CurveChannel==0? CamPath::CH_X : g_CurveChannel==1? CamPath::CH_Y : g_CurveChannel==2? CamPath::CH_Z : CamPath::CH_FOV);
+                                extern CCampathDrawer g_CampathDrawer;
+                                bool prevDraw = g_CampathDrawer.Draw_get();
+                                g_CampathDrawer.Draw_set(false);
+                                g_CamPath.SelectNone(); g_CamPath.SelectAdd((size_t)i,(size_t)i);
+                                g_CamPath.SetTangentMode(ch, false, true, (unsigned char)CamPath::TM_FREE);
+                                g_CamPath.SetTangentWeight(ch, false, true, 1.0, newW);
+                                g_CampathDrawer.Draw_set(prevDraw);
+                                g_SequencerNeedsRefresh = true;
+                                // consume this drag (skip slope code)
                             } else {
                                 g_CamPath.SetTangentMode(ch, true, true, (unsigned char)CamPath::TM_FREE);
                                 g_CamPath.SetTangent(ch, true, true, newSlope, newSlope);
@@ -1496,12 +1650,31 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             // If ALT held → edit only IN; otherwise lock tangents (IN+OUT same slope)
                             ImGuiIO& io2 = ImGui::GetIO();
                             bool altHeld2 = io2.KeyAlt;
-#ifdef ImGuiMod_Alt
+                            bool shiftHeld2 = io2.KeyShift;
+
                             altHeld2 = altHeld2 || ((io2.KeyMods & ImGuiMod_Alt) != 0);
-#endif
+                            shiftHeld2 = shiftHeld2 || ((io2.KeyMods & ImGuiMod_Shift) != 0);
+
                             if (altHeld2) {
                                 g_CamPath.SetTangentMode(ch, true, false, (unsigned char)CamPath::TM_FREE);
                                 g_CamPath.SetTangent(ch, true, false, newSlope, 0.0);
+                            } 
+                            else if (shiftHeld2) {
+                                ImVec2 mp = ImGui::GetIO().MousePos;
+                                double tMouse = fromX(mp.x);
+                                double newW = (t1 - tMouse) / (h/3.0);
+                                if (newW < 0.01) newW = 0.01;
+                                if (newW > 5.0)  newW = 5.0;
+
+                                CamPath::Channel ch = (g_CurveChannel==0? CamPath::CH_X : g_CurveChannel==1? CamPath::CH_Y : g_CurveChannel==2? CamPath::CH_Z : CamPath::CH_FOV);
+                                extern CCampathDrawer g_CampathDrawer;
+                                bool prevDraw = g_CampathDrawer.Draw_get();
+                                g_CampathDrawer.Draw_set(false);
+                                g_CamPath.SelectNone(); g_CamPath.SelectAdd((size_t)(i+1),(size_t)(i+1));
+                                g_CamPath.SetTangentMode(ch, true, false, (unsigned char)CamPath::TM_FREE);
+                                g_CamPath.SetTangentWeight(ch, true, false, newW, 1.0);
+                                g_CampathDrawer.Draw_set(prevDraw);
+                                g_SequencerNeedsRefresh = true;
                             } else {
                                 g_CamPath.SetTangentMode(ch, true, true, (unsigned char)CamPath::TM_FREE);
                                 g_CamPath.SetTangent(ch, true, true, newSlope, newSlope);
@@ -1639,120 +1812,121 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     }
 
     // Mirv input camera controls/indicator
-    if (MirvInput* pMirv = Afx_GetMirvInput()) {
-        // Mirv Camera: horizontally resizable; adjust height to content each frame
-        ImGui::Begin("Mirv Camera");
-        bool camEnabled = pMirv->GetCameraControlMode();
-        ImGui::Text("Mirv Camera (C): %s", camEnabled ? "enabled" : "disabled");
-        ImGui::SameLine();
-        if (ImGui::Button(camEnabled ? "Disable" : "Enable")) {
-            pMirv->SetCameraControlMode(!camEnabled);
-        }
-        if (ImGui::GetActiveID() == 0) {
-            if (ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+    if (g_ShowCameraControl) {
+        if (MirvInput* pMirv = Afx_GetMirvInput()) {
+            // Mirv Camera: horizontally resizable; adjust height to content each frame
+            ImGui::Begin("Mirv Camera");
+            bool camEnabled = pMirv->GetCameraControlMode();
+            ImGui::Text("Mirv Camera (C): %s", camEnabled ? "enabled" : "disabled");
+            ImGui::SameLine();
+            if (ImGui::Button(camEnabled ? "Disable" : "Enable")) {
                 pMirv->SetCameraControlMode(!camEnabled);
             }
-        }
-        // FOV slider (reserve right space so label is always visible)
-        {
-            ImGuiStyle& st3 = ImGui::GetStyle();
-            float avail = ImGui::GetContentRegionAvail().x;
-            const char* lbl = "FOV";
-            float lblW = ImGui::CalcTextSize(lbl).x;
-            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
-            float width = avail - (lblW + rightGap);
-            if (width < 100.0f) width = avail * 0.6f; // fallback
-            ImGui::SetNextItemWidth(width);
-        }
-        // FOV slider (synced with RMB+wheel in passthrough)
-        if (!g_uiFovInit) { g_uiFov = GetLastCameraFov(); g_uiFovDefault = g_uiFov; g_uiFovInit = true; }
-        // While using RMB+F FOV-modifier, reflect live FOV into the slider value
-        if (pMirv->GetMouseFovMode()) {
-            g_uiFov = GetLastCameraFov();
-            g_uiFovInit = true;
-        }
-        {
-            float tmp = g_uiFov;
-            bool changed = ImGui::SliderFloat("FOV (F)", &tmp, 1.0f, 179.0f, "%.1f deg");
-            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
-            if (reset) {
-                g_uiFov = g_uiFovDefault;
-                ImGui::ClearActiveID();
-                pMirv->SetFov(g_uiFov);
-            } else if (changed) {
-                g_uiFov = tmp;
-                pMirv->SetFov(g_uiFov);
+            if (ImGui::GetActiveID() == 0) {
+                if (ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+                    pMirv->SetCameraControlMode(!camEnabled);
+                }
             }
-        }
+            // FOV slider (reserve right space so label is always visible)
+            {
+                ImGuiStyle& st3 = ImGui::GetStyle();
+                float avail = ImGui::GetContentRegionAvail().x;
+                const char* lbl = "FOV";
+                float lblW = ImGui::CalcTextSize(lbl).x;
+                float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+                float width = avail - (lblW + rightGap);
+                if (width < 100.0f) width = avail * 0.6f; // fallback
+                ImGui::SetNextItemWidth(width);
+            }
+            // FOV slider (synced with RMB+wheel in passthrough)
+            if (!g_uiFovInit) { g_uiFov = GetLastCameraFov(); g_uiFovDefault = g_uiFov; g_uiFovInit = true; }
+            // While using RMB+F FOV-modifier, reflect live FOV into the slider value
+            if (pMirv->GetMouseFovMode()) {
+                g_uiFov = GetLastCameraFov();
+                g_uiFovInit = true;
+            }
+            {
+                float tmp = g_uiFov;
+                bool changed = ImGui::SliderFloat("FOV (F)", &tmp, 1.0f, 179.0f, "%.1f deg");
+                bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+                if (reset) {
+                    g_uiFov = g_uiFovDefault;
+                    ImGui::ClearActiveID();
+                    pMirv->SetFov(g_uiFov);
+                } else if (changed) {
+                    g_uiFov = tmp;
+                    pMirv->SetFov(g_uiFov);
+                }
+            }
 
-        // Roll slider (reserve right space so label is always visible)
-        {
-            ImGuiStyle& st3 = ImGui::GetStyle();
-            float avail = ImGui::GetContentRegionAvail().x;
-            const char* lbl = "Roll";
-            float lblW = ImGui::CalcTextSize(lbl).x;
-            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
-            float width = avail - (lblW + rightGap);
-            if (width < 100.0f) width = avail * 0.6f; // fallback
-            ImGui::SetNextItemWidth(width);
-        }
-        if (!g_uiRollInit) { g_uiRoll = GetLastCameraRoll(); g_uiRollDefault = g_uiRoll; g_uiRollInit = true; }
-        // While using RMB+R roll-modifier, reflect live roll into the slider value
-        if (pMirv->GetMouseRollMode()) {
-            g_uiRoll = GetLastCameraRoll();
-            g_uiRollInit = true;
-        }
-        {
-            float tmp = g_uiRoll;
-            bool changed = ImGui::SliderFloat("Roll (R)", &tmp, -180.0f, 180.0f, "%.1f deg");
-            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
-            if (reset) {
-                g_uiRoll = g_uiRollDefault;
-                ImGui::ClearActiveID();
-                pMirv->SetRz(g_uiRoll);
-            } else if (changed) {
-                g_uiRoll = tmp;
-                pMirv->SetRz(g_uiRoll);
+            // Roll slider (reserve right space so label is always visible)
+            {
+                ImGuiStyle& st3 = ImGui::GetStyle();
+                float avail = ImGui::GetContentRegionAvail().x;
+                const char* lbl = "Roll";
+                float lblW = ImGui::CalcTextSize(lbl).x;
+                float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+                float width = avail - (lblW + rightGap);
+                if (width < 100.0f) width = avail * 0.6f; // fallback
+                ImGui::SetNextItemWidth(width);
             }
-        }
+            if (!g_uiRollInit) { g_uiRoll = GetLastCameraRoll(); g_uiRollDefault = g_uiRoll; g_uiRollInit = true; }
+            // While using RMB+R roll-modifier, reflect live roll into the slider value
+            if (pMirv->GetMouseRollMode()) {
+                g_uiRoll = GetLastCameraRoll();
+                g_uiRollInit = true;
+            }
+            {
+                float tmp = g_uiRoll;
+                bool changed = ImGui::SliderFloat("Roll (R)", &tmp, -180.0f, 180.0f, "%.1f deg");
+                bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+                if (reset) {
+                    g_uiRoll = g_uiRollDefault;
+                    ImGui::ClearActiveID();
+                    pMirv->SetRz(g_uiRoll);
+                } else if (changed) {
+                    g_uiRoll = tmp;
+                    pMirv->SetRz(g_uiRoll);
+                }
+            }
 
-        // Keyboard sensitivity (mirv_input cfg ksens) (reserve right space so label is always visible)
-        {
-            ImGuiStyle& st3 = ImGui::GetStyle();
-            float avail = ImGui::GetContentRegionAvail().x;
-            const char* lbl = "ksenss";
-            float lblW = ImGui::CalcTextSize(lbl).x * g_UiScale;
-            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
-            float width = avail - (lblW + rightGap);
-            if (width < 100.0f) width = avail * 0.6f; // fallback
-            ImGui::SetNextItemWidth(width);
-        }
-        if (!g_uiKsensInit) { g_uiKsens = (float)pMirv->GetKeyboardSensitivty(); g_uiKsensDefault = g_uiKsens; g_uiKsensInit = true; }
-        {
-            float tmp = g_uiKsens;
-            bool changed = ImGui::SliderFloat("ksens (Scroll)", &tmp, 0.01f, 10.0f, "%.2f");
-            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
-            if (reset) {
-                g_uiKsens = g_uiKsensDefault;
-                ImGui::ClearActiveID();
-                pMirv->SetKeyboardSensitivity(g_uiKsens);
-            } else if (changed) {
-                g_uiKsens = tmp;
-                pMirv->SetKeyboardSensitivity(g_uiKsens);
+            // Keyboard sensitivity (mirv_input cfg ksens) (reserve right space so label is always visible)
+            {
+                ImGuiStyle& st3 = ImGui::GetStyle();
+                float avail = ImGui::GetContentRegionAvail().x;
+                const char* lbl = "ksenss";
+                float lblW = ImGui::CalcTextSize(lbl).x * g_UiScale;
+                float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+                float width = avail - (lblW + rightGap);
+                if (width < 100.0f) width = avail * 0.6f; // fallback
+                ImGui::SetNextItemWidth(width);
             }
+            if (!g_uiKsensInit) { g_uiKsens = (float)pMirv->GetKeyboardSensitivty(); g_uiKsensDefault = g_uiKsens; g_uiKsensInit = true; }
+            {
+                float tmp = g_uiKsens;
+                bool changed = ImGui::SliderFloat("ksens (Scroll)", &tmp, 0.01f, 10.0f, "%.2f");
+                bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+                if (reset) {
+                    g_uiKsens = g_uiKsensDefault;
+                    ImGui::ClearActiveID();
+                    pMirv->SetKeyboardSensitivity(g_uiKsens);
+                } else if (changed) {
+                    g_uiKsens = tmp;
+                    pMirv->SetKeyboardSensitivity(g_uiKsens);
+                }
+            }
+            // Auto-height: shrink/grow to fit current content while preserving user-set width
+            {
+                ImVec2 cur = ImGui::GetWindowSize();
+                float remain = ImGui::GetContentRegionAvail().y;
+                float desired = cur.y - remain;
+                float min_h = ImGui::GetFrameHeightWithSpacing() * 4.0f; // camera panel needs a bit more
+                if (desired < min_h) desired = min_h;
+                ImGui::SetWindowSize(ImVec2(cur.x, desired));
+            }
+            ImGui::End();
         }
-        // Auto-height: shrink/grow to fit current content while preserving user-set width
-        {
-            ImVec2 cur = ImGui::GetWindowSize();
-            float remain = ImGui::GetContentRegionAvail().y;
-            float desired = cur.y - remain;
-            float min_h = ImGui::GetFrameHeightWithSpacing() * 4.0f; // camera panel needs a bit more
-            if (desired < min_h) desired = min_h;
-            ImGui::SetWindowSize(ImVec2(cur.x, desired));
-        }
-        ImGui::End();
     }
-
     // Overlay Console window
     if (g_ShowOverlayConsole) {
         ImGui::Begin("HLAE Console", &g_ShowOverlayConsole);
@@ -1795,15 +1969,17 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     }
 
     // Tiny panel to pick operation/mode
-    ImGui::Begin("Gizmo", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-    if (ImGui::RadioButton("Pos (G)", g_GizmoOp == ImGuizmo::TRANSLATE)) g_GizmoOp = ImGuizmo::TRANSLATE;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Rot (R)",    g_GizmoOp == ImGuizmo::ROTATE))    g_GizmoOp = ImGuizmo::ROTATE;
-    if (ImGui::RadioButton("Local",     g_GizmoMode == ImGuizmo::LOCAL))   g_GizmoMode = ImGuizmo::LOCAL;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("World",     g_GizmoMode == ImGuizmo::WORLD))   g_GizmoMode = ImGuizmo::WORLD;
-    ImGui::TextUnformatted("Hold CTRL to snap");
-    ImGui::End();
+    if (g_ShowGizmo){
+        ImGui::Begin("Gizmo", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+        if (ImGui::RadioButton("Pos (G)", g_GizmoOp == ImGuizmo::TRANSLATE)) g_GizmoOp = ImGuizmo::TRANSLATE;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Rot (R)",    g_GizmoOp == ImGuizmo::ROTATE))    g_GizmoOp = ImGuizmo::ROTATE;
+        if (ImGui::RadioButton("Local",     g_GizmoMode == ImGuizmo::LOCAL))   g_GizmoMode = ImGuizmo::LOCAL;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("World",     g_GizmoMode == ImGuizmo::WORLD))   g_GizmoMode = ImGuizmo::WORLD;
+        ImGui::TextUnformatted("Hold CTRL to snap");
+        ImGui::End();
+    }
 
     // Only draw a gizmo if we have a selected keyframe
     using advancedfx::overlay::g_LastCampathCtx;

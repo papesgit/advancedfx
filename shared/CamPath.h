@@ -25,6 +25,11 @@ struct CamPathValue
     double TyIn, TyOut; unsigned char TyModeIn, TyModeOut;
     double TzIn, TzOut; unsigned char TzModeIn, TzModeOut;
     double TfovIn, TfovOut; unsigned char TfovModeIn, TfovModeOut;
+	//weights
+	double TxWIn, TxWOut;
+	double TyWIn, TyWOut;
+	double TzWIn, TzWOut;
+	double TfovWIn, TfovWOut;
 
 	CamPathValue();
 
@@ -153,6 +158,7 @@ public:
     enum Channel { CH_X = 0, CH_Y = 1, CH_Z = 2, CH_FOV = 3 };
     void SetTangent(Channel ch, bool setIn, bool setOut, double slopeIn, double slopeOut);
     void SetTangentMode(Channel ch, bool setIn, bool setOut, unsigned char mode);
+	void SetTangentWeight(Channel ch, bool setIn, bool setOut, double wIn, double wOut);
 
 	void Rotate(double yPitch, double zYaw, double xRoll);
 
@@ -262,6 +268,16 @@ private:
     static double FovTanOutSelector(CamPathValue const& v) { return v.TfovOut; }
     static unsigned char FovTanModeInSelector(CamPathValue const& v) { return v.TfovModeIn; }
     static unsigned char FovTanModeOutSelector(CamPathValue const& v) { return v.TfovModeOut; }
+
+	// Weight selectors (used by interpolation / UI)
+	static double XTanWInSelector(CamPathValue const& v)  { return v.TxWIn; }
+	static double XTanWOutSelector(CamPathValue const& v) { return v.TxWOut; }
+	static double YTanWInSelector(CamPathValue const& v)  { return v.TyWIn; }
+	static double YTanWOutSelector(CamPathValue const& v) { return v.TyWOut; }
+	static double ZTanWInSelector(CamPathValue const& v)  { return v.TzWIn; }
+	static double ZTanWOutSelector(CamPathValue const& v) { return v.TzWOut; }
+	static double FovTanWInSelector(CamPathValue const& v)  { return v.TfovWIn; }
+	static double FovTanWOutSelector(CamPathValue const& v) { return v.TfovWOut; }
 
 	bool m_Enabled;
 	bool m_Hold = false;

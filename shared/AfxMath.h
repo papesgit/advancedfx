@@ -393,6 +393,27 @@ public:
         InterpolationMapChanged();
     }
 
+	CHermiteDoubleInterpolation(
+		CInterpolationMap<TMap>* map,
+		double (* valueSelector)(const TMap&),
+		double (* tanInSelector)(const TMap&),
+		double (* tanOutSelector)(const TMap&),
+		unsigned char (* modeInSelector)(const TMap&),
+		unsigned char (* modeOutSelector)(const TMap&),
+		double (* wInSelector)(const TMap&),
+		double (* wOutSelector)(const TMap&))
+	: m_Map(map)
+	, m_ValueSelector(valueSelector)
+	, m_TanInSelector(tanInSelector)
+	, m_TanOutSelector(tanOutSelector)
+	, m_ModeInSelector(modeInSelector)
+	, m_ModeOutSelector(modeOutSelector)
+	, m_WInSelector(wInSelector ? wInSelector : &DefaultWeight)
+	, m_WOutSelector(wOutSelector ? wOutSelector : &DefaultWeight)
+	{
+		InterpolationMapChanged();
+	}
+
     virtual ~CHermiteDoubleInterpolation()
     {
         Free();
@@ -425,6 +446,8 @@ public:
             m_Build.V = new double[n];
             m_Build.MIn = new double[n];
             m_Build.MOut = new double[n];
+			m_Build.WIn  = new double[n];
+			m_Build.WOut = new double[n];
             m_Build.Has = true;
 
             // Copy values
@@ -444,6 +467,16 @@ public:
                 m_Build.MOut[i] = (modeOut == 3 /*Free*/) ? rawOut : 0.0;
                 ++i;
             }
+			for (int k = 0; k < (int)n; ++k)
+			{
+				const TMap& val = m_Map->find(m_Build.T[k])->second;
+				unsigned char modeIn  = m_ModeInSelector(val);
+				unsigned char modeOut = m_ModeOutSelector(val);
+				m_Build.WIn[k]  = (modeIn  == 3 /*Free*/) ? m_WInSelector(val)  : 1.0;
+				m_Build.WOut[k] = (modeOut == 3 /*Free*/) ? m_WOutSelector(val) : 1.0;
+				if (m_Build.WIn[k]  < 0.0) m_Build.WIn[k]  = 0.0;
+				if (m_Build.WOut[k] < 0.0) m_Build.WOut[k] = 0.0;
+			}
 
             // Compute natural cubic-spline (clamped with endpoint derivatives 0.0) second derivatives
             // to match CCubicDoubleInterpolation's default behavior for Auto mode.
@@ -553,7 +586,10 @@ public:
         double h01 = -2.0*u3 + 3.0*u2;
         double h11 = u3 - u2;
 
-        return h00 * v0 + h * h10 * m0 + h01 * v1 + h * h11 * m1;
+		double w0 = m_Build.WOut[klo]; // OUT weight of left key
+		double w1 = m_Build.WIn[khi];  // IN weight of right key
+		return h00 * v0 + (w0 * h * h10 * m0) + h01 * v1 + (w1 * h * h11 * m1);
+
     }
 
 private:
@@ -563,6 +599,9 @@ private:
     double (* m_TanOutSelector)(const TMap&);
     unsigned char (* m_ModeInSelector)(const TMap&);
     unsigned char (* m_ModeOutSelector)(const TMap&);
+	static double DefaultWeight(const TMap&) { return 1.0; }
+	double (* m_WInSelector)(const TMap&)  = &DefaultWeight;
+	double (* m_WOutSelector)(const TMap&) = &DefaultWeight;
 
     struct Build_s
     {
@@ -572,6 +611,8 @@ private:
         double* V = 0;
         double* MIn = 0;
         double* MOut = 0;
+		double* WIn = 0;
+		double* WOut = 0;
     } m_Build;
 
     std::atomic_bool m_Rebuild{true};
@@ -583,6 +624,8 @@ private:
         delete[] m_Build.MIn;  m_Build.MIn  = 0;
         delete[] m_Build.V;    m_Build.V    = 0;
         delete[] m_Build.T;    m_Build.T    = 0;
+		delete[] m_Build.WIn;  m_Build.WIn  = 0;
+		delete[] m_Build.WOut; m_Build.WOut = 0;
         m_Build.n = 0;
     }
 };
