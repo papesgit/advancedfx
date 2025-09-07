@@ -31,6 +31,15 @@ struct CamPathValue
 	double TzWIn, TzWOut;
 	double TfovWIn, TfovWOut;
 
+    // Rotation (Euler) per-key tangents, modes and weights for custom rotation backend
+    // Order/semantics follow Quake convention: Pitch=Y axis, Yaw=Z axis, Roll=X axis
+    double TRxIn, TRxOut; unsigned char TRxModeIn, TRxModeOut; // Roll (X)
+    double TRyIn, TRyOut; unsigned char TRyModeIn, TRyModeOut; // Pitch (Y)
+    double TRzIn, TRzOut; unsigned char TRzModeIn, TRzModeOut; // Yaw (Z)
+    double TRxWIn, TRxWOut; // weights for Free mode handles
+    double TRyWIn, TRyWOut;
+    double TRzWIn, TRzWOut;
+
 	CamPathValue();
 
 	CamPathValue(double x, double y, double z, double pitch, double yaw, double roll, double fov);
@@ -75,7 +84,8 @@ public:
 		QI_DEFAULT = 0,
 		QI_SLINEAR = 1,
 		QI_SCUBIC = 2,
-		_QI_COUNT = 3,
+		QI_CUSTOM = 3,
+		_QI_COUNT = 4,
 	};
 
 	static bool DoubleInterp_FromString(char const * value, DoubleInterp & outValue);
@@ -155,7 +165,12 @@ public:
     void SetFov(double fov);
 
     // Custom tangent editing APIs (apply to selected keys if any, otherwise all)
-    enum Channel { CH_X = 0, CH_Y = 1, CH_Z = 2, CH_FOV = 3 };
+    enum Channel {
+        CH_X = 0, CH_Y = 1, CH_Z = 2, CH_FOV = 3,
+        CH_RPITCH = 4, // Euler pitch (Y)
+        CH_RYAW   = 5, // Euler yaw (Z)
+        CH_RROLL  = 6  // Euler roll (X)
+    };
     void SetTangent(Channel ch, bool setIn, bool setOut, double slopeIn, double slopeOut);
     void SetTangentMode(Channel ch, bool setIn, bool setOut, unsigned char mode);
 	void SetTangentWeight(Channel ch, bool setIn, bool setOut, double wIn, double wOut);
@@ -278,6 +293,28 @@ private:
 	static double ZTanWOutSelector(CamPathValue const& v) { return v.TzWOut; }
 	static double FovTanWInSelector(CamPathValue const& v)  { return v.TfovWIn; }
 	static double FovTanWOutSelector(CamPathValue const& v) { return v.TfovWOut; }
+
+    // Rotation (Euler) tangent and mode selectors for custom rotation interpolation
+    static double RTanIn_Roll_Selector(CamPathValue const& v)  { return v.TRxIn; }
+    static double RTanOut_Roll_Selector(CamPathValue const& v) { return v.TRxOut; }
+    static unsigned char RTanModeIn_Roll_Selector(CamPathValue const& v)  { return v.TRxModeIn; }
+    static unsigned char RTanModeOut_Roll_Selector(CamPathValue const& v) { return v.TRxModeOut; }
+    static double RTanWIn_Roll_Selector(CamPathValue const& v)  { return v.TRxWIn; }
+    static double RTanWOut_Roll_Selector(CamPathValue const& v) { return v.TRxWOut; }
+
+    static double RTanIn_Pitch_Selector(CamPathValue const& v)  { return v.TRyIn; }
+    static double RTanOut_Pitch_Selector(CamPathValue const& v) { return v.TRyOut; }
+    static unsigned char RTanModeIn_Pitch_Selector(CamPathValue const& v)  { return v.TRyModeIn; }
+    static unsigned char RTanModeOut_Pitch_Selector(CamPathValue const& v) { return v.TRyModeOut; }
+    static double RTanWIn_Pitch_Selector(CamPathValue const& v)  { return v.TRyWIn; }
+    static double RTanWOut_Pitch_Selector(CamPathValue const& v) { return v.TRyWOut; }
+
+    static double RTanIn_Yaw_Selector(CamPathValue const& v)  { return v.TRzIn; }
+    static double RTanOut_Yaw_Selector(CamPathValue const& v) { return v.TRzOut; }
+    static unsigned char RTanModeIn_Yaw_Selector(CamPathValue const& v)  { return v.TRzModeIn; }
+    static unsigned char RTanModeOut_Yaw_Selector(CamPathValue const& v) { return v.TRzModeOut; }
+    static double RTanWIn_Yaw_Selector(CamPathValue const& v)  { return v.TRzWIn; }
+    static double RTanWOut_Yaw_Selector(CamPathValue const& v) { return v.TRzWOut; }
 
 	bool m_Enabled;
 	bool m_Hold = false;

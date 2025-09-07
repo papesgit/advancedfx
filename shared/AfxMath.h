@@ -630,6 +630,283 @@ private:
     }
 };
 
+// Euler-angle based Hermite interpolation composing a Quaternion.
+// Uses per-key tangent in/out + mode for each Euler channel (Pitch/Yaw/Roll).
+// Value extraction from map uses Quaternion->Euler conversion and performs
+// simple unwrap across keys (minimize 360-degree jumps) per channel.
+template<class TMap>
+class CEulerHermiteQuaternionInterpolation : public CInterpolation<Quaternion>
+{
+public:
+    CEulerHermiteQuaternionInterpolation(
+        CInterpolationMap<TMap>* map,
+        // Roll (X)
+        double (* tanInRoll)(const TMap&),  double (* tanOutRoll)(const TMap&),
+        unsigned char (* modeInRoll)(const TMap&),  unsigned char (* modeOutRoll)(const TMap&),
+        double (* wInRoll)(const TMap&),  double (* wOutRoll)(const TMap&),
+        // Pitch (Y)
+        double (* tanInPitch)(const TMap&), double (* tanOutPitch)(const TMap&),
+        unsigned char (* modeInPitch)(const TMap&), unsigned char (* modeOutPitch)(const TMap&),
+        double (* wInPitch)(const TMap&),  double (* wOutPitch)(const TMap&),
+        // Yaw (Z)
+        double (* tanInYaw)(const TMap&),  double (* tanOutYaw)(const TMap&),
+        unsigned char (* modeInYaw)(const TMap&),  unsigned char (* modeOutYaw)(const TMap&),
+        double (* wInYaw)(const TMap&),   double (* wOutYaw)(const TMap&)
+    )
+    : m_Map(map)
+    , m_TanInRoll(tanInRoll), m_TanOutRoll(tanOutRoll), m_ModeInRoll(modeInRoll), m_ModeOutRoll(modeOutRoll), m_WInRoll(wInRoll), m_WOutRoll(wOutRoll)
+    , m_TanInPitch(tanInPitch), m_TanOutPitch(tanOutPitch), m_ModeInPitch(modeInPitch), m_ModeOutPitch(modeOutPitch), m_WInPitch(wInPitch), m_WOutPitch(wOutPitch)
+    , m_TanInYaw(tanInYaw), m_TanOutYaw(tanOutYaw), m_ModeInYaw(modeInYaw), m_ModeOutYaw(modeOutYaw), m_WInYaw(wInYaw), m_WOutYaw(wOutYaw)
+    {
+        InterpolationMapChanged();
+    }
+
+    virtual ~CEulerHermiteQuaternionInterpolation() { Free(); }
+
+    virtual void InterpolationMapChanged(void) { m_Rebuild.store(true, std::memory_order_relaxed); }
+
+    virtual bool CanEval(void) const { return 2 <= m_Map->size(); }
+
+    virtual Quaternion Eval(double t)
+    {
+        std::lock_guard<std::mutex> _lock(m_Lock);
+        size_t n = m_Map->size();
+        if (n < 2) throw "CEulerHermiteQuaternionInterpolation::Eval requires at least 2 points.";
+
+        if (m_Rebuild.load(std::memory_order_relaxed))
+        {
+            m_Rebuild.store(false, std::memory_order_relaxed);
+            Build();
+        }
+
+        // Clamp for no extrapolation
+        if (t <= m_T[0])
+        {
+            return Quaternion::FromQREulerAngles(QREulerAngles::FromQEulerAngles(QEulerAngles(m_Pitch[0], m_Yaw[0], m_Roll[0])));
+        }
+        if (t >= m_T[m_n - 1])
+        {
+            return Quaternion::FromQREulerAngles(QREulerAngles::FromQEulerAngles(QEulerAngles(m_Pitch[m_n-1], m_Yaw[m_n-1], m_Roll[m_n-1])));
+        }
+
+        // Binary search
+        int klo = 0, khi = (int)m_n - 1;
+        while (khi - klo > 1)
+        {
+            int k = (khi + klo) >> 1;
+            if (m_T[k] > t) khi = k; else klo = k;
+        }
+
+        double t0 = m_T[klo];
+        double t1 = m_T[khi];
+        double h = t1 - t0; if (h <= 0.0) h = 1.0; // guard
+
+        auto hermite = [&](double v0, double v1, double m0, double m1, double w0, double w1)->double {
+            double u = (t - t0) / h;
+            double u2 = u * u;
+            double u3 = u2 * u;
+            double h00 = 2.0*u3 - 3.0*u2 + 1.0;
+            double h10 = u3 - 2.0*u2 + u;
+            double h01 = -2.0*u3 + 3.0*u2;
+            double h11 = u3 - u2;
+            return h00 * v0 + (w0 * h * h10 * m0) + h01 * v1 + (w1 * h * h11 * m1);
+        };
+
+        double pitch = hermite(m_Pitch[klo], m_Pitch[khi], m_PitchOut[klo], m_PitchIn[khi], m_PitchWOut[klo], m_PitchWIn[khi]);
+        double yaw   = hermite(m_Yaw[klo],   m_Yaw[khi],   m_YawOut[klo],   m_YawIn[khi],   m_YawWOut[klo],   m_YawWIn[khi]);
+        double roll  = hermite(m_Roll[klo],  m_Roll[khi],  m_RollOut[klo],  m_RollIn[khi],  m_RollWOut[klo],  m_RollWIn[khi]);
+
+        return Quaternion::FromQREulerAngles(QREulerAngles::FromQEulerAngles(QEulerAngles(pitch, yaw, roll)));
+    }
+
+private:
+    // Source data
+    CInterpolationMap<TMap>* m_Map;
+
+    // Selectors for tangents, modes and weights
+    double (* m_TanInRoll)(const TMap&);
+    double (* m_TanOutRoll)(const TMap&);
+    unsigned char (* m_ModeInRoll)(const TMap&);
+    unsigned char (* m_ModeOutRoll)(const TMap&);
+    double (* m_WInRoll)(const TMap&);
+    double (* m_WOutRoll)(const TMap&);
+
+    double (* m_TanInPitch)(const TMap&);
+    double (* m_TanOutPitch)(const TMap&);
+    unsigned char (* m_ModeInPitch)(const TMap&);
+    unsigned char (* m_ModeOutPitch)(const TMap&);
+    double (* m_WInPitch)(const TMap&);
+    double (* m_WOutPitch)(const TMap&);
+
+    double (* m_TanInYaw)(const TMap&);
+    double (* m_TanOutYaw)(const TMap&);
+    unsigned char (* m_ModeInYaw)(const TMap&);
+    unsigned char (* m_ModeOutYaw)(const TMap&);
+    double (* m_WInYaw)(const TMap&);
+    double (* m_WOutYaw)(const TMap&);
+
+    // Cached arrays
+    int m_n = 0;
+    double* m_T = nullptr;
+    double* m_Pitch = nullptr; double* m_PitchIn = nullptr; double* m_PitchOut = nullptr; double* m_PitchWIn = nullptr; double* m_PitchWOut = nullptr;
+    double* m_Yaw   = nullptr; double* m_YawIn   = nullptr; double* m_YawOut   = nullptr; double* m_YawWIn   = nullptr; double* m_YawWOut   = nullptr;
+    double* m_Roll  = nullptr; double* m_RollIn  = nullptr; double* m_RollOut  = nullptr; double* m_RollWIn  = nullptr; double* m_RollWOut  = nullptr;
+
+    std::atomic_bool m_Rebuild{true};
+    std::mutex m_Lock;
+
+    static void UnwrapAngles(double* vals, int n)
+    {
+        if (n <= 1) return;
+        for (int i = 1; i < n; ++i)
+        {
+            double prev = vals[i-1];
+            double cur = vals[i];
+            while (cur - prev > 180.0) cur -= 360.0;
+            while (cur - prev < -180.0) cur += 360.0;
+            vals[i] = cur;
+        }
+    }
+
+    void Build()
+    {
+        Free();
+        m_n = (int)m_Map->size();
+        m_T = new double[m_n];
+        m_Pitch = new double[m_n]; m_PitchIn = new double[m_n]; m_PitchOut = new double[m_n]; m_PitchWIn = new double[m_n]; m_PitchWOut = new double[m_n];
+        m_Yaw   = new double[m_n]; m_YawIn   = new double[m_n]; m_YawOut   = new double[m_n]; m_YawWIn   = new double[m_n]; m_YawWOut   = new double[m_n];
+        m_Roll  = new double[m_n]; m_RollIn  = new double[m_n]; m_RollOut  = new double[m_n]; m_RollWIn  = new double[m_n]; m_RollWOut  = new double[m_n];
+
+        // Extract times and Euler angles; setup initial slopes/weights
+        int i = 0; TMap lastV; bool hasLast = false;
+        for (typename CInterpolationMap<TMap>::const_iterator it = m_Map->begin(); it != m_Map->end(); ++it, ++i)
+        {
+            m_T[i] = it->first;
+            const TMap& v = it->second;
+            QEulerAngles a = v.R.ToQREulerAngles().ToQEulerAngles();
+            m_Pitch[i] = a.Pitch; m_Yaw[i] = a.Yaw; m_Roll[i] = a.Roll;
+        }
+        // unwrap each channel to avoid jumps
+        UnwrapAngles(m_Pitch, m_n);
+        UnwrapAngles(m_Yaw,   m_n);
+        UnwrapAngles(m_Roll,  m_n);
+
+        // Fill modes, raw/free slopes and weights
+        i = 0;
+        for (typename CInterpolationMap<TMap>::const_iterator it = m_Map->begin(); it != m_Map->end(); ++it, ++i)
+        {
+            const TMap& v = it->second;
+            unsigned char modeInP  = m_ModeInPitch(v);
+            unsigned char modeOutP = m_ModeOutPitch(v);
+            unsigned char modeInY  = m_ModeInYaw(v);
+            unsigned char modeOutY = m_ModeOutYaw(v);
+            unsigned char modeInR  = m_ModeInRoll(v);
+            unsigned char modeOutR = m_ModeOutRoll(v);
+
+            // default; resolved after cubic auto slope computation
+            m_PitchIn[i] = (modeInP  == 3) ? m_TanInPitch(v)  : 0.0;
+            m_PitchOut[i]= (modeOutP == 3) ? m_TanOutPitch(v) : 0.0;
+            m_YawIn[i]   = (modeInY  == 3) ? m_TanInYaw(v)    : 0.0;
+            m_YawOut[i]  = (modeOutY == 3) ? m_TanOutYaw(v)   : 0.0;
+            m_RollIn[i]  = (modeInR  == 3) ? m_TanInRoll(v)   : 0.0;
+            m_RollOut[i] = (modeOutR == 3) ? m_TanOutRoll(v)  : 0.0;
+
+            m_PitchWIn[i]  = (modeInP  == 3) ? m_WInPitch(v)  : 1.0;
+            m_PitchWOut[i] = (modeOutP == 3) ? m_WOutPitch(v) : 1.0;
+            m_YawWIn[i]    = (modeInY  == 3) ? m_WInYaw(v)    : 1.0;
+            m_YawWOut[i]   = (modeOutY == 3) ? m_WOutYaw(v)   : 1.0;
+            m_RollWIn[i]   = (modeInR  == 3) ? m_WInRoll(v)   : 1.0;
+            m_RollWOut[i]  = (modeOutR == 3) ? m_WOutRoll(v)  : 1.0;
+            if (m_PitchWIn[i]  < 0.0) m_PitchWIn[i]  = 0.0;
+            if (m_PitchWOut[i] < 0.0) m_PitchWOut[i] = 0.0;
+            if (m_YawWIn[i]    < 0.0) m_YawWIn[i]    = 0.0;
+            if (m_YawWOut[i]   < 0.0) m_YawWOut[i]   = 0.0;
+            if (m_RollWIn[i]   < 0.0) m_RollWIn[i]   = 0.0;
+            if (m_RollWOut[i]  < 0.0) m_RollWOut[i]  = 0.0;
+        }
+
+        // Compute natural cubic second derivatives for AUTO slopes
+        auto computeAuto = [&](double* V, std::vector<double>& autoIn, std::vector<double>& autoOut)
+        {
+            double* y2 = new double[m_n];
+            spline(m_T, V, m_n, false, 0.0, false, 0.0, y2);
+            autoIn.assign(m_n, 0.0); autoOut.assign(m_n, 0.0);
+            for (int k = 0; k + 1 < m_n; ++k)
+            {
+                double h = m_T[k+1] - m_T[k];
+                if (h <= 0.0) continue;
+                double sec = (V[k+1] - V[k]) / h;
+                double d_i_right   = sec - h * (2.0 * y2[k] + y2[k+1]) / 6.0;
+                double d_ip1_left  = sec + h * (2.0 * y2[k+1] + y2[k]) / 6.0;
+                autoOut[k]   = d_i_right;
+                autoIn[k+1]  = d_ip1_left;
+            }
+            delete [] y2;
+        };
+
+        std::vector<double> autoInP, autoOutP, autoInY, autoOutY, autoInR, autoOutR;
+        computeAuto(m_Pitch, autoInP, autoOutP);
+        computeAuto(m_Yaw,   autoInY, autoOutY);
+        computeAuto(m_Roll,  autoInR, autoOutR);
+
+        // Resolve modes per key
+        for (int k = 0; k < m_n; ++k)
+        {
+            bool hasPrev = (k > 0);
+            bool hasNext = (k + 1 < m_n);
+            double ti = m_T[k]; double tim1 = hasPrev ? m_T[k-1] : ti; double tip1 = hasNext ? m_T[k+1] : ti;
+            double vPi = m_Pitch[k]; double vPim1 = hasPrev ? m_Pitch[k-1] : vPi; double vPip1 = hasNext ? m_Pitch[k+1] : vPi;
+            double vYi = m_Yaw[k];   double vYim1 = hasPrev ? m_Yaw[k-1]   : vYi; double vYip1 = hasNext ? m_Yaw[k+1]   : vYi;
+            double vRi = m_Roll[k];  double vRim1 = hasPrev ? m_Roll[k-1]  : vRi; double vRip1 = hasNext ? m_Roll[k+1]  : vRi;
+
+            const TMap& v = m_Map->find(m_T[k])->second;
+
+            // Pitch
+            {
+                unsigned char mi = m_ModeInPitch(v), mo = m_ModeOutPitch(v);
+                if (mi == 1) m_PitchIn[k] = 0.0; // Flat
+                else if (mi == 2) m_PitchIn[k] = hasPrev ? (vPi - vPim1) / (ti - tim1) : (hasNext ? (vPip1 - vPi) / (tip1 - ti) : 0.0);
+                else if (mi == 0) m_PitchIn[k] = autoInP[k]; // Auto
+                // else Free already set
+                if (mo == 1) m_PitchOut[k] = 0.0;
+                else if (mo == 2) m_PitchOut[k] = hasNext ? (vPip1 - vPi) / (tip1 - ti) : (hasPrev ? (vPi - vPim1) / (ti - tim1) : 0.0);
+                else if (mo == 0) m_PitchOut[k] = autoOutP[k];
+            }
+            // Yaw
+            {
+                unsigned char mi = m_ModeInYaw(v), mo = m_ModeOutYaw(v);
+                if (mi == 1) m_YawIn[k] = 0.0;
+                else if (mi == 2) m_YawIn[k] = hasPrev ? (vYi - vYim1) / (ti - tim1) : (hasNext ? (vYip1 - vYi) / (tip1 - ti) : 0.0);
+                else if (mi == 0) m_YawIn[k] = autoInY[k];
+                if (mo == 1) m_YawOut[k] = 0.0;
+                else if (mo == 2) m_YawOut[k] = hasNext ? (vYip1 - vYi) / (tip1 - ti) : (hasPrev ? (vYi - vYim1) / (ti - tim1) : 0.0);
+                else if (mo == 0) m_YawOut[k] = autoOutY[k];
+            }
+            // Roll
+            {
+                unsigned char mi = m_ModeInRoll(v), mo = m_ModeOutRoll(v);
+                if (mi == 1) m_RollIn[k] = 0.0;
+                else if (mi == 2) m_RollIn[k] = hasPrev ? (vRi - vRim1) / (ti - tim1) : (hasNext ? (vRip1 - vRi) / (tip1 - ti) : 0.0);
+                else if (mi == 0) m_RollIn[k] = autoInR[k];
+                if (mo == 1) m_RollOut[k] = 0.0;
+                else if (mo == 2) m_RollOut[k] = hasNext ? (vRip1 - vRi) / (tip1 - ti) : (hasPrev ? (vRi - vRim1) / (ti - tim1) : 0.0);
+                else if (mo == 0) m_RollOut[k] = autoOutR[k];
+            }
+        }
+    }
+
+    void Free()
+    {
+        delete [] m_T; m_T = nullptr; m_n = 0;
+        delete [] m_Pitch; delete [] m_PitchIn; delete [] m_PitchOut; delete [] m_PitchWIn; delete [] m_PitchWOut;
+        m_Pitch = m_PitchIn = m_PitchOut = m_PitchWIn = m_PitchWOut = nullptr;
+        delete [] m_Yaw;   delete [] m_YawIn;   delete [] m_YawOut;   delete [] m_YawWIn;   delete [] m_YawWOut;
+        m_Yaw   = m_YawIn   = m_YawOut   = m_YawWIn   = m_YawWOut   = nullptr;
+        delete [] m_Roll;  delete [] m_RollIn;  delete [] m_RollOut;  delete [] m_RollWIn;  delete [] m_RollWOut;
+        m_Roll  = m_RollIn  = m_RollOut  = m_RollWIn  = m_RollWOut  = nullptr;
+    }
+};
+
 template<class TMap>
 class CBoolAndInterpolation
 : public CInterpolation<bool>

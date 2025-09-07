@@ -85,6 +85,12 @@ bool CamPath::QuaternionInterp_FromString(char const * value, QuaternionInterp &
 		outValue = QI_SCUBIC;
 		return true;
 	}
+	else
+	if(!_stricmp(value,"custom"))
+	{
+		outValue = QI_CUSTOM;
+		return true;
+	}
 
 	return false;
 }
@@ -99,6 +105,8 @@ char const * CamPath::QuaternionInterp_ToString(QuaternionInterp value)
 		return "sLinear";
 	case QI_SCUBIC:
 		return "sCubic";
+	case QI_CUSTOM:
+		return "custom";
 	}
 
 	return "[unkown]";
@@ -132,6 +140,10 @@ CamPathValue::CamPathValue()
 , TzIn(0.0), TzOut(0.0), TzModeIn(0), TzModeOut(0)
 , TfovIn(0.0), TfovOut(0.0), TfovModeIn(0), TfovModeOut(0)
 , TxWIn(1.0), TxWOut(1.0), TyWIn(1.0), TyWOut(1.0), TzWIn(1.0), TzWOut(1.0), TfovWIn(1.0), TfovWOut(1.0)
+, TRxIn(0.0), TRxOut(0.0), TRxModeIn(0), TRxModeOut(0)
+, TRyIn(0.0), TRyOut(0.0), TRyModeIn(0), TRyModeOut(0)
+, TRzIn(0.0), TRzOut(0.0), TRzModeIn(0), TRzModeOut(0)
+, TRxWIn(1.0), TRxWOut(1.0), TRyWIn(1.0), TRyWOut(1.0), TRzWIn(1.0), TRzWOut(1.0)
 {
 }
 
@@ -147,6 +159,10 @@ CamPathValue::CamPathValue(double x, double y, double z, double pitch, double ya
 , TzIn(0.0), TzOut(0.0), TzModeIn(0), TzModeOut(0)
 , TfovIn(0.0), TfovOut(0.0), TfovModeIn(0), TfovModeOut(0)
 , TxWIn(1.0), TxWOut(1.0), TyWIn(1.0), TyWOut(1.0), TzWIn(1.0), TzWOut(1.0), TfovWIn(1.0), TfovWOut(1.0)
+, TRxIn(0.0), TRxOut(0.0), TRxModeIn(0), TRxModeOut(0)
+, TRyIn(0.0), TRyOut(0.0), TRyModeIn(0), TRyModeOut(0)
+, TRzIn(0.0), TRzOut(0.0), TRzModeIn(0), TRzModeOut(0)
+, TRxWIn(1.0), TRxWOut(1.0), TRyWIn(1.0), TRyWOut(1.0), TRzWIn(1.0), TRzWOut(1.0)
 {
 }
 
@@ -157,6 +173,10 @@ CamPathValue::CamPathValue(double x, double y, double z, double q_w, double q_x,
 , TzIn(0.0), TzOut(0.0), TzModeIn(0), TzModeOut(0)
 , TfovIn(0.0), TfovOut(0.0), TfovModeIn(0), TfovModeOut(0)
 , TxWIn(1.0), TxWOut(1.0), TyWIn(1.0), TyWOut(1.0), TzWIn(1.0), TzWOut(1.0), TfovWIn(1.0), TfovWOut(1.0)
+, TRxIn(0.0), TRxOut(0.0), TRxModeIn(0), TRxModeOut(0)
+, TRyIn(0.0), TRyOut(0.0), TRyModeIn(0), TRyModeOut(0)
+, TRzIn(0.0), TRzOut(0.0), TRzModeIn(0), TRzModeOut(0)
+, TRxWIn(1.0), TRxWOut(1.0), TRyWIn(1.0), TRyWOut(1.0), TRzWIn(1.0), TRzWOut(1.0)
 {
 }
 
@@ -313,21 +333,36 @@ CamPath::DoubleInterp CamPath::PositionInterpMethod_get(void) const
 
 void CamPath::RotationInterpMethod_set(QuaternionInterp value)
 {
-	delete m_RInterp;
+    delete m_RInterp;
 
-	m_RotationInterpMethod = value;
+    m_RotationInterpMethod = value;
 
-	switch(value)
-	{
-	case QI_SLINEAR:
-		m_RInterp = new CSLinearQuaternionInterpolation<CamPathValue>(&m_RView);
-		break;
-	default:
-		m_RInterp = new CSCubicQuaternionInterpolation<CamPathValue>(&m_RView);
-		break;
-	}
+    switch(value)
+    {
+    case QI_SLINEAR:
+        m_RInterp = new CSLinearQuaternionInterpolation<CamPathValue>(&m_RView);
+        break;
+    case QI_CUSTOM:
+        // Euler-based Hermite interpolation with per-key tangents (pitch/yaw/roll)
+        m_RInterp = new CEulerHermiteQuaternionInterpolation<CamPathValue>(
+            &m_Map,
+            // Roll (X)
+            RTanIn_Roll_Selector, RTanOut_Roll_Selector, RTanModeIn_Roll_Selector, RTanModeOut_Roll_Selector,
+            RTanWIn_Roll_Selector, RTanWOut_Roll_Selector,
+            // Pitch (Y)
+            RTanIn_Pitch_Selector, RTanOut_Pitch_Selector, RTanModeIn_Pitch_Selector, RTanModeOut_Pitch_Selector,
+            RTanWIn_Pitch_Selector, RTanWOut_Pitch_Selector,
+            // Yaw (Z)
+            RTanIn_Yaw_Selector, RTanOut_Yaw_Selector, RTanModeIn_Yaw_Selector, RTanModeOut_Yaw_Selector,
+            RTanWIn_Yaw_Selector, RTanWOut_Yaw_Selector
+        );
+        break;
+    default:
+        m_RInterp = new CSCubicQuaternionInterpolation<CamPathValue>(&m_RView);
+        break;
+    }
 
-	Changed();
+    Changed();
 }
 
 CamPath::QuaternionInterp CamPath::RotationInterpMethod_get(void) const
@@ -562,6 +597,28 @@ bool CamPath::Save(wchar_t const * fileName)
 		pt->append_attribute(doc.allocate_attribute("tfov_w_in",  double2xml(doc, it.wrapped->second.TfovWIn)));
 		pt->append_attribute(doc.allocate_attribute("tfov_w_out", double2xml(doc, it.wrapped->second.TfovWOut)));
 
+		// Rotation (Euler) tangent data for custom rotation interpolation
+		pt->append_attribute(doc.allocate_attribute("trx_in",  double2xml(doc, it.wrapped->second.TRxIn)));
+		pt->append_attribute(doc.allocate_attribute("trx_out", double2xml(doc, it.wrapped->second.TRxOut)));
+		pt->append_attribute(doc.allocate_attribute("trx_mode_in",  doc.allocate_string(TangentMode_ToString(it.wrapped->second.TRxModeIn))));
+		pt->append_attribute(doc.allocate_attribute("trx_mode_out", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TRxModeOut))));
+		pt->append_attribute(doc.allocate_attribute("trx_w_in",  double2xml(doc, it.wrapped->second.TRxWIn)));
+		pt->append_attribute(doc.allocate_attribute("trx_w_out", double2xml(doc, it.wrapped->second.TRxWOut)));
+
+		pt->append_attribute(doc.allocate_attribute("try_in",  double2xml(doc, it.wrapped->second.TRyIn)));
+		pt->append_attribute(doc.allocate_attribute("try_out", double2xml(doc, it.wrapped->second.TRyOut)));
+		pt->append_attribute(doc.allocate_attribute("try_mode_in",  doc.allocate_string(TangentMode_ToString(it.wrapped->second.TRyModeIn))));
+		pt->append_attribute(doc.allocate_attribute("try_mode_out", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TRyModeOut))));
+		pt->append_attribute(doc.allocate_attribute("try_w_in",  double2xml(doc, it.wrapped->second.TRyWIn)));
+		pt->append_attribute(doc.allocate_attribute("try_w_out", double2xml(doc, it.wrapped->second.TRyWOut)));
+
+		pt->append_attribute(doc.allocate_attribute("trz_in",  double2xml(doc, it.wrapped->second.TRzIn)));
+		pt->append_attribute(doc.allocate_attribute("trz_out", double2xml(doc, it.wrapped->second.TRzOut)));
+		pt->append_attribute(doc.allocate_attribute("trz_mode_in",  doc.allocate_string(TangentMode_ToString(it.wrapped->second.TRzModeIn))));
+		pt->append_attribute(doc.allocate_attribute("trz_mode_out", doc.allocate_string(TangentMode_ToString(it.wrapped->second.TRzModeOut))));
+		pt->append_attribute(doc.allocate_attribute("trz_w_in",  double2xml(doc, it.wrapped->second.TRzWIn)));
+		pt->append_attribute(doc.allocate_attribute("trz_w_out", double2xml(doc, it.wrapped->second.TRzWOut)));
+
 
 
 		if(val.Selected)
@@ -719,6 +776,28 @@ bool CamPath::Load(wchar_t const * fileName)
 						if (auto* a = cur_node->first_attribute("tfov_w_in"))  r.TfovWIn = atof(a->value());
 						if (auto* a = cur_node->first_attribute("tfov_w_out")) r.TfovWOut = atof(a->value());
 
+						// Rotation (Euler) tangents / modes / weights (optional)
+						if (auto* a = cur_node->first_attribute("trx_in"))  r.TRxIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trx_out")) r.TRxOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trx_mode_in"))  TangentMode_FromString(a->value(), r.TRxModeIn);
+						if (auto* a = cur_node->first_attribute("trx_mode_out")) TangentMode_FromString(a->value(), r.TRxModeOut);
+						if (auto* a = cur_node->first_attribute("trx_w_in"))  r.TRxWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trx_w_out")) r.TRxWOut = atof(a->value());
+
+						if (auto* a = cur_node->first_attribute("try_in"))  r.TRyIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("try_out")) r.TRyOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("try_mode_in"))  TangentMode_FromString(a->value(), r.TRyModeIn);
+						if (auto* a = cur_node->first_attribute("try_mode_out")) TangentMode_FromString(a->value(), r.TRyModeOut);
+						if (auto* a = cur_node->first_attribute("try_w_in"))  r.TRyWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("try_w_out")) r.TRyWOut = atof(a->value());
+
+						if (auto* a = cur_node->first_attribute("trz_in"))  r.TRzIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trz_out")) r.TRzOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trz_mode_in"))  TangentMode_FromString(a->value(), r.TRzModeIn);
+						if (auto* a = cur_node->first_attribute("trz_mode_out")) TangentMode_FromString(a->value(), r.TRzModeOut);
+						if (auto* a = cur_node->first_attribute("trz_w_in"))  r.TRzWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trz_w_out")) r.TRzWOut = atof(a->value());
+
 
 						// Add point:
 						m_Map[dT] = r;
@@ -766,6 +845,29 @@ bool CamPath::Load(wchar_t const * fileName)
 						if (auto* a = cur_node->first_attribute("tz_w_out"))  r.TzWOut = atof(a->value());
 						if (auto* a = cur_node->first_attribute("tfov_w_in"))  r.TfovWIn = atof(a->value());
 						if (auto* a = cur_node->first_attribute("tfov_w_out")) r.TfovWOut = atof(a->value());
+
+						// Rotation (Euler) tangents / modes / weights (optional)
+						if (auto* a = cur_node->first_attribute("trx_in"))  r.TRxIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trx_out")) r.TRxOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trx_mode_in"))  TangentMode_FromString(a->value(), r.TRxModeIn);
+						if (auto* a = cur_node->first_attribute("trx_mode_out")) TangentMode_FromString(a->value(), r.TRxModeOut);
+						if (auto* a = cur_node->first_attribute("trx_w_in"))  r.TRxWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trx_w_out")) r.TRxWOut = atof(a->value());
+
+						if (auto* a = cur_node->first_attribute("try_in"))  r.TRyIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("try_out")) r.TRyOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("try_mode_in"))  TangentMode_FromString(a->value(), r.TRyModeIn);
+						if (auto* a = cur_node->first_attribute("try_mode_out")) TangentMode_FromString(a->value(), r.TRyModeOut);
+
+						if (auto* a = cur_node->first_attribute("try_w_in"))  r.TRyWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("try_w_out")) r.TRyWOut = atof(a->value());
+
+						if (auto* a = cur_node->first_attribute("trz_in"))  r.TRzIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trz_out")) r.TRzOut = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trz_mode_in"))  TangentMode_FromString(a->value(), r.TRzModeIn);
+						if (auto* a = cur_node->first_attribute("trz_mode_out")) TangentMode_FromString(a->value(), r.TRzModeOut);
+						if (auto* a = cur_node->first_attribute("trz_w_in"))  r.TRzWIn = atof(a->value());
+						if (auto* a = cur_node->first_attribute("trz_w_out")) r.TRzWOut = atof(a->value());
 
 
 						// Add point:
@@ -1186,6 +1288,18 @@ void CamPath::SetTangent(Channel ch, bool setIn, bool setOut, double slopeIn, do
                 if (setIn)  cur.TfovIn = slopeIn;
                 if (setOut) cur.TfovOut = slopeOut;
                 break;
+            case CH_RPITCH:
+                if (setIn)  cur.TRyIn = slopeIn;
+                if (setOut) cur.TRyOut = slopeOut;
+                break;
+            case CH_RYAW:
+                if (setIn)  cur.TRzIn = slopeIn;
+                if (setOut) cur.TRzOut = slopeOut;
+                break;
+            case CH_RROLL:
+                if (setIn)  cur.TRxIn = slopeIn;
+                if (setOut) cur.TRxOut = slopeOut;
+                break;
             }
             it->second = cur;
         }
@@ -1204,6 +1318,11 @@ void CamPath::SetTangent(Channel ch, bool setIn, bool setOut, double slopeIn, do
     if (ch == CH_FOV && m_FovInterpMethod == DI_CUSTOM)
     {
         m_FovInterp->InterpolationMapChanged();
+    }
+    // rotation custom -> update
+    if ((ch == CH_RPITCH || ch == CH_RYAW || ch == CH_RROLL) && m_RotationInterpMethod == QI_CUSTOM)
+    {
+        m_RInterp->InterpolationMapChanged();
     }
 
     Changed();
@@ -1242,6 +1361,18 @@ void CamPath::SetTangentMode(Channel ch, bool setIn, bool setOut, unsigned char 
                 if (setIn)  cur.TfovModeIn = mode;
                 if (setOut) cur.TfovModeOut = mode;
                 break;
+            case CH_RPITCH:
+                if (setIn)  cur.TRyModeIn = mode;
+                if (setOut) cur.TRyModeOut = mode;
+                break;
+            case CH_RYAW:
+                if (setIn)  cur.TRzModeIn = mode;
+                if (setOut) cur.TRzModeOut = mode;
+                break;
+            case CH_RROLL:
+                if (setIn)  cur.TRxModeIn = mode;
+                if (setOut) cur.TRxModeOut = mode;
+                break;
             }
             it->second = cur;
         }
@@ -1259,6 +1390,11 @@ void CamPath::SetTangentMode(Channel ch, bool setIn, bool setOut, unsigned char 
     if (ch == CH_FOV && m_FovInterpMethod == DI_CUSTOM)
     {
         m_FovInterp->InterpolationMapChanged();
+    }
+
+    if ((ch == CH_RPITCH || ch == CH_RYAW || ch == CH_RROLL) && m_RotationInterpMethod == QI_CUSTOM)
+    {
+        m_RInterp->InterpolationMapChanged();
     }
 
     Changed();
@@ -1281,6 +1417,9 @@ void CamPath::SetTangentWeight(Channel ch, bool setIn, bool setOut, double wIn, 
             case CH_Y:   if (setIn) cur.TyWIn = wIn;   if (setOut) cur.TyWOut = wOut; break;
             case CH_Z:   if (setIn) cur.TzWIn = wIn;   if (setOut) cur.TzWOut = wOut; break;
             case CH_FOV: if (setIn) cur.TfovWIn = wIn; if (setOut) cur.TfovWOut = wOut; break;
+            case CH_RPITCH: if (setIn) cur.TRyWIn = wIn; if (setOut) cur.TRyWOut = wOut; break;
+            case CH_RYAW:   if (setIn) cur.TRzWIn = wIn; if (setOut) cur.TRzWOut = wOut; break;
+            case CH_RROLL:  if (setIn) cur.TRxWIn = wIn; if (setOut) cur.TRxWOut = wOut; break;
             }
             it->second = cur;
         }
@@ -1296,6 +1435,10 @@ void CamPath::SetTangentWeight(Channel ch, bool setIn, bool setOut, double wIn, 
     }
     if (ch == CH_FOV && m_FovInterpMethod == DI_CUSTOM) {
         m_FovInterp->InterpolationMapChanged();
+    }
+
+    if ((ch == CH_RPITCH || ch == CH_RYAW || ch == CH_RROLL) && m_RotationInterpMethod == QI_CUSTOM) {
+        m_RInterp->InterpolationMapChanged();
     }
 
     Changed();
