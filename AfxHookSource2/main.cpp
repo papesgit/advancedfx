@@ -592,7 +592,224 @@ double MirvCamIO_GetTimeFn(void) {
 }
 
 CON_COMMAND(mirv_camio, "New camera motion data import / export.") {
-	g_S2CamIO.Console_CamIO(args);
+    g_S2CamIO.Console_CamIO(args);
+}
+
+// --- SFM CAM import: mirv_sfm camio <filePath> (respects file timeline) -------
+
+namespace {
+    static bool ReadWholeFileW(const wchar_t* fileName, std::string& outData)
+    {
+        FILE* f = nullptr;
+        if (0 != _wfopen_s(&f, fileName, L"rb") || !f) return false;
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        if (size < 0) { fclose(f); return false; }
+        rewind(f);
+        outData.resize((size_t)size);
+        size_t rd = fread(outData.data(), 1, (size_t)size, f);
+        fclose(f);
+        return rd == (size_t)size;
+    }
+
+    static void SkipWs(const char*& p, const char* end)
+    {
+        while (p < end)
+        {
+            if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') { ++p; continue; }
+            if ((end - p) >= 2 && p[0] == '/' && p[1] == '/') { // // comment
+                p += 2; while (p < end && *p != '\n') ++p; continue;
+            }
+            break;
+        }
+    }
+
+    static bool ReadQuoted(const char*& p, const char* end, std::string& out)
+    {
+        SkipWs(p, end);
+        if (p >= end || *p != '"') return false;
+        ++p;
+        const char* start = p;
+        while (p < end && *p != '"') ++p;
+        if (p >= end) return false;
+        out.assign(start, (size_t)(p - start));
+        ++p;
+        return true;
+    }
+
+    static bool FindNextChar(const char*& p, const char* end, char ch)
+    {
+        while (p < end && *p != ch) ++p;
+        return p < end;
+    }
+
+    static bool FindBlockAfterKey(const char* data, const char* end, const char* key, const char** outBegin, const char** outEnd)
+    {
+        const char* p = data;
+        size_t keyLen = strlen(key);
+        (void)keyLen;
+        while (p < end)
+        {
+            const char* q = (const char*)memchr(p, '"', (size_t)(end - p));
+            if (!q) return false;
+            ++q;
+            const char* kStart = q;
+            while (q < end && *q != '"') ++q;
+            if (q >= end) return false;
+            std::string found(kStart, (size_t)(q - kStart));
+            ++q;
+            if (0 == _stricmp(found.c_str(), key))
+            {
+                const char* brace = q; SkipWs(brace, end); if (brace >= end || *brace != '{') return false;
+                ++brace;
+                int depth = 1; const char* it = brace;
+                while (it < end && depth > 0)
+                {
+                    if (*it == '"') { ++it; while (it < end && *it != '"') ++it; if (it < end) ++it; continue; }
+                    if (*it == '{') { ++depth; ++it; continue; }
+                    if (*it == '}') { --depth; if (depth == 0) { *outBegin = brace; *outEnd = it; return true; } ++it; continue; }
+                    ++it;
+                }
+                return false;
+            }
+            p = q;
+        }
+        return false;
+    }
+
+    static bool ImportSfmCamKeyframes_S2(const std::string& data, CamPath& camPath, size_t& outCount)
+    {
+        const char* begin = data.c_str();
+        const char* end = begin + data.size();
+
+        const char* rootBegin = nullptr; const char* rootEnd = nullptr;
+        if (!FindBlockAfterKey(begin, end, "game_camera_anim", &rootBegin, &rootEnd)) return false;
+
+        // Determine base timeline from file:
+        double baseTime = 0.0;
+        bool   baseTimeSet = false;
+        {
+            const char* p = rootBegin;
+            while (p < rootEnd)
+            {
+                const char* q = (const char*)memchr(p, '"', (size_t)(rootEnd - p));
+                if (!q) break; ++q; const char* kStart = q; while (q < rootEnd && *q != '"') ++q; if (q >= rootEnd) break; std::string k(kStart, (size_t)(q - kStart)); ++q;
+                if (0 == _stricmp(k.c_str(), "starting_game_time")) {
+                    std::string v; const char* r = q; if (!ReadQuoted(r, rootEnd, v)) break; baseTime = atof(v.c_str()); baseTimeSet = true; break;
+                }
+                if (0 == _stricmp(k.c_str(), "starting_demo_tick")) {
+                    std::string v; const char* r = q; if (!ReadQuoted(r, rootEnd, v)) break; double tick = atof(v.c_str()); baseTime = tick * (double)g_MirvTime.interval_per_tick_get(); baseTimeSet = true; /* keep searching for game_time? not necessary */ }
+                p = q;
+            }
+        }
+        if (!baseTimeSet)
+        {
+            double curDemoTime;
+            if (g_MirvTime.GetCurrentDemoTime(curDemoTime)) baseTime = curDemoTime; else baseTime = g_MirvTime.curtime_get();
+        }
+
+        const char* kfBegin = nullptr; const char* kfEnd = nullptr;
+        if (!FindBlockAfterKey(rootBegin, rootEnd, "keyframes", &kfBegin, &kfEnd)) return false;
+
+        camPath.Clear();
+        outCount = 0;
+
+        const char* p = kfBegin;
+        while (p < kfEnd)
+        {
+            SkipWs(p, kfEnd);
+            if (p >= kfEnd) break;
+            std::string tStr;
+            if (!ReadQuoted(p, kfEnd, tStr)) break;
+            double tRel = atof(tStr.c_str());
+
+            SkipWs(p, kfEnd);
+            if (p >= kfEnd || *p != '{') { if (!FindNextChar(p, kfEnd, '"')) break; else continue; }
+            ++p;
+            const char* fb = p; int depth = 1;
+            while (p < kfEnd && depth > 0)
+            {
+                if (*p == '"') { ++p; while (p < kfEnd && *p != '"') ++p; if (p < kfEnd) ++p; continue; }
+                if (*p == '{') { ++depth; ++p; continue; }
+                if (*p == '}') { --depth; ++p; if (depth == 0) break; continue; }
+                ++p;
+            }
+            const char* fe = p - 1;
+
+            double tx = 0.0, ty = 0.0, tz = 0.0;
+            double rx = 0.0, ry = 0.0, rz = 0.0;
+            double fov = 90.0;
+
+            const char* q = fb;
+            while (q < fe)
+            {
+                std::string key, val;
+                if (!ReadQuoted(q, fe, key)) break;
+                if (!ReadQuoted(q, fe, val)) { if (!FindNextChar(q, fe, '"')) break; else continue; }
+                double d = atof(val.c_str());
+                if (0 == _stricmp(key.c_str(), "tx")) tx = d;
+                else if (0 == _stricmp(key.c_str(), "ty")) ty = d;
+                else if (0 == _stricmp(key.c_str(), "tz")) tz = d;
+                else if (0 == _stricmp(key.c_str(), "rx")) rx = d;
+                else if (0 == _stricmp(key.c_str(), "ry")) ry = d;
+                else if (0 == _stricmp(key.c_str(), "rz")) rz = d;
+                else if (0 == _stricmp(key.c_str(), "fov")) fov = d;
+            }
+
+            // Map rotations: pitch=ry, yaw=rz, roll=rx
+            double pitch = ry;
+            double yaw   = rz;
+            double roll  = rx;
+
+            camPath.Add(baseTime + tRel, CamPathValue(tx, ty, tz, pitch, yaw, roll, fov));
+            ++outCount;
+        }
+
+        camPath.Enabled_set(true);
+        return outCount > 0;
+    }
+}
+
+CON_COMMAND(mirv_sfm, "Source Filmmaker helpers (import)")
+{
+    if (nullptr == g_pGlobals)
+    {
+        advancedfx::Warning("Error: Hooks not installed.\n");
+        return;
+    }
+
+    int argc = args->ArgC();
+    if (argc >= 3)
+    {
+        const char* cmd1 = args->ArgV(1);
+        if (0 == _stricmp(cmd1, "camio"))
+        {
+            std::wstring wPath;
+            if (!UTF8StringToWideString(args->ArgV(2), wPath))
+            {
+                advancedfx::Warning("Error: Cannot convert file path from UTF-8.\n");
+                return;
+            }
+            std::string data;
+            if (!ReadWholeFileW(wPath.c_str(), data))
+            {
+                advancedfx::Warning("Error: Failed to read file.\n");
+                return;
+            }
+            size_t count = 0;
+            if (!ImportSfmCamKeyframes_S2(data, g_CamPath, count))
+            {
+                advancedfx::Warning("Error: Parse failed or no keyframes found.\n");
+                return;
+            }
+            advancedfx::Message("mirv_sfm: Imported %zu keyframes to mirv_campath (timeline respected).\n", count);
+            return;
+        }
+    }
+
+    advancedfx::Message(
+        "mirv_sfm camio <filePath> - Import SFM 'game_camera_anim' file as mirv_campath using file timeline.\n"
+    );
 }
 
 

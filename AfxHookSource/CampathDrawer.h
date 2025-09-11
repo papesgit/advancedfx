@@ -8,6 +8,7 @@
 #include <d3d9.h>
 #include <list>
 #include <atomic>
+#include <mutex>
 
 #define CCampathDrawer_VertexFVF D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX0 | D3DFVF_TEXCOORDSIZE3(0) | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(1) | D3DFVF_TEX2 | D3DFVF_TEXCOORDSIZE3(2)
 
@@ -208,11 +209,17 @@ private:
 		CCampathDrawerFunctor(CCampathDrawer * drawer) {
 			m_DynamicProperties = new CDynamicProperties(drawer);
 			m_LessDynamicProperties = drawer->m_LessDynamicProperties;
-			m_LessDynamicProperties->AddRef();
+			if (m_LessDynamicProperties) m_LessDynamicProperties->AddRef();
+		}
+
+		// Overload that takes a pre-AddRef'ed lessDynamicProperties pointer captured under lock
+		CCampathDrawerFunctor(CCampathDrawer* drawer, CLessDynamicProperties* lessDynamicProperties) {
+			m_DynamicProperties = new CDynamicProperties(drawer);
+			m_LessDynamicProperties = lessDynamicProperties; // already holds one ref for this functor
 		}
 
 		virtual ~CCampathDrawerFunctor() {
-			m_LessDynamicProperties->Release();
+			if (m_LessDynamicProperties) m_LessDynamicProperties->Release();
 			delete m_DynamicProperties;
 		}
 
@@ -241,6 +248,7 @@ private:
 	IAfxPixelShader* m_DrawTextureShader = nullptr;
 
 	CLessDynamicProperties * m_LessDynamicProperties = nullptr;
+	std::mutex m_LessPropsMutex; // guards m_LessDynamicProperties lifecycle
 
 	static void CampathChangedFn(void * pUserData);
 

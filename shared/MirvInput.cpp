@@ -668,14 +668,63 @@ bool MirvInput::Supply_CharEvent(WPARAM wParam, LPARAM lParam)
 
 bool MirvInput::Supply_KeyEvent(KeyState keyState, WPARAM wParam, LPARAM lParam)
 {
-	if(!m_Focus)
-		return false;
+    if(!m_Focus)
+        return false;
 
-	if(m_Dependencies->GetSuspendMirvInput())
-	{
-		m_IgnoreKeyUp = KS_DOWN == keyState;
-		return false;
-	}
+    if(m_Dependencies->GetSuspendMirvInput())
+    {
+        // While suspended (e.g. overlay visible without RMB passthrough), we still want to
+        // react to key releases so movement doesn't get stuck. Mirror the zeroing behavior
+        // for KS_UP cases here without altering speeds on KS_DOWN.
+        if (keyState == KS_UP && m_CameraControlMode)
+        {
+            switch(wParam)
+            {
+            case 0x57: // W key
+            case VK_NUMPAD8:
+                m_CamForward = 0.0; break;
+            case 0x53: // S key
+            case VK_NUMPAD2:
+                m_CamForwardI = 0.0; break;
+            case 0x41: // A key
+            case VK_NUMPAD4:
+                m_CamLeft = 0.0; break;
+            case 0x44: // D key
+            case VK_NUMPAD6:
+                m_CamLeftI = 0.0; break;
+            case 0x52: // R key
+            case VK_NUMPAD9:
+                m_CamUp = 0.0; break;
+            case 0x46: // F key
+            case VK_NUMPAD3:
+                m_CamUpI = 0.0; break;
+            case VK_NUMPAD1:
+            case VK_NEXT:
+                m_CamFov = 0.0; break;
+            case VK_NUMPAD7:
+            case VK_PRIOR:
+                m_CamFovI = 0.0; break;
+            case 0x58: // X key
+            case VK_DECIMAL:
+                m_CamRoll = 0.0; break;
+            case 0x5A: // Z key
+            case VK_NUMPAD0:
+                m_CamRollI = 0.0; break;
+            case VK_DOWN:
+                m_CamPitch = 0.0; break;
+            case VK_UP:
+                m_CamPitchI = 0.0; break;
+            case VK_LEFT:
+                m_CamYaw = 0.0; break;
+            case VK_RIGHT:
+                m_CamYawI = 0.0; break;
+            default:
+                break;
+            }
+        }
+        m_IgnoreKeyUp = KS_DOWN == keyState;
+        return false;
+    }
 
 	if(m_IgnoreKeyUp && KS_UP == keyState)
 	{
@@ -1081,29 +1130,31 @@ void MirvInput::Supply_SetCursorPos(int x, int y)
 
 void MirvInput::Supply_MouseFrameEnd(void)
 {
-	if(!m_Focus)
-		return;
+    if(!m_Focus)
+        return;
 
-	if(m_Dependencies->GetSuspendMirvInput())
-		return;
+    // Always clear per-frame mouse accumulators to avoid stale movement persisting
+    // across frames when input is suspended (e.g. overlay visible without RMB passthrough).
+    if(!m_Dependencies->GetSuspendMirvInput())
+    {
+        if(m_CameraControlMode)
+        {
+            if(m_FirstGetCursorPos)
+            {
+                // TODO: HACK: In POV-Demos only rawinput is available, because
+                // they don't call SetCursorPos / GetCursorPos to read player mouse
+                // input. We make room to move here (so the mouse won't leave
+                // the window).
+                SetCursorPos(m_LastCursorX, m_LastCursorY);
+            }
 
-	if(m_CameraControlMode)
-	{
-		if(m_FirstGetCursorPos)
-		{
-			// TODO: HACK: In POV-Demos only rawinput is available, because
-			// they don't call SetCursorPos / GetCursorPos to read player mouse
-			// input. We make room to move here (so the mouse won't leave
-			// the window).
-			SetCursorPos(m_LastCursorX, m_LastCursorY);
-		}
+            m_FirstGetCursorPos = true;
+        }
+    }
 
-		m_FirstGetCursorPos = true;
-	}
-
-	m_MouseInput.Clear();
-	m_MNormalLeftButtonWasDown = m_MouseInput.Normal.LeftButtonDown;
-	m_MNormalRightButtonWasDown = m_MouseInput.Normal.RightButtonDown;	
+    m_MouseInput.Clear();
+    m_MNormalLeftButtonWasDown = m_MouseInput.Normal.LeftButtonDown;
+    m_MNormalRightButtonWasDown = m_MouseInput.Normal.RightButtonDown;
 }
 
 void MirvInput::Supply_Focus(bool hasFocus)

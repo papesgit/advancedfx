@@ -5,7 +5,7 @@ project (hlae_overlay)
 add_library(${PROJECT_NAME} STATIC)
 
 # ---- Optional FreeType integration for Dear ImGui ----
-option(HLAE_OVERLAY_WITH_FREETYPE "Use FreeType for ImGui font baking" ON)
+option(HLAE_OVERLAY_WITH_FREETYPE "Use FreeType for ImGui font baking" OFF)
 
 # Try to use official Dear ImGui core sources if present, else fall back to stub.
 set(HLAE_IMGUI_CORE_SOURCES)
@@ -36,12 +36,10 @@ if (HLAE_OVERLAY_WITH_FREETYPE)
     endif()
 endif()
 
-target_sources(${PROJECT_NAME} PRIVATE
+set(HLAE_OVERLAY_SOURCES
     IOverlayRenderer.h
     Overlay.h
     Overlay.cpp
-    OverlayDx11.h
-    OverlayDx11.cpp
     OverlayVk.h
     InputRouter.h
     InputRouter.cpp
@@ -51,9 +49,7 @@ target_sources(${PROJECT_NAME} PRIVATE
     ${HLAE_IMGUI_FREETYPE_SOURCES}
     third_party/imgui/backends/imgui_impl_win32.h
     third_party/imgui/backends/imgui_impl_win32.cpp
-    third_party/imgui/backends/imgui_impl_dx11.h
-    third_party/imgui/backends/imgui_impl_dx11.cpp
-    
+
     # ImGui Neo Sequencer (third-party timeline widget)
     third_party/imgui_neo_sequencer/imgui_neo_sequencer.h
     third_party/imgui_neo_sequencer/imgui_neo_sequencer.cpp
@@ -62,12 +58,42 @@ target_sources(${PROJECT_NAME} PRIVATE
     third_party/imguizmo/ImGuizmo.cpp
 )
 
+# Add DX9 backend only on 32-bit (Source 1)
+if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+    list(APPEND HLAE_OVERLAY_SOURCES
+        OverlayDx9.h
+        OverlayDx9.cpp
+        third_party/imgui/backends/imgui_impl_dx9.h
+        third_party/imgui/backends/imgui_impl_dx9.cpp)
+endif()
+
+# Add DX11 backend only on 64-bit (Source 2)
+if (CMAKE_SIZEOF_VOID_P EQUAL 8)
+    list(APPEND HLAE_OVERLAY_SOURCES
+        OverlayDx11.h
+        OverlayDx11.cpp
+        third_party/imgui/backends/imgui_impl_dx11.h
+        third_party/imgui/backends/imgui_impl_dx11.cpp)
+endif()
+
+target_sources(${PROJECT_NAME} PRIVATE ${HLAE_OVERLAY_SOURCES})
+
 target_include_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui_neo_sequencer
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imguizmo
 )
+
+# For 32-bit (Source 1), allow DX9 overlay to include AfxHookSource headers and deps.
+if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/AfxHookSource
+        ${CMAKE_SOURCE_DIR}/deps/release/prop
+        ${CMAKE_SOURCE_DIR}/deps/release/prop/AfxHookSource
+    )
+endif()
 
 # If FreeType is enabled, add include, define, find/link the library.
 if (HLAE_OVERLAY_WITH_FREETYPE)
@@ -122,4 +148,9 @@ endif()
 if (MSVC)
     target_compile_definitions(${PROJECT_NAME} PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_link_libraries(${PROJECT_NAME} PUBLIC shell32.lib)
+endif()
+
+# Use safer default toggle keys on 32-bit (Source 1): F8 only; disable alt toggle
+if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+    target_compile_definitions(${PROJECT_NAME} PUBLIC OVERLAY_TOGGLE_VK=0x77 OVERLAY_TOGGLE_ALT_VK=0)
 endif()

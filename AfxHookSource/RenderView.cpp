@@ -25,6 +25,7 @@
 #include "csgo/ClientToolsCSgo.h"
 #include "MirvPgl.h"
 #include "../shared/MirvCamIO.h"
+#include "../shared/overlay/Overlay.h"
 
 #undef CreateEvent
 
@@ -104,7 +105,10 @@ Hook_VClient_RenderView::~Hook_VClient_RenderView() {
 }
 
 bool Hook_VClient_RenderView::GetSuspendMirvInput() {
-	return g_VEngineClient && g_VEngineClient->Con_IsVisible();
+    bool consoleVisible = g_VEngineClient && g_VEngineClient->Con_IsVisible();
+    auto &overlay = advancedfx::overlay::Overlay::Get();
+    bool overlayBlocks = overlay.IsVisible() && !overlay.IsRmbPassthroughActive();
+    return consoleVisible || overlayBlocks;
 }
 
 void Hook_VClient_RenderView::GetLastCameraData(double & x, double & y, double & z, double & rX, double & rY, double & rZ, double & fov) {

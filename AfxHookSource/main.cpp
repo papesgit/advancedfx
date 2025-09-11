@@ -2183,6 +2183,15 @@ FARPROC WINAPI new_Engine_GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
 WNDPROC g_NextWindProc;
 static bool g_afxWindowProcSet = false;
 
+#include "../shared/overlay/Overlay.h"
+#include "../shared/overlay/InputRouter.h"
+// Forward declare Dear ImGui Win32 backend WndProc handler
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+#endif
+
 LRESULT CALLBACK new_Afx_WindowProc(
 	__in HWND hwnd,
 	__in UINT uMsg,
@@ -2190,6 +2199,195 @@ LRESULT CALLBACK new_Afx_WindowProc(
 	__in LPARAM lParam
 )
 {
+    // Overlay input handling: toggle + consume when visible
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        // Mark keydown to disable fallback polling and handle toggle key (F8 by config)
+        if (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) {
+            advancedfx::overlay::InputRouter::NotifyKeydown();
+            if (wParam == (WPARAM)advancedfx::overlay::InputRouter::GetToggleKey()) {
+                bool wasVisible = overlay.IsVisible();
+                overlay.ToggleVisible();
+                bool nowVisible = overlay.IsVisible();
+                if (nowVisible != wasVisible) {
+                    // Ensure cursor is shown when making overlay visible.
+                    // Do not force-hide when overlay is hidden; let the game decide (prevents hidden cursor in menus).
+                    if (nowVisible) {
+                        while (ShowCursor(TRUE) < 0) { /* ensure shown */ }
+                    }
+                }
+                return 0; // swallow toggle key
+            }
+        }
+
+        if (overlay.IsVisible()) {
+            // Feed ImGui backend first to update IO state (only if renderer is ready)
+            bool consumed = false;
+            if (overlay.HasRenderer())
+                consumed = ImGui_ImplWin32_WndProcHandler(hwnd, uMsg, wParam, lParam) ? true : false;
+
+            // Allow crucial window management messages to always pass through
+            switch (uMsg) {
+                case WM_ENTERSIZEMOVE:
+                case WM_EXITSIZEMOVE:
+                case WM_SIZING:
+                case WM_SIZE:
+                case WM_WINDOWPOSCHANGING:
+                case WM_WINDOWPOSCHANGED:
+                case WM_DISPLAYCHANGE:
+                case WM_DPICHANGED:
+                    if (uMsg == WM_SIZE) overlay.OnDeviceLost();
+                    consumed = false; // force pass-through for these
+                    break;
+                default: break;
+            }
+
+            // Force OS cursor while overlay is focused (avoid flicker)
+            if (uMsg == WM_SETCURSOR && !overlay.IsRmbPassthroughActive()) {
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return TRUE; // handled
+            }
+
+            // RMB passthrough when hovering outside overlay
+            static bool s_rmbDown = false;
+            static bool s_prevPassThrough = false;
+            if (uMsg == WM_RBUTTONDOWN) s_rmbDown = true;
+            if (uMsg == WM_RBUTTONUP) s_rmbDown = false;
+            if (uMsg == WM_MOUSEMOVE && (wParam & MK_RBUTTON)) s_rmbDown = true;
+
+            bool wantCaptureMouse = overlay.HasRenderer() ? overlay.WantCaptureMouse() : false;
+            bool passThrough = s_rmbDown && !wantCaptureMouse;
+            overlay.SetRmbPassthroughActive(passThrough);
+
+            // On exit of passthrough, make sure MirvInput does not retain any transient input
+            if (s_prevPassThrough && !passThrough) {
+                if (g_Hook_VClient_RenderView.m_MirvInput) {
+                    // End modifier modes and clear per-frame mouse accumulation
+                    if (g_Hook_VClient_RenderView.m_MirvInput->GetMouseRollMode())
+                        g_Hook_VClient_RenderView.m_MirvInput->SetMouseRollMode(false);
+                    if (g_Hook_VClient_RenderView.m_MirvInput->GetMouseFovMode())
+                        g_Hook_VClient_RenderView.m_MirvInput->SetMouseFovMode(false);
+                    // Synthesize button-up to ensure button states are not stuck
+                    WPARAM wp = 0; LPARAM lp = 0;
+                    g_Hook_VClient_RenderView.m_MirvInput->Supply_MouseEvent(WM_LBUTTONUP, wp, lp);
+                    g_Hook_VClient_RenderView.m_MirvInput->Supply_MouseEvent(WM_RBUTTONUP, wp, lp);
+                    // Also synthesize key-up for all movement keys to reset velocities even if keys remain held
+                    // WASD / RF / Arrows / NumPad variants
+                    const int keysToRelease[] = {
+                        0x57 /*W*/, 0x53 /*S*/, 0x41 /*A*/, 0x44 /*D*/,
+                        0x52 /*R*/, 0x46 /*F*/,
+                        VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN,
+                        VK_NEXT /*PageDown*/, VK_PRIOR /*PageUp*/,
+                        VK_NUMPAD8, VK_NUMPAD2, VK_NUMPAD4, VK_NUMPAD6,
+                        VK_NUMPAD9, VK_NUMPAD3, VK_NUMPAD1, VK_NUMPAD7,
+                        VK_DECIMAL, VK_NUMPAD0,
+                        0x58 /*X*/, 0x5A /*Z*/
+                    };
+                    for (int vk : keysToRelease) {
+                        g_Hook_VClient_RenderView.m_MirvInput->Supply_KeyEvent(MirvInput::KS_UP, (WPARAM)vk, 0);
+                    }
+                    // Clear accumulated per-frame deltas
+                    g_Hook_VClient_RenderView.m_MirvInput->Supply_MouseFrameEnd();
+                }
+            }
+            s_prevPassThrough = passThrough;
+
+            // While in RMB passthrough, allow 'R' (roll) and 'F' (FOV) modifier modes for MirvInput
+            static bool s_rollModeActive = false, s_fovModeActive = false;
+            static bool s_rollPrevCamEnabled = false, s_fovPrevCamEnabled = false;
+            if (passThrough) {
+                bool rHeld = (GetKeyState('R') & 0x8000) != 0;
+                bool fHeld = (GetKeyState('F') & 0x8000) != 0;
+                bool wantRoll = rHeld && !fHeld;
+                bool wantFov  = fHeld && !rHeld;
+
+                if (wantRoll != s_rollModeActive) {
+                    s_rollModeActive = wantRoll;
+                    if (g_Hook_VClient_RenderView.m_MirvInput) {
+                        if (s_rollModeActive) {
+                            s_rollPrevCamEnabled = g_Hook_VClient_RenderView.m_MirvInput->GetCameraControlMode();
+                            if (!s_rollPrevCamEnabled) g_Hook_VClient_RenderView.m_MirvInput->SetCameraControlMode(true);
+                            if (g_Hook_VClient_RenderView.m_MirvInput->GetMouseFovMode()) g_Hook_VClient_RenderView.m_MirvInput->SetMouseFovMode(false);
+                            g_Hook_VClient_RenderView.m_MirvInput->SetMouseRollMode(true);
+                        } else {
+                            g_Hook_VClient_RenderView.m_MirvInput->SetMouseRollMode(false);
+                            if (!g_Hook_VClient_RenderView.m_MirvInput->GetMouseFovMode())
+                                g_Hook_VClient_RenderView.m_MirvInput->SetCameraControlMode(s_rollPrevCamEnabled);
+                        }
+                    }
+                }
+
+                if (wantFov != s_fovModeActive) {
+                    s_fovModeActive = wantFov;
+                    if (g_Hook_VClient_RenderView.m_MirvInput) {
+                        if (s_fovModeActive) {
+                            s_fovPrevCamEnabled = g_Hook_VClient_RenderView.m_MirvInput->GetCameraControlMode();
+                            if (!s_fovPrevCamEnabled) g_Hook_VClient_RenderView.m_MirvInput->SetCameraControlMode(true);
+                            if (g_Hook_VClient_RenderView.m_MirvInput->GetMouseRollMode()) g_Hook_VClient_RenderView.m_MirvInput->SetMouseRollMode(false);
+                            g_Hook_VClient_RenderView.m_MirvInput->SetMouseFovMode(true);
+                        } else {
+                            g_Hook_VClient_RenderView.m_MirvInput->SetMouseFovMode(false);
+                            if (!g_Hook_VClient_RenderView.m_MirvInput->GetMouseRollMode())
+                                g_Hook_VClient_RenderView.m_MirvInput->SetCameraControlMode(s_fovPrevCamEnabled);
+                        }
+                    }
+                }
+
+                // Intercept scroll wheel for keyboard sensitivity tuning while in passthrough
+                if (uMsg == WM_MOUSEWHEEL) {
+                    int zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+                    int steps = zDelta / WHEEL_DELTA;
+                    if (steps != 0 && g_Hook_VClient_RenderView.m_MirvInput) {
+                        double ks = g_Hook_VClient_RenderView.m_MirvInput->GetKeyboardSensitivty();
+                        double step = 0.25; ks += step * (double)steps; if (ks < 0.01) ks = 0.01; if (ks > 10.0) ks = 10.0;
+                        g_Hook_VClient_RenderView.m_MirvInput->SetKeyboardSensitivity(ks);
+                    }
+                    return 0; // consume wheel
+                }
+
+                // Swallow modifiers and R/F keys while modes are active
+                if (uMsg == WM_KEYDOWN || uMsg == WM_KEYUP || uMsg == WM_SYSKEYDOWN || uMsg == WM_SYSKEYUP) {
+                    WPARAM vk = wParam;
+                    if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_LCONTROL || vk == VK_RCONTROL)
+                        return 0;
+                    if ((s_rollModeActive && vk == 'R') || (s_fovModeActive && vk == 'F'))
+                        return 0;
+                }
+
+                // Do not consume other inputs: let game/MirvInput handle them while overlay stays open
+                // i.e. fall through without returning 0
+            } else {
+                // Not in passthrough: if ImGui consumed, swallow most inputs but allow UP events to propagate
+                if (consumed) {
+                    switch (uMsg) {
+                        case WM_KEYUP: case WM_SYSKEYUP:
+                        case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
+                            break; // let them pass through
+                        default:
+                            return 0; // consume others
+                    }
+                }
+                // Otherwise, swallow typical inputs while overlay is visible, but allow button/key UP events
+                // to propagate to MirvInput so states don't get stuck when RMB passthrough ends.
+                switch (uMsg) {
+                    case WM_MOUSEMOVE:
+                    case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
+                    case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK:
+                    case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK:
+                    case WM_MOUSEWHEEL:
+                    case WM_MOUSEHWHEEL:
+                    case WM_INPUT: // block raw input while overlay is focused
+                    case WM_KEYDOWN:
+                    case WM_SYSKEYDOWN:
+                        return 0; // consume
+                    default: break;
+                }
+                // Note: We intentionally do NOT consume WM_LBUTTONUP/WM_RBUTTONUP/WM_MBUTTONUP/WM_KEYUP/WM_SYSKEYUP
+                // so they can reach MirvInput and release any held camera inputs.
+            }
+        }
+    }
+
 	if (AfxHookSource::Gui::WndProcHandler(hwnd, uMsg, wParam, lParam))
 		return 0;
 
@@ -2318,51 +2516,113 @@ LONG WINAPI new_SetWindowLongA(
 	return SetWindowLongA(hWnd, nIndex, dwNewLong);
 }
 
+// Cursor detour trampoline pointers (must appear before first use)
+static BOOL (WINAPI * True_GetCursorPos_Detour)(LPPOINT) = nullptr;
+static BOOL (WINAPI * True_SetCursorPos_Detour)(int, int) = nullptr;
+static HCURSOR (WINAPI * True_SetCursor_Detour)(HCURSOR) = nullptr;
+static INT (WINAPI * True_ShowCursor_Detour)(BOOL) = nullptr;
+
 BOOL WINAPI new_GetCursorPos(
-	__out LPPOINT lpPoint
+    __out LPPOINT lpPoint
 )
 {
-	BOOL result = GetCursorPos(lpPoint);
+    static POINT s_lockPos = {0,0};
+    static bool s_haveLockPos = false;
 
-	if (AfxHookSource::Gui::OnGetCursorPos(lpPoint))
-		return TRUE;
+    BOOL result = True_GetCursorPos_Detour ? True_GetCursorPos_Detour(lpPoint) : GetCursorPos(lpPoint);
 
-	g_Hook_VClient_RenderView.m_MirvInput->Supply_GetCursorPos(lpPoint);
+    // While overlay GUI is visible and not in RMB passthrough, freeze cursor position for the game
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+            if (!s_haveLockPos) { s_lockPos = *lpPoint; s_haveLockPos = true; }
+            *lpPoint = s_lockPos;
+            return TRUE;
+        } else {
+            s_haveLockPos = false;
+        }
+    }
 
-	return result;
+    if (AfxHookSource::Gui::OnGetCursorPos(lpPoint))
+        return TRUE;
+
+    g_Hook_VClient_RenderView.m_MirvInput->Supply_GetCursorPos(lpPoint);
+
+    return result;
 }
 
 BOOL WINAPI new_SetCursorPos(
-	__in int X,
-	__in int Y
+    __in int X,
+    __in int Y
 )
 {
-	if (AfxHookSource::Gui::OnSetCursorPos(X, Y))
-		return TRUE;
+    // Block game cursor warping while overlay is visible and not in RMB passthrough
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive())
+            return TRUE;
+    }
 
-	BOOL result = SetCursorPos(X, Y);
-	if(result) g_Hook_VClient_RenderView.m_MirvInput->Supply_SetCursorPos(X, Y);
+    if (AfxHookSource::Gui::OnSetCursorPos(X, Y))
+        return TRUE;
+
+    BOOL result = True_SetCursorPos_Detour ? True_SetCursorPos_Detour(X, Y) : SetCursorPos(X, Y);
+    if(result) g_Hook_VClient_RenderView.m_MirvInput->Supply_SetCursorPos(X, Y);
 	return result;
 }
 
 HCURSOR WINAPI new_SetCursor(__in_opt HCURSOR hCursor)
 {
-	HCURSOR result;
+    HCURSOR result;
 
-	if (AfxHookSource::Gui::OnSetCursor(hCursor, result))
-		return result;
+    // While overlay GUI is visible and not in RMB passthrough, force arrow cursor and block game changes
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+            // Ensure cursor stays visible and consistent while overlay is up
+            while (ShowCursor(TRUE) < 0) { /* ensure shown */ }
+            return True_SetCursor_Detour ? True_SetCursor_Detour(LoadCursor(NULL, IDC_ARROW)) : SetCursor(LoadCursor(NULL, IDC_ARROW));
+        }
+    }
 
-	return SetCursor(hCursor);
+    if (AfxHookSource::Gui::OnSetCursor(hCursor, result))
+        return result;
+
+    return True_SetCursor_Detour ? True_SetCursor_Detour(hCursor) : SetCursor(hCursor);
+}
+
+INT WINAPI new_ShowCursor(BOOL bShow)
+{
+    // Suppress hide requests while overlay is visible and not in RMB passthrough
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+            if (!bShow) {
+                // Ignore hide; claim visible state to callers
+                return 1;
+            }
+        }
+    }
+
+    // Call through to real API (detoured target)
+    return True_ShowCursor_Detour ? True_ShowCursor_Detour(bShow) : ShowCursor(bShow);
 }
 
 HWND WINAPI new_SetCapture(__in HWND hWnd)
 {
-	HWND result;
+    HWND result;
 
-	if (AfxHookSource::Gui::OnSetCapture(hWnd, result))
-		return result;
+    // Prevent game from capturing mouse while overlay GUI is visible (unless in RMB passthrough)
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive())
+            return GetCapture();
+    }
 
-	return SetCapture(hWnd);
+    if (AfxHookSource::Gui::OnSetCapture(hWnd, result))
+        return result;
+
+    return SetCapture(hWnd);
 }
 
 BOOL WINAPI new_ReleaseCapture()
@@ -2426,6 +2686,29 @@ bool Install_csgo_engine_Do_CCLCMsg_FileCRCCheck() {
 	return firstResult;
 }
 
+// Global detours for USER32 cursor APIs (ensure process-wide behavior in all games)
+// True_ShowCursor_Detour is declared above; initialize on first use
+INT WINAPI new_ShowCursor(BOOL bShow)  ; // forward (defined above for import hook as well)
+
+static BOOL g_CursorDetoursInstalled = FALSE;
+static void InstallUser32CursorDetoursOnce()
+{
+    if (g_CursorDetoursInstalled) return;
+    LONG error = NO_ERROR;
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    if (!True_ShowCursor_Detour) True_ShowCursor_Detour = ShowCursor;
+    if (!True_SetCursor_Detour) True_SetCursor_Detour = SetCursor;
+    if (!True_GetCursorPos_Detour) True_GetCursorPos_Detour = GetCursorPos;
+    if (!True_SetCursorPos_Detour) True_SetCursorPos_Detour = SetCursorPos;
+    DetourAttach(&(PVOID&)True_ShowCursor_Detour, (PVOID)new_ShowCursor);
+    DetourAttach(&(PVOID&)True_SetCursor_Detour, (PVOID)new_SetCursor);
+    DetourAttach(&(PVOID&)True_GetCursorPos_Detour, (PVOID)new_GetCursorPos);
+    DetourAttach(&(PVOID&)True_SetCursorPos_Detour, (PVOID)new_SetCursorPos);
+    error = DetourTransactionCommit();
+    if (NO_ERROR == error) g_CursorDetoursInstalled = TRUE;
+}
+
 
 HMODULE WINAPI new_LoadLibraryA(LPCSTR lpLibFileName);
 HMODULE WINAPI new_LoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFlags);
@@ -2452,9 +2735,13 @@ typedef csgo_ICommandLine_t * (*csgo_CommandLine_t)();
 
 CAfxImportFuncHook<BOOL (WINAPI *)(LPPOINT)> g_Import_Tier0_USER32_GetCursorPos("GetCursorPos", new_GetCursorPos);
 CAfxImportFuncHook<BOOL (WINAPI *)(int, int)> g_Import_Tier0_USER32_SetCursorPos("SetCursorPos", new_SetCursorPos);
+CAfxImportFuncHook<HCURSOR (WINAPI *)(HCURSOR)> g_Import_Tier0_USER32_SetCursor("SetCursor", new_SetCursor);
+CAfxImportFuncHook<INT (WINAPI *)(BOOL)> g_Import_Tier0_USER32_ShowCursor("ShowCursor", new_ShowCursor);
 CAfxImportDllHook g_Import_Tier0_USER32("USER32.dll", CAfxImportDllHooks({
 	&g_Import_Tier0_USER32_GetCursorPos
-	, & g_Import_Tier0_USER32_SetCursorPos}));
+	, & g_Import_Tier0_USER32_SetCursorPos
+	, & g_Import_Tier0_USER32_SetCursor
+	, & g_Import_Tier0_USER32_ShowCursor}));
 CAfxImportsHook g_Import_Tier0(CAfxImportsHooks({
 	&g_Import_Tier0_USER32}));
 
@@ -2593,10 +2880,12 @@ void CommonHooks()
 			advancedfx::DevMessage = Tier0_DevMsg = (Tier0DevMsgFn)GetProcAddress(hTier0, "DevMsg");
 			advancedfx::DevWarning = Tier0_DevWarning = (Tier0DevMsgFn)GetProcAddress(hTier0, "DevWarning");
 
-			if (SourceSdkVer_CSSV34 == g_SourceSdkVer)
-			{
-				g_Import_Tier0.Apply(hTier0);
-			}
+            // Apply USER32 IAT hooks for legacy CSS V34 only; use global detours otherwise.
+            if (SourceSdkVer_CSSV34 == g_SourceSdkVer) {
+                g_Import_Tier0.Apply(hTier0);
+            } else {
+                InstallUser32CursorDetoursOnce();
+            }
 
 			if (SourceSdkVer_CSGO == g_SourceSdkVer || SourceSdkVer_CSCO == g_SourceSdkVer)
 			{
@@ -3335,3 +3624,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 	}
 	return TRUE;
 }
+#include "../shared/overlay/Overlay.h"
+#include "../shared/overlay/InputRouter.h"
+// Forward declare Dear ImGui Win32 backend WndProc handler
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+#endif

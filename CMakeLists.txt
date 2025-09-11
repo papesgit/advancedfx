@@ -159,6 +159,8 @@ if(CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
 
     add_subdirectory("AfxCppCli")
     add_subdirectory("ShaderBuilder")
+    # Build shared overlay (Dear ImGui) so Source1 can link it
+    add_subdirectory("shared/overlay")
     add_subdirectory("AfxHookGoldSrc")
     add_subdirectory("AfxHookSource")
     add_subdirectory("hlae")

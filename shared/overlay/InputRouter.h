@@ -27,6 +27,8 @@ public:
 #ifdef _WIN32
     // Diagnostics & fallback: query if any WM_KEYDOWN was seen since last frame.
     static bool ConsumeKeydownSeenThisFrame();
+    // Mark that a WM_KEYDOWN was observed this frame (for external WndProc integrations).
+    static void NotifyKeydown();
 
     // Public accessors for configured toggle keys.
     static int GetToggleKey();

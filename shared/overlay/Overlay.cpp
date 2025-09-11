@@ -9,6 +9,9 @@
 #include <windows.h>
 #endif
 
+// For WantCaptureMouse/Keyboard
+#include "third_party/imgui/imgui.h"
+
 namespace advancedfx {
 namespace overlay {
 
@@ -66,33 +69,45 @@ void Overlay::BeginFrame() {
     UpdateDeltaTime();
 
 #ifdef _WIN32
-    // Fallback polling if we did not see WM_KEYDOWN for a while
+    // Only poll for toggles if we own a Win32 WndProc via InputRouter (Source 2).
+    // On Source 1 we integrate with the game's WndProc; polling can double-toggle.
     static int s_noKeydownFrames = 0;
     static bool s_prevDownMain = false;
     static bool s_prevDownAlt = false;
-
-    bool sawKeydown = InputRouter::ConsumeKeydownSeenThisFrame();
-    if (sawKeydown) {
-        s_noKeydownFrames = 0;
-    } else {
-        s_noKeydownFrames++;
-        if (s_noKeydownFrames > 120) { // ~2s at 60 FPS without keydown messages
-            SHORT s = GetAsyncKeyState(InputRouter::GetToggleKey());
-            bool down = (s & 0x8000) != 0;
-            if (down && !s_prevDownMain) {
-                advancedfx::Message("Overlay: toggle hotkey (poll) vk=0x%02X\n", (unsigned)InputRouter::GetToggleKey());
-                ToggleVisible();
+    if (m_InputRouter) {
+        bool sawKeydown = InputRouter::ConsumeKeydownSeenThisFrame();
+        if (sawKeydown) {
+            s_noKeydownFrames = 0;
+        } else {
+            s_noKeydownFrames++;
+            if (s_noKeydownFrames > 120) { // ~2s at 60 FPS without keydown messages
+                int vkMain = InputRouter::GetToggleKey();
+                SHORT s = (SHORT)0;
+                if (vkMain) s = GetAsyncKeyState(vkMain);
+                bool down = (s & 0x8000) != 0;
+                if (down && !s_prevDownMain) {
+                    advancedfx::Message("Overlay: toggle hotkey (poll) vk=0x%02X\n", (unsigned)vkMain);
+                    ToggleVisible();
+                }
+                s_prevDownMain = down;
+                // also allow alternate toggle key
+                int vkAlt = InputRouter::GetAltToggleKey();
+                if (vkAlt) {
+                    s = GetAsyncKeyState(vkAlt);
+                    down = (s & 0x8000) != 0;
+                    if (down && !s_prevDownAlt) {
+                        advancedfx::Message("Overlay: toggle hotkey (poll) vk=0x%02X\n", (unsigned)vkAlt);
+                        ToggleVisible();
+                    }
+                    s_prevDownAlt = down;
+                }
             }
-            s_prevDownMain = down;
-            // also allow alternate toggle key
-            s = GetAsyncKeyState(InputRouter::GetAltToggleKey());
-            down = (s & 0x8000) != 0;
-            if (down && !s_prevDownAlt) {
-                advancedfx::Message("Overlay: toggle hotkey (poll) vk=0x%02X\n", (unsigned)InputRouter::GetAltToggleKey());
-                ToggleVisible();
-            }
-            s_prevDownAlt = down;
         }
+    } else {
+        // No router: ensure polling state machines don't linger
+        s_noKeydownFrames = 0;
+        s_prevDownMain = false;
+        s_prevDownAlt = false;
     }
 #endif
 
@@ -120,6 +135,20 @@ void Overlay::OnResize(uint32_t w, uint32_t h) {
 
 void Overlay::AttachInputRouter(std::unique_ptr<InputRouter> router) {
     m_InputRouter = std::move(router);
+}
+
+bool Overlay::WantCaptureMouse() const {
+    if (!m_Visible || !m_Renderer) return false;
+    if (!ImGui::GetCurrentContext()) return false;
+    ImGuiIO& io = ImGui::GetIO();
+    return io.WantCaptureMouse;
+}
+
+bool Overlay::WantCaptureKeyboard() const {
+    if (!m_Visible || !m_Renderer) return false;
+    if (!ImGui::GetCurrentContext()) return false;
+    ImGuiIO& io = ImGui::GetIO();
+    return io.WantCaptureKeyboard;
 }
 
 } // namespace overlay

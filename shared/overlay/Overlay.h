@@ -42,6 +42,10 @@ public:
     void SetRmbPassthroughActive(bool v) { m_RmbPassthrough = v; }
     bool IsRmbPassthroughActive() const { return m_RmbPassthrough; }
 
+    // Query ImGui IO capture flags (valid during frames when renderer is active)
+    bool WantCaptureMouse() const;
+    bool WantCaptureKeyboard() const;
+
 private:
     Overlay();
     ~Overlay();

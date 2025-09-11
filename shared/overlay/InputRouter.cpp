@@ -86,6 +86,10 @@ bool InputRouter::ConsumeKeydownSeenThisFrame() {
     return seen;
 }
 
+void InputRouter::NotifyKeydown() {
+    s_KeydownSeenThisFrame.store(true, std::memory_order_relaxed);
+}
+
 int InputRouter::GetToggleKey() { return kToggleVk; }
 int InputRouter::GetAltToggleKey() { return kToggleAltVk; }
 #endif

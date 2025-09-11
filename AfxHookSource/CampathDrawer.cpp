@@ -71,7 +71,10 @@ CCampathDrawer::~CCampathDrawer()
 	if (m_DrawTextureShader) m_DrawTextureShader->Release();
 	if(m_PixelShader) m_PixelShader->Release();
 	if(m_VertexShader) m_VertexShader->Release();
-	if(m_LessDynamicProperties) m_LessDynamicProperties->Release();
+	{
+		std::lock_guard<std::mutex> lock(m_LessPropsMutex);
+		if(m_LessDynamicProperties) { m_LessDynamicProperties->Release(); m_LessDynamicProperties = nullptr; }
+	}
 }
 
 void CCampathDrawer::AutoPolyLineStart()
@@ -217,6 +220,7 @@ void CCampathDrawer::CampathChangedFn(void * pUserData) {
 
 void CCampathDrawer::CamPathChanged()
 {
+	std::lock_guard<std::mutex> lock(m_LessPropsMutex);
 	if(m_LessDynamicProperties) {
 		m_LessDynamicProperties->Release();
 		m_LessDynamicProperties = nullptr;
@@ -248,6 +252,12 @@ void CCampathDrawer::EndDevice()
 
 	m_Device->Release();
 	m_Device = nullptr;
+
+	// Ensure LessDynamicProperties is dropped safely when device ends
+	{
+		std::lock_guard<std::mutex> lock(m_LessPropsMutex);
+		if (m_LessDynamicProperties) { m_LessDynamicProperties->Release(); m_LessDynamicProperties = nullptr; }
+	}
 }
 
 void CCampathDrawer::Begin() {
@@ -439,12 +449,19 @@ void CCampathDrawer::OnPostRenderAllTools_EngineThread() {
 	if(!m_Draw)
 		return;
 	
-	if(nullptr == m_LessDynamicProperties) {
-		m_LessDynamicProperties = new CLessDynamicProperties(this); // CPU expensive.
-		m_LessDynamicProperties->AddRef();		
+	CLessDynamicProperties* lessPropsForFunctor = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(m_LessPropsMutex);
+		if(nullptr == m_LessDynamicProperties) {
+			m_LessDynamicProperties = new CLessDynamicProperties(this); // CPU expensive.
+			m_LessDynamicProperties->AddRef();
+		}
+		// Hand out one reference to the functor to own
+		lessPropsForFunctor = m_LessDynamicProperties;
+		lessPropsForFunctor->AddRef();
 	}
 
-	MaterialSystem_ExecuteOnRenderThread(new CCampathDrawerFunctor(this));
+	MaterialSystem_ExecuteOnRenderThread(new CCampathDrawerFunctor(this, lessPropsForFunctor));
 }
 
 void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dynamicPorperties, CLessDynamicProperties * lessDynamicProperties)
