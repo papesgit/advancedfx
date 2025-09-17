@@ -185,6 +185,8 @@ struct CampathCtx {
     CamPathValue value{};
 };
 
+//Cvar Unhide
+static bool g_cvarsUnhidden = false;
 // Window activation state
 static bool g_windowActive = true;
 // Used to drop the first noisy mouse event right after we re-activate
@@ -201,8 +203,6 @@ static ImGuizmo::OPERATION g_GizmoOp   = ImGuizmo::TRANSLATE;
 static ImGuizmo::MODE      g_GizmoMode = ImGuizmo::LOCAL;
 // Signal to sequencer to refresh its cached keyframe values after edits
 static bool g_SequencerNeedsRefresh = false;
-// Gizmo debug controls (file-scope so both UI and render path can access)
-//
 
 // Simple in-overlay console state
 static bool g_ShowOverlayConsole = false;
@@ -284,11 +284,19 @@ static float g_FarBlurry = 2000.0f;
 static float g_FarCrisp = 180.0f;
 static float g_NearBlurry = -100.0f;
 static float g_NearCrisp = 0.0f;
+
 static float g_FarBlurryDefault = 2000.0f;
 static float g_FarCrispDefault = 180.0f;
 static float g_NearBlurryDefault = -100.0f;
 static float g_NearCrispDefault = 0.0f;
 
+static float g_MaxBlur = 5.0f;
+static float g_DofRadiusScale = 0.25f;
+static float g_DofTilt = 0.5f;
+
+static float g_MaxBlurDefault = 5.0f;
+static float g_DofRadiusScaleDefault = 0.25f;
+static float g_DofTiltDefault = 0.5f;
 //Viewport stuff
 
 struct ViewportPlayerEntry {
@@ -1074,7 +1082,12 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
         //Misc
         if (ImGui::BeginTabItem("Misc")) {
-            ImGui::Checkbox("Show DOF Control", &g_ShowDofWindow);
+            if (ImGui::Checkbox("Show DOF Control", &g_ShowDofWindow)) {
+                if (!g_cvarsUnhidden){
+                    Afx_ExecClientCmd("mirv_cvar_unhide_all");
+                    g_cvarsUnhidden = true;
+                }
+            }
             static bool s_nearZtoggle = false;
             if (ImGui::Checkbox("Near-Z 1", &s_nearZtoggle)) {
                 if (s_nearZtoggle) Afx_ExecClientCmd("r_nearz 1"); else Afx_ExecClientCmd("r_nearz -1");
@@ -1084,7 +1097,13 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             }
             static bool s_noVisToggle = false;
             if (ImGui::Checkbox("No Vis", &s_noVisToggle)) {
-                if (s_noVisToggle) Afx_ExecClientCmd("sc_no_vis 1"); else Afx_ExecClientCmd("sc_no_vis 0");
+                if (s_noVisToggle) {
+                    if (!g_cvarsUnhidden) {
+                        Afx_ExecClientCmd("mirv_cvar_unhide_all");
+                        g_cvarsUnhidden = true;
+                    }
+                    Afx_ExecClientCmd("sc_no_vis 1"); 
+                } else Afx_ExecClientCmd("sc_no_vis 0");
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Sets sc_no_vis 1, removes culling when out of bounds.");
@@ -1236,7 +1255,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             float avail = ImGui::GetContentRegionAvail().x;
             const char* lbl = "Far Blurry";
             float lblW = ImGui::CalcTextSize(lbl).x;
-            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f;
             float width = avail - (lblW + rightGap);
             if (width < 100.0f) width = avail * 0.6f; // fallback
             ImGui::SetNextItemWidth(width);
@@ -1259,7 +1278,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             float avail = ImGui::GetContentRegionAvail().x;
             const char* lbl = "Far Crisp";
             float lblW = ImGui::CalcTextSize(lbl).x;
-            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f;
             float width = avail - (lblW + rightGap);
             if (width < 100.0f) width = avail * 0.6f; // fallback
             ImGui::SetNextItemWidth(width);
@@ -1282,14 +1301,14 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             float avail = ImGui::GetContentRegionAvail().x;
             const char* lbl = "Near Blurry";
             float lblW = ImGui::CalcTextSize(lbl).x;
-            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f;
             float width = avail - (lblW + rightGap);
             if (width < 100.0f) width = avail * 0.6f; // fallback
             ImGui::SetNextItemWidth(width);
         }
         {
             float tmp = g_NearBlurry;
-            bool changed = ImGui::SliderFloat("Near Blurry", &tmp, -100.0f, 1000.0f, "%.1f");
+            bool changed = ImGui::SliderFloat("Near Blurry", &tmp, -1000.0f, 1000.0f, "%.1f");
             bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
             if (reset) {
                 g_NearBlurry = g_NearBlurryDefault;
@@ -1305,7 +1324,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             float avail = ImGui::GetContentRegionAvail().x;
             const char* lbl = "Near Crisp";
             float lblW = ImGui::CalcTextSize(lbl).x;
-            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f;
             float width = avail - (lblW + rightGap);
             if (width < 100.0f) width = avail * 0.6f; // fallback
             ImGui::SetNextItemWidth(width);
@@ -1321,6 +1340,75 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             } else if (changed) {
                 g_NearCrisp = tmp;
                 Afx_ExecClientCmd(("r_dof_override_near_crisp " + std::to_string(g_NearCrisp)).c_str());
+            }
+        }
+        {
+            ImGuiStyle& st3 = ImGui::GetStyle();
+            float avail = ImGui::GetContentRegionAvail().x;
+            const char* lbl = "Max Blur Size";
+            float lblW = ImGui::CalcTextSize(lbl).x;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f;
+            float width = avail - (lblW + rightGap);
+            if (width < 100.0f) width = avail * 0.6f; // fallback
+            ImGui::SetNextItemWidth(width);
+        }
+        {
+            float tmp = g_MaxBlur;
+            bool changed = ImGui::SliderFloat("Max Blur Size", &tmp, 0.0f, 11.0f, "%.1f");
+            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            if (reset) {
+                g_MaxBlur = g_MaxBlurDefault;
+                ImGui::ClearActiveID();
+                Afx_ExecClientCmd(("r_dof2_maxblursize " + std::to_string(g_MaxBlur)).c_str());
+            } else if (changed) {
+                g_MaxBlur = tmp;
+                Afx_ExecClientCmd(("r_dof2_maxblursize " + std::to_string(g_MaxBlur)).c_str());
+            }
+        }
+        {
+            ImGuiStyle& st3 = ImGui::GetStyle();
+            float avail = ImGui::GetContentRegionAvail().x;
+            const char* lbl = "Radius Scale";
+            float lblW = ImGui::CalcTextSize(lbl).x;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f;
+            float width = avail - (lblW + rightGap);
+            if (width < 100.0f) width = avail * 0.6f; // fallback
+            ImGui::SetNextItemWidth(width);
+        }
+        {
+            float tmp = g_DofRadiusScale;
+            bool changed = ImGui::SliderFloat("Radius Scale", &tmp, 0.10f, 5.00f, "%.01f");
+            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            if (reset) {
+                g_DofRadiusScale = g_DofRadiusScaleDefault;
+                ImGui::ClearActiveID();
+                Afx_ExecClientCmd(("r_dof2_radiusscale " + std::to_string(g_DofRadiusScale)).c_str());
+            } else if (changed) {
+                g_DofRadiusScale = tmp;
+                Afx_ExecClientCmd(("r_dof2_radiusscale " + std::to_string(g_DofRadiusScale)).c_str());
+            }
+        }
+        {
+            ImGuiStyle& st3 = ImGui::GetStyle();
+            float avail = ImGui::GetContentRegionAvail().x;
+            const char* lbl = "Tilt";
+            float lblW = ImGui::CalcTextSize(lbl).x;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f;
+            float width = avail - (lblW + rightGap);
+            if (width < 100.0f) width = avail * 0.6f; // fallback
+            ImGui::SetNextItemWidth(width);
+        }
+        {
+            float tmp = g_DofTilt;
+            bool changed = ImGui::SliderFloat("Tilt", &tmp, 0.0f, 10.0f, "%.1f");
+            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            if (reset) {
+                g_DofTilt = g_DofTiltDefault;
+                ImGui::ClearActiveID();
+                Afx_ExecClientCmd(("r_dof_override_tilt_to_ground " + std::to_string(g_DofTilt)).c_str());
+            } else if (changed) {
+                g_DofTilt = tmp;
+                Afx_ExecClientCmd(("r_dof_override_tilt_to_ground " + std::to_string(g_DofTilt)).c_str());
             }
         }
         // Auto-height: shrink/grow to fit current content while preserving user-set width
