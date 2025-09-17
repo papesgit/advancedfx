@@ -6,7 +6,10 @@
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
+struct ID3D11Texture2D;
+struct ID3D11ShaderResourceView;
 struct IDXGISwapChain;
+enum DXGI_FORMAT;
 struct ID3D11RenderTargetView;
 struct HWND__;
 typedef HWND__* HWND;
@@ -47,6 +50,18 @@ private:
     bool m_ImGuiNeedRecreate = false;
 
     void UpdateBackbufferSize();
+    void UpdateBackbufferPreviewTexture();
+    void ReleaseBackbufferPreview();
+
+    struct BackbufferPreview {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        DXGI_FORMAT format = (DXGI_FORMAT)0;
+        bool isMsaa = false;
+        ID3D11Texture2D* texture = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+    } m_BackbufferPreview;
 };
 
 }} // namespace
+

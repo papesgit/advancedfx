@@ -195,6 +195,14 @@ static bool g_SequencerNeedsRefresh = false;
 static bool g_ShowOverlayConsole = false;
 static bool g_ShowCameraControl = false;
 static bool g_ShowGizmo = false;
+static bool g_ShowBackbufferWindow = false;
+static float g_PreviewLookScale = 0.01f; // baseline so 1.00x feels like mirv camera
+static float g_PreviewLookMultiplier = 1.0f; // user-tunable multiplier (via Settings)
+// Gizmo-on-preview helpers (updated each frame when preview window renders)
+static bool   g_PreviewRectValid = false;
+static ImVec2 g_PreviewRectMin  = ImVec2(0,0);
+static ImVec2 g_PreviewRectSize = ImVec2(0,0);
+static ImDrawList* g_PreviewDrawList = nullptr;
 static std::vector<std::string> g_OverlayConsoleLog;
 static char g_OverlayConsoleInput[512] = {0};
 static bool g_OverlayConsoleScrollToBottom = false;
@@ -229,6 +237,10 @@ static int g_FontChoice = 0;
 
 // Guard to run font loading once.
 static bool g_FontsLoaded = false;
+
+// Grey matte between game and overlay windows (shown while Viewport is open)
+static bool  g_DimGameWhileViewport = false; // UI toggle
+static float g_DimOpacity           = 1.00f; // 0..1, 100% by default
 
 // Standalone curve editor cache (times and values only; relative time from campath)
 struct CurveCache {
@@ -543,6 +555,7 @@ void OverlayDx11::Shutdown() {
 #ifdef _WIN32
     if (!m_Initialized) return;
     m_Rtv.width = m_Rtv.height = 0;
+    ReleaseBackbufferPreview();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     // Do not destroy ImGui context here, shared across overlays.
@@ -557,6 +570,20 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     ImGui_ImplWin32_NewFrame();
     ImGui_ImplDX11_NewFrame();
     ImGui::NewFrame();
+    {
+        if (g_DimGameWhileViewport && g_ShowBackbufferWindow) {
+            ImVec2 ds = ImGui::GetIO().DisplaySize;
+            const int a = (int)(g_DimOpacity * 255.0f + 0.5f);
+            // Slightly grey, not pure black, so the UI still feels readable.
+            ImGui::GetBackgroundDrawList()->AddRectFilled(
+                ImVec2(0.0f, 0.0f), ds, IM_COL32(32, 32, 32, a)
+            );
+        }
+    }
+    UpdateBackbufferPreviewTexture();
+    // Reset preview-rect tracking for this frame; will be set when preview window renders
+    g_PreviewRectValid = false;
+
 
     // Diagnostic watermark always (when overlay visible)
     ImGui::GetForegroundDrawList()->AddText(ImVec2(8,8), IM_COL32(255,255,255,255), "HLAE Overlay - Press F8 to toggle", nullptr);
@@ -976,14 +1003,183 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     ImGui::TextDisabled("(font not found, using Default)");
                 }
             }
+
+            ImGui::NewLine();
+            if (ImGui::Checkbox("Show Viewport", &g_ShowBackbufferWindow)) {
+                // Toggle handled via g_ShowBackbufferWindow.
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Displays a copy of the game's backbuffer inside the overlay.");
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ImGui::CalcTextSize("00.00x").x + ImGui::GetStyle().FramePadding.x * 6.0f);
+            if (ImGui::SliderFloat("Look sens", &g_PreviewLookMultiplier, 0.1f, 5.0f, "%.2fx")) {
+                // no-op, used at runtime to scale the baseline look sensitivity
+            }
+            ImGui::SameLine();
+            static bool s_noFlash = false;
+            if (ImGui::Checkbox("No Flash", &s_noFlash)) {
+                if (s_noFlash) Afx_ExecClientCmd("mirv_noflash 1"); else Afx_ExecClientCmd("mirv_noflash 0");
+            }
+            // Grey-matte toggle + strength
+            if (ImGui::Checkbox("Dim Game", &g_DimGameWhileViewport)) {
+                // nothing else to do
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ImGui::CalcTextSize("100%").x + ImGui::GetStyle().FramePadding.x * 6.0f);
+            float pct = g_DimOpacity * 100.0f;
+            if (ImGui::SliderFloat("Dim strength", &pct, 0.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
+                g_DimOpacity = pct / 100.0f;
+            }
+
             ImGui::EndTabItem();
         }
 
         ImGui::EndTabBar();
     }
 
-
     ImGui::End();
+
+    if (g_ShowBackbufferWindow) {
+        ImGui::SetNextWindowSize(ImVec2(480.0f, 320.0f), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Viewport", &g_ShowBackbufferWindow, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar)) {
+            if (!m_BackbufferPreview.srv || m_BackbufferPreview.width == 0 || m_BackbufferPreview.height == 0) {
+                ImGui::TextDisabled("Waiting for swapchain backbuffer...");
+            } else {
+                const bool msaa = m_BackbufferPreview.isMsaa;
+
+                // Fit the backbuffer image into the available content region while preserving aspect ratio
+                ImVec2 avail = ImGui::GetContentRegionAvail();
+                if (avail.x < 1.0f) avail.x = 1.0f;
+                if (avail.y < 1.0f) avail.y = 1.0f;
+                const float srcW = (float)m_BackbufferPreview.width;
+                const float srcH = (float)m_BackbufferPreview.height;
+                const float sx = avail.x / srcW;
+                const float sy = avail.y / srcH;
+                const float fit = sx < sy ? sx : sy;
+                ImVec2 previewSize(srcW * fit, srcH * fit);
+                ImGui::Image((ImTextureID)m_BackbufferPreview.srv, previewSize);
+                {
+                    ImVec2 imgMin = ImGui::GetItemRectMin();
+                    ImVec2 imgMax = ImGui::GetItemRectMax();
+                    g_PreviewRectValid = true;
+                    g_PreviewRectMin = imgMin;
+                    g_PreviewRectSize = ImVec2(imgMax.x - imgMin.x, imgMax.y - imgMin.y);
+                    g_PreviewDrawList = ImGui::GetWindowDrawList();
+                }
+
+                const ImGuiHoveredFlags hoverFlags = ImGuiHoveredFlags_AllowWhenBlockedByActiveItem | ImGuiHoveredFlags_AllowWhenOverlapped;
+                bool hoveredImage = ImGui::IsItemHovered(hoverFlags);
+
+                // RMB-native control over Mirv camera inside preview image
+                static bool s_bbCtrlActive = false;
+                static bool s_bbSkipFirstDelta = false;
+                static POINT s_bbCtrlSavedCursor = {0,0};
+
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                    if (s_bbCtrlActive) {
+                        // End control: restore cursor position and visibility
+                        ShowCursor(TRUE);
+                        SetCursorPos(s_bbCtrlSavedCursor.x, s_bbCtrlSavedCursor.y);
+                        s_bbCtrlActive = false;
+                        //
+                    }
+                } else if (hoveredImage && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                    // Begin control: save cursor, hide it
+                    GetCursorPos(&s_bbCtrlSavedCursor);
+                    ShowCursor(FALSE);
+                    {
+                        ImVec2 itemMin = ImGui::GetItemRectMin();
+                        ImVec2 itemMax = ImGui::GetItemRectMax();
+                        ImVec2 itemCenter = ImVec2((itemMin.x + itemMax.x) * 0.5f, (itemMin.y + itemMax.y) * 0.5f);
+                        POINT ptCenterClient = { (LONG)itemCenter.x, (LONG)itemCenter.y };
+                        POINT ptCenterScreen = ptCenterClient;
+                        ClientToScreen(m_Hwnd, &ptCenterScreen);
+                        SetCursorPos(ptCenterScreen.x, ptCenterScreen.y);
+                    }
+                    s_bbCtrlActive = true;
+                    s_bbSkipFirstDelta = true;
+                }
+
+                if (s_bbCtrlActive) {
+                    // Compute center of the preview in client + screen coords
+                    ImVec2 itemMin = ImGui::GetItemRectMin();
+                    ImVec2 itemMax = ImGui::GetItemRectMax();
+                    ImVec2 itemCenter = ImVec2((itemMin.x + itemMax.x) * 0.5f, (itemMin.y + itemMax.y) * 0.5f);
+
+                    POINT ptCenterClient = { (LONG)itemCenter.x, (LONG)itemCenter.y };
+                    POINT ptCenterScreen = ptCenterClient;
+                    ClientToScreen(m_Hwnd, &ptCenterScreen);
+
+                    // Read current cursor and compute delta relative to center in client space
+                    POINT ptScreen; GetCursorPos(&ptScreen);
+                    POINT ptClient = ptScreen; ScreenToClient(m_Hwnd, &ptClient);
+                    float dx = (float)(ptClient.x - ptCenterClient.x);
+                    float dy = (float)(ptClient.y - ptCenterClient.y);
+                    // Lock cursor to preview center
+                    if (s_bbSkipFirstDelta) { dx = 0.0f; dy = 0.0f; s_bbSkipFirstDelta = false; }
+                    SetCursorPos(ptCenterScreen.x, ptCenterScreen.y);
+                    if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                        pMirv->SetCameraControlMode(true);
+                        const double sens = pMirv->GetMouseSensitivty();
+                        const double yawS = pMirv->MouseYawSpeed_get();
+                        const double pitchS = pMirv->MousePitchSpeed_get();
+                        const double lookScale = (double)(g_PreviewLookScale * g_PreviewLookMultiplier);
+
+                        // Base: yaw/pitch from mouse
+                        const double dYaw = sens * yawS * (double)(-dx) * lookScale;
+                        const double dPitch = sens * pitchS * (double)(dy) * lookScale;
+
+                        // Modifiers: R=roll, F=fov
+                        const bool rHeld = (GetKeyState('R') & 0x8000) != 0;
+                        const bool fHeld = (GetKeyState('F') & 0x8000) != 0;
+
+                        double cx,cy,cz, rx,ry,rz; float fov; Afx_GetLastCameraData(cx,cy,cz, rx,ry,rz, fov);
+
+                        double curYaw = ry;
+                        double curPitch = rx;
+                        if (!rHeld && !fHeld) {
+                            curYaw += dYaw;
+                            curPitch += dPitch;
+                            pMirv->SetRy((float)curYaw);
+                            pMirv->SetRx((float)curPitch);
+                        } else if (rHeld) {
+                            pMirv->SetRz((float)(rz + sens * yawS * (double)(dx) * lookScale));
+                        } else if (fHeld) {
+                            pMirv->SetFov((float)(fov + sens * yawS * (double)(-dx) * lookScale));
+                        }
+
+                        // WASD movement (camera space), scaled by keyboard sensitivity and speeds
+                        const float dt = ImGui::GetIO().DeltaTime;
+                        double moveF = 0.0, moveR = 0.0;
+                        if ((GetKeyState('W') & 0x8000) != 0) moveF += pMirv->KeyboardForwardSpeed_get();
+                        if ((GetKeyState('S') & 0x8000) != 0) moveF -= pMirv->KeyboardBackwardSpeed_get();
+                        if ((GetKeyState('D') & 0x8000) != 0) moveR += pMirv->KeyboardRightSpeed_get();
+                        if ((GetKeyState('A') & 0x8000) != 0) moveR -= pMirv->KeyboardLeftSpeed_get();
+
+                        if (moveF != 0.0 || moveR != 0.0) {
+                            const double ksens = pMirv->GetKeyboardSensitivty();
+                            const double speedF = ksens * moveF * (double)dt;
+                            const double speedR = ksens * moveR * (double)dt;
+                            // Use HLAE's vector builder (Z-up, Source-like) from angles (roll=0, pitch, yaw)
+                            double fwdQ[3], rightQ[3], upQ[3];
+                            Afx::Math::MakeVectors(/*roll*/0.0, /*pitch*/curPitch, /*yaw*/curYaw, fwdQ, rightQ, upQ);
+
+                            const double nx = cx + fwdQ[0] * speedF + rightQ[0] * speedR;
+                            const double ny = cy + fwdQ[1] * speedF + rightQ[1] * speedR;
+                            const double nz = cz + fwdQ[2] * speedF + rightQ[2] * speedR;
+                            pMirv->SetTx((float)nx);
+                            pMirv->SetTy((float)ny);
+                            pMirv->SetTz((float)nz);
+                        }
+                    }
+
+
+                }
+            }
+        }
+        ImGui::End();
+    }
 
     // Sequencer window (ImGui Neo Sequencer)
     if (g_ShowSequencer) {
@@ -2159,6 +2355,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
             g_GizmoOp = ImGuizmo::ROTATE;
         }
+        if (ImGui::IsKeyPressed(ImGuiKey_Space, false) && !Overlay::Get().IsRmbPassthroughActive()) {
+            Afx_ExecClientCmd("demo_togglepause");
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_C, false)) {
             if (MirvInput* pMirv = Afx_GetMirvInput()) {
                 bool camEnabled = pMirv->GetCameraControlMode();
@@ -2184,20 +2383,20 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     using advancedfx::overlay::g_LastCampathCtx;
     if (g_LastCampathCtx.active)
     {
-        // Where to draw (full screen / swapchain area)
+        // Where to draw: if preview window is active, draw into it; otherwise use full overlay
         ImVec2 ds = ImGui::GetIO().DisplaySize;
         // While right mouse button passthrough is active, make gizmo intangible
         // so it doesn't steal focus or reveal the cursor while the camera is controlled.
         ImGuizmo::Enable(!Overlay::Get().IsRmbPassthroughActive());
         ImGuizmo::SetOrthographic(false);
-        ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList()); // draw on top
-        // Use main viewport rect for ImGuizmo normalization (accounts for viewport offset/DPI)
-        ImGuizmo::SetRect(0.0f, 0.0f, ds.x, ds.y);
-
-        // Build view & projection from current camera
-        double cx, cy, cz, rX, rY, rZ; float cfovDeg;
-        Afx_GetLastCameraData(cx, cy, cz, rX, rY, rZ, cfovDeg);
-
+        if (g_ShowBackbufferWindow && g_PreviewRectValid && g_PreviewDrawList) {
+            ImGuizmo::SetDrawlist(g_PreviewDrawList);
+            ImGuizmo::SetRect(g_PreviewRectMin.x, g_PreviewRectMin.y, g_PreviewRectSize.x, g_PreviewRectSize.y);
+        } else {
+            ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList()); // draw on top
+            // Use main viewport rect for ImGuizmo normalization (accounts for viewport offset/DPI)
+            ImGuizmo::SetRect(0.0f, 0.0f, ds.x, ds.y);
+        }
         auto DegToRad = [](double d){ return (float)(d * 3.14159265358979323846 / 180.0); };
 
         // Helper to convert Source (X=fwd,Y=left,Z=up) vectors into DirectX style (X=right,Y=up,Z=fwd)
@@ -2268,6 +2467,10 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         // - Projection is OpenGL-style right-handed with z in [-1,1] (m[2][3] = -1), using a vertical FOV.
         //   Since the engine FOV is horizontal (scaled from a 4:3 default), we convert hfov->vfov
         //   based on the current swapchain aspect so gizmo projection matches the game.
+
+        // Fetch current camera (position, angles, fov) from engine state
+        double cx, cy, cz, rX, rY, rZ; float cfovDeg;
+        Afx_GetLastCameraData(cx, cy, cz, rX, rY, rZ, cfovDeg);
 
         float view[16], proj[16];
         // Build a view from camera rigid transform (same mapping as model)
@@ -2487,6 +2690,9 @@ void OverlayDx11::Render() {
     if (m_ImGuiNeedRecreate) {
         ImGui_ImplDX11_CreateDeviceObjects();
         m_ImGuiNeedRecreate = false;
+
+    // Refresh viewport preview from swapchain just before drawing overlay
+    if (g_ShowBackbufferWindow) { UpdateBackbufferPreviewTexture(); }
     }
 
     // Backup current state we might disturb (render targets + viewport)
@@ -2540,6 +2746,7 @@ void OverlayDx11::OnDeviceLost() {
 #ifdef _WIN32
     if (!m_Initialized) return;
     m_Rtv.width = m_Rtv.height = 0;
+    ReleaseBackbufferPreview();
     ImGui_ImplDX11_InvalidateDeviceObjects();
     m_ImGuiNeedRecreate = true;
 #endif
@@ -2549,9 +2756,108 @@ void OverlayDx11::OnResize(uint32_t, uint32_t) {
 #ifdef _WIN32
     if (!m_Initialized) return;
     m_Rtv.width = m_Rtv.height = 0;
+    ReleaseBackbufferPreview();
     ImGui_ImplDX11_InvalidateDeviceObjects();
     // Defer device object and RTV recreation to the next Render() after resize has completed
     m_ImGuiNeedRecreate = true;
+#endif
+}
+void OverlayDx11::UpdateBackbufferPreviewTexture() {
+#ifdef _WIN32
+    if (!m_Initialized) return;
+    if (!m_Device || !m_Context || !m_Swapchain) {
+        ReleaseBackbufferPreview();
+        return;
+    }
+
+    if (!g_ShowBackbufferWindow) {
+        if (m_BackbufferPreview.texture || m_BackbufferPreview.srv) {
+            ReleaseBackbufferPreview();
+        }
+        return;
+    }
+
+    ID3D11Texture2D* backbuffer = nullptr;
+    HRESULT hr = m_Swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backbuffer);
+    if (FAILED(hr) || !backbuffer) {
+        ReleaseBackbufferPreview();
+        return;
+    }
+
+    D3D11_TEXTURE2D_DESC srcDesc = {};
+    backbuffer->GetDesc(&srcDesc);
+    bool srcMsaa = srcDesc.SampleDesc.Count > 1;
+
+    bool needsRecreate = !m_BackbufferPreview.texture
+        || m_BackbufferPreview.width != srcDesc.Width
+        || m_BackbufferPreview.height != srcDesc.Height
+        || m_BackbufferPreview.format != srcDesc.Format
+        || m_BackbufferPreview.isMsaa != srcMsaa;
+
+    if (needsRecreate) {
+        ReleaseBackbufferPreview();
+
+        D3D11_TEXTURE2D_DESC copyDesc = srcDesc;
+        copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        copyDesc.CPUAccessFlags = 0;
+        copyDesc.MipLevels = 1;
+        copyDesc.MiscFlags = 0;
+        copyDesc.SampleDesc.Count = 1;
+        copyDesc.SampleDesc.Quality = 0;
+        copyDesc.Usage = D3D11_USAGE_DEFAULT;
+        copyDesc.ArraySize = 1;
+
+        hr = m_Device->CreateTexture2D(&copyDesc, nullptr, &m_BackbufferPreview.texture);
+        if (FAILED(hr) || !m_BackbufferPreview.texture) {
+            backbuffer->Release();
+            ReleaseBackbufferPreview();
+            return;
+        }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Format = copyDesc.Format;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MostDetailedMip = 0;
+        srvDesc.Texture2D.MipLevels = 1;
+        hr = m_Device->CreateShaderResourceView(m_BackbufferPreview.texture, &srvDesc, &m_BackbufferPreview.srv);
+        if (FAILED(hr) || !m_BackbufferPreview.srv) {
+            backbuffer->Release();
+            ReleaseBackbufferPreview();
+            return;
+        }
+
+        m_BackbufferPreview.width = copyDesc.Width;
+        m_BackbufferPreview.height = copyDesc.Height;
+        m_BackbufferPreview.format = srcDesc.Format;
+        m_BackbufferPreview.isMsaa = srcMsaa;
+    }
+
+    if (m_BackbufferPreview.texture) {
+        if (srcMsaa) {
+            m_Context->ResolveSubresource(m_BackbufferPreview.texture, 0, backbuffer, 0, srcDesc.Format);
+        } else {
+            m_Context->CopyResource(m_BackbufferPreview.texture, backbuffer);
+        }
+    }
+
+    backbuffer->Release();
+#endif
+}
+
+void OverlayDx11::ReleaseBackbufferPreview() {
+#ifdef _WIN32
+    if (m_BackbufferPreview.srv) {
+        m_BackbufferPreview.srv->Release();
+        m_BackbufferPreview.srv = nullptr;
+    }
+    if (m_BackbufferPreview.texture) {
+        m_BackbufferPreview.texture->Release();
+        m_BackbufferPreview.texture = nullptr;
+    }
+    m_BackbufferPreview.width = 0;
+    m_BackbufferPreview.height = 0;
+    m_BackbufferPreview.format = DXGI_FORMAT_UNKNOWN;
+    m_BackbufferPreview.isMsaa = false;
 #endif
 }
 
@@ -2574,3 +2880,10 @@ void OverlayDx11::UpdateBackbufferSize() {
 
 }} // namespace
 #endif
+
+
+
+
+
+
+

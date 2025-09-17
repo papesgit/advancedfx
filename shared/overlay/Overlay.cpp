@@ -38,7 +38,16 @@ void Overlay::SetVisible(bool v) {
     if (m_Visible == v) return;
     m_Visible = v;
     advancedfx::Message("Overlay: visible=%s\n", m_Visible ? "true" : "false");
+    if (!m_Visible) {
+        m_RmbPassthrough = false;
+        m_RmbPassthroughRequest = false;
+    }
 }
+
+void Overlay::RequestRmbPassthroughThisFrame() {
+    m_RmbPassthroughRequest = true;
+}
+
 
 void Overlay::UpdateDeltaTime() {
     using clock = std::chrono::steady_clock;
@@ -65,6 +74,7 @@ void Overlay::SetRenderer(std::unique_ptr<IOverlayRenderer> renderer) {
 }
 
 void Overlay::BeginFrame() {
+    m_RmbPassthroughRequest = false;
     if (!m_Visible || !m_Renderer) return;
     UpdateDeltaTime();
 

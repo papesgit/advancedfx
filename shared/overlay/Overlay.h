@@ -42,6 +42,8 @@ public:
     void SetRmbPassthroughActive(bool v) { m_RmbPassthrough = v; }
     bool IsRmbPassthroughActive() const { return m_RmbPassthrough; }
 
+    void RequestRmbPassthroughThisFrame();
+    bool IsRmbPassthroughRequested() const { return m_RmbPassthroughRequest; }
     // Query ImGui IO capture flags (valid during frames when renderer is active)
     bool WantCaptureMouse() const;
     bool WantCaptureKeyboard() const;
@@ -54,6 +56,7 @@ private:
     float m_DeltaTime = 0.0f;
     double m_LastTime = 0.0;
     bool m_RmbPassthrough = false;
+    bool m_RmbPassthroughRequest = false;
 
     std::unique_ptr<IOverlayRenderer> m_Renderer;
     std::unique_ptr<InputRouter> m_InputRouter;

@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 
 #include "RenderSystemDX11Hooks.h"
 #include "../shared/overlay/Overlay.h"
