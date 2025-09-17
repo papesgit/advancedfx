@@ -27,6 +27,7 @@
 #include "../../AfxHookSource2/CampathDrawer.h"
 #include "../MirvInput.h"
 #include "../../AfxHookSource2/RenderSystemDX11Hooks.h"
+#include "../../AfxHookSource2/ClientEntitySystem.h"
 // For default game folder (…/game/) resolution
 #include "../../AfxHookSource2/hlaeFolder.h"
 
@@ -44,6 +45,8 @@
 #include <string>
 #include <algorithm>
 #include <filesystem>
+#include <chrono>
+#include <unordered_set>
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -182,6 +185,16 @@ struct CampathCtx {
     CamPathValue value{};
 };
 
+// Window activation state
+static bool g_windowActive = true;
+// Used to drop the first noisy mouse event right after we re-activate
+static bool g_dropFirstMouseAfterActivate = false;
+
+static std::mutex g_imguiInputMutex;
+
+static bool  g_hasPendingWarp = false;
+static POINT g_pendingWarpPt  = {0, 0};
+
 // Global (file-scope) context for “last selected/edited campath key”
 static CampathCtx g_LastCampathCtx;
 static ImGuizmo::OPERATION g_GizmoOp   = ImGuizmo::TRANSLATE;
@@ -261,6 +274,99 @@ static void CurveCache_Rebuild()
         g_CurveCache.values.push_back(it.GetValue());
     }
 }
+
+//Misc
+
+//DOF
+static bool g_ShowDofWindow = false;
+
+static float g_FarBlurry = 2000.0f;
+static float g_FarCrisp = 180.0f;
+static float g_NearBlurry = -100.0f;
+static float g_NearCrisp = 0.0f;
+static float g_FarBlurryDefault = 2000.0f;
+static float g_FarCrispDefault = 180.0f;
+static float g_NearBlurryDefault = -100.0f;
+static float g_NearCrispDefault = 0.0f;
+
+//Viewport stuff
+
+struct ViewportPlayerEntry {
+    std::string displayName;
+    std::string command;
+    uint64_t steamId = 0;
+};
+
+static std::vector<ViewportPlayerEntry> g_ViewportPlayerCache;
+static std::chrono::steady_clock::time_point g_ViewportPlayerCacheNextRefresh{};
+static bool g_ViewportPlayersMenuOpen = false;
+
+static void UpdateViewportPlayerCache()
+{
+    using clock = std::chrono::steady_clock;
+    const clock::time_point now = clock::now();
+    if (now < g_ViewportPlayerCacheNextRefresh) {
+        return;
+    }
+
+    g_ViewportPlayerCacheNextRefresh = now + std::chrono::milliseconds(500);
+    g_ViewportPlayerCache.clear();
+
+    if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) {
+        g_ViewportPlayersMenuOpen = false;
+        return;
+    }
+
+    const int highestIndex = GetHighestEntityIndex();
+    if (highestIndex < 0) {
+        g_ViewportPlayersMenuOpen = false;
+        return;
+    }
+
+    std::unordered_set<uint64_t> seenSteamIds;
+    seenSteamIds.reserve(static_cast<size_t>(highestIndex) + 1);
+
+    for (int index = 0; index <= highestIndex; ++index) {
+        if (auto* instance = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, index))) {
+            if (!instance->IsPlayerController()) {
+                continue;
+            }
+
+            const uint64_t steamId = instance->GetSteamId();
+            if (!seenSteamIds.insert(steamId).second) {
+                continue;
+            }
+
+            const char* name = instance->GetSanitizedPlayerName();
+            if (!name || !*name) {
+                name = instance->GetPlayerName();
+            }
+            if (!name || !*name) {
+                name = instance->GetDebugName();
+            }
+
+            ViewportPlayerEntry entry;
+            entry.displayName = (name && *name) ? name : "Unknown";
+            //entry.command = std::string("spec_lock_to_accountid ") + std::to_string(steamId);
+            entry.command = std::string("spec_player ") + std::string(name);
+            entry.steamId = steamId;
+            g_ViewportPlayerCache.emplace_back(std::move(entry));
+        }
+    }
+
+    std::sort(g_ViewportPlayerCache.begin(), g_ViewportPlayerCache.end(),
+        [](const ViewportPlayerEntry& a, const ViewportPlayerEntry& b) {
+            if (a.displayName == b.displayName) {
+                return a.steamId < b.steamId;
+            }
+            return a.displayName < b.displayName;
+        });
+
+    if (g_ViewportPlayerCache.empty()) {
+        g_ViewportPlayersMenuOpen = false;
+    }
+}
+
 // Sequencer preview behavior: when true, keep the preview pose after releasing slider;
 // when false, restore prior pose if Mirv Camera was enabled before preview.
 static bool g_PreviewFollow = false;
@@ -295,6 +401,19 @@ static ImGui::FileBrowser g_DemoOpenDialog(
     ImGuiFileBrowserFlags_CreateNewDir
 );
 static bool g_DemoDialogInit = false;
+
+static bool CallImGuiWndProcGuarded(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    static thread_local bool s_in_imgui = false; // re-entrancy on the same thread
+    if (s_in_imgui) return false;
+
+    std::lock_guard<std::mutex> lock(g_imguiInputMutex);    // <-- serialize with NewFrame
+    s_in_imgui = true;
+    bool handled = ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam) ? true : false;
+    s_in_imgui = false;
+    return handled;
+}
+
 
 // ImGui ini handler for persisting overlay paths
 static void* OverlayPaths_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
@@ -335,6 +454,7 @@ bool OverlayDx11::Initialize() {
 
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
+    io.ConfigInputTrickleEventQueue = false;
     // Load our fonts once (before backend init so device objects match the atlas)
     if (!g_FontsLoaded)
     {
@@ -401,8 +521,35 @@ bool OverlayDx11::Initialize() {
         auto router = std::make_unique<InputRouter>();
         if (router->Attach(m_Hwnd)) {
             router->SetMessageCallback([](void* hwnd, unsigned int msg, uint64_t wparam, int64_t lparam) -> bool {
+                // Handle activation up-front (don’t involve ImGui yet)
+                if (msg == WM_ACTIVATEAPP) {
+                    g_windowActive = (wparam != 0);
+                    if (g_windowActive) g_dropFirstMouseAfterActivate = true;
+                    // Let the game also see this; don't consume here
+                    // (no return; we keep processing as usual)
+                }
+                // Filter mouse input during deactivation or immediately after re-activation
+                if (!g_windowActive) {
+                    // While app is deactivated, don't feed ImGui with mouse; let the game handle it.
+                    switch (msg) {
+                        case WM_MOUSEMOVE:
+                        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+                        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+                        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+                        case WM_MOUSEWHEEL:
+                        case WM_MOUSEHWHEEL:
+                            return false; // not consumed by overlay; pass through
+                        default: break;
+                    }
+                }
+
+                // Right after we re-activate, drop the first move to avoid a burst into ImGui
+                if (g_dropFirstMouseAfterActivate && msg == WM_MOUSEMOVE) {
+                    g_dropFirstMouseAfterActivate = false;
+                    return false; // pass through, don't feed ImGui this one
+                }
                 // Feed ImGui first so it updates IO states
-                bool consumed = ImGui_ImplWin32_WndProcHandler((HWND)hwnd, msg, (WPARAM)wparam, (LPARAM)lparam) ? true : false;
+                bool consumed = CallImGuiWndProcGuarded((HWND)hwnd, (UINT)msg, (WPARAM)wparam, (LPARAM)lparam);
 
                 // Never consume critical window management messages; always pass to the game.
                 switch (msg) {
@@ -566,9 +713,16 @@ void OverlayDx11::Shutdown() {
 void OverlayDx11::BeginFrame(float dtSeconds) {
 #ifdef _WIN32
     if (!m_Initialized) return;
-    ImGui::GetIO().DeltaTime = dtSeconds > 0.0f ? dtSeconds : ImGui::GetIO().DeltaTime;
-    ImGui_ImplWin32_NewFrame();
+
+    // Serialize with WndProc touching ImGui’s input/event queue
+    std::lock_guard<std::mutex> lock(g_imguiInputMutex);
+
+    ImGuiIO& io = ImGui::GetIO();
+    if (dtSeconds > 0.0f) io.DeltaTime = dtSeconds;
+
+    // Keep backend order consistent with Dear ImGui examples
     ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     {
         if (g_DimGameWhileViewport && g_ShowBackbufferWindow) {
@@ -840,8 +994,6 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         else { advancedfx::Warning("Overlay: Invalid FPS value.\n"); }
                     }
                 }
-                bool screenEnabled = AfxStreams_GetRecordScreenEnabled();
-                if (ImGui::Checkbox("Record screen enabled", &screenEnabled)) { AfxStreams_SetRecordScreenEnabled(screenEnabled); }
                 ImGui::SameLine();
                 {
                     static bool s_toggleXray = true;
@@ -854,6 +1006,13 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             Afx_ExecClientCmd("spec_show_xray 0");
                         }
                     }
+                }
+                bool screenEnabled = AfxStreams_GetRecordScreenEnabled();
+                if (ImGui::Checkbox("Record screen enabled", &screenEnabled)) { AfxStreams_SetRecordScreenEnabled(screenEnabled); }
+                ImGui::SameLine();
+                static bool s_exportCam = false;
+                if (ImGui::Checkbox("Export Cam", &s_exportCam)) {
+                    if (s_exportCam) Afx_ExecClientCmd("mirv_streams record cam enabled 1"); else Afx_ExecClientCmd("mirv_streams record cam enabled 0");
                 }
             }
 
@@ -913,7 +1072,25 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
             ImGui::EndTabItem();
         }
-
+        //Misc
+        if (ImGui::BeginTabItem("Misc")) {
+            ImGui::Checkbox("Show DOF Control", &g_ShowDofWindow);
+            static bool s_nearZtoggle = false;
+            if (ImGui::Checkbox("Near-Z 1", &s_nearZtoggle)) {
+                if (s_nearZtoggle) Afx_ExecClientCmd("r_nearz 1"); else Afx_ExecClientCmd("r_nearz -1");
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Reduces Near Clipping to the lowest value.");
+            }
+            static bool s_noVisToggle = false;
+            if (ImGui::Checkbox("No Vis", &s_noVisToggle)) {
+                if (s_noVisToggle) Afx_ExecClientCmd("sc_no_vis 1"); else Afx_ExecClientCmd("sc_no_vis 0");
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Sets sc_no_vis 1, removes culling when out of bounds.");
+            }
+            ImGui::EndTabItem();
+        }
         // Settings
         if (ImGui::BeginTabItem("Settings")) {
             // FPS readout
@@ -1039,10 +1216,136 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     }
 
     ImGui::End();
+    if (g_ShowDofWindow) {
+        ImGui::Begin("DOF Control");
+        {
+            static bool s_toggleDof = false;
+            const char* dofLabel = s_toggleDof ? "Disable DOF" : "Enable DOF";
+            if (ImGui::Button(dofLabel)) {
+                s_toggleDof = !s_toggleDof;
+                if (s_toggleDof) {
+                    Afx_ExecClientCmd("r_dof_override 1");
+                } else {
+                    Afx_ExecClientCmd("r_dof_override 0");
+                }
+            }
+        }
+        // Far blur slider (reserve right space so label is always visible)
+        {
+            ImGuiStyle& st3 = ImGui::GetStyle();
+            float avail = ImGui::GetContentRegionAvail().x;
+            const char* lbl = "Far Blurry";
+            float lblW = ImGui::CalcTextSize(lbl).x;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+            float width = avail - (lblW + rightGap);
+            if (width < 100.0f) width = avail * 0.6f; // fallback
+            ImGui::SetNextItemWidth(width);
+        }
+        {
+            float tmp = g_FarBlurry;
+            bool changed = ImGui::SliderFloat("Far Blurry", &tmp, 1.0f, 10000.0f, "%.1f");
+            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            if (reset) {
+                g_FarBlurry = g_FarBlurryDefault;
+                ImGui::ClearActiveID();
+                Afx_ExecClientCmd(("r_dof_override_far_blurry " + std::to_string(g_FarBlurry)).c_str());
+            } else if (changed) {
+                g_FarBlurry = tmp;
+                Afx_ExecClientCmd(("r_dof_override_far_blurry " + std::to_string(g_FarBlurry)).c_str());
+            }
+        }
+        {
+            ImGuiStyle& st3 = ImGui::GetStyle();
+            float avail = ImGui::GetContentRegionAvail().x;
+            const char* lbl = "Far Crisp";
+            float lblW = ImGui::CalcTextSize(lbl).x;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+            float width = avail - (lblW + rightGap);
+            if (width < 100.0f) width = avail * 0.6f; // fallback
+            ImGui::SetNextItemWidth(width);
+        }
+        {
+            float tmp = g_FarCrisp;
+            bool changed = ImGui::SliderFloat("Far Crisp", &tmp, 1.0f, 10000.0f, "%.1f");
+            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            if (reset) {
+                g_FarCrisp = g_FarCrispDefault;
+                ImGui::ClearActiveID();
+                Afx_ExecClientCmd(("r_dof_override_far_crisp " + std::to_string(g_FarCrisp)).c_str());
+            } else if (changed) {
+                g_FarCrisp = tmp;
+                Afx_ExecClientCmd(("r_dof_override_far_crisp " + std::to_string(g_FarCrisp)).c_str());
+            }
+        }
+        {
+            ImGuiStyle& st3 = ImGui::GetStyle();
+            float avail = ImGui::GetContentRegionAvail().x;
+            const char* lbl = "Near Blurry";
+            float lblW = ImGui::CalcTextSize(lbl).x;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+            float width = avail - (lblW + rightGap);
+            if (width < 100.0f) width = avail * 0.6f; // fallback
+            ImGui::SetNextItemWidth(width);
+        }
+        {
+            float tmp = g_NearBlurry;
+            bool changed = ImGui::SliderFloat("Near Blurry", &tmp, -100.0f, 1000.0f, "%.1f");
+            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            if (reset) {
+                g_NearBlurry = g_NearBlurryDefault;
+                ImGui::ClearActiveID();
+                Afx_ExecClientCmd(("r_dof_override_near_blurry " + std::to_string(g_NearBlurry)).c_str());
+            } else if (changed) {
+                g_NearBlurry = tmp;
+                Afx_ExecClientCmd(("r_dof_override_near_blurry " + std::to_string(g_NearBlurry)).c_str());
+            }
+        }
+        {
+            ImGuiStyle& st3 = ImGui::GetStyle();
+            float avail = ImGui::GetContentRegionAvail().x;
+            const char* lbl = "Near Crisp";
+            float lblW = ImGui::CalcTextSize(lbl).x;
+            float rightGap = st3.ItemInnerSpacing.x * 3.0f + st3.FramePadding.x * 2.0f + 20.0f;
+            float width = avail - (lblW + rightGap);
+            if (width < 100.0f) width = avail * 0.6f; // fallback
+            ImGui::SetNextItemWidth(width);
+        }
+        {
+            float tmp = g_NearCrisp;
+            bool changed = ImGui::SliderFloat("Near Crisp", &tmp, 0.0f, 1000.0f, "%.1f");
+            bool reset = ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0);
+            if (reset) {
+                g_NearCrisp = g_NearCrispDefault;
+                ImGui::ClearActiveID();
+                Afx_ExecClientCmd(("r_dof_override_near_crisp " + std::to_string(g_NearCrisp)).c_str());
+            } else if (changed) {
+                g_NearCrisp = tmp;
+                Afx_ExecClientCmd(("r_dof_override_near_crisp " + std::to_string(g_NearCrisp)).c_str());
+            }
+        }
+        // Auto-height: shrink/grow to fit current content while preserving user-set width
+        {
+            ImVec2 cur = ImGui::GetWindowSize();
+            float remain = ImGui::GetContentRegionAvail().y;
+            float desired = cur.y - remain;
+            float min_h = ImGui::GetFrameHeightWithSpacing() * 4.0f; // camera panel needs a bit more
+            if (desired < min_h) desired = min_h;
+            ImGui::SetWindowSize(ImVec2(cur.x, desired));
+        }
+        ImGui::End();
+
+    }
 
     if (g_ShowBackbufferWindow) {
         ImGui::SetNextWindowSize(ImVec2(480.0f, 320.0f), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("Viewport", &g_ShowBackbufferWindow, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar)) {
+        const bool viewportVisible = ImGui::Begin("Viewport", &g_ShowBackbufferWindow, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
+        if (!g_ShowBackbufferWindow) {
+            g_ViewportPlayersMenuOpen = false;
+        }
+
+        if (viewportVisible) {
+            UpdateViewportPlayerCache();
+
             if (!m_BackbufferPreview.srv || m_BackbufferPreview.width == 0 || m_BackbufferPreview.height == 0) {
                 ImGui::TextDisabled("Waiting for swapchain backbuffer...");
             } else {
@@ -1080,7 +1383,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     if (s_bbCtrlActive) {
                         // End control: restore cursor position and visibility
                         ShowCursor(TRUE);
-                        SetCursorPos(s_bbCtrlSavedCursor.x, s_bbCtrlSavedCursor.y);
+                        g_pendingWarpPt.x = s_bbCtrlSavedCursor.x;
+                        g_pendingWarpPt.y = s_bbCtrlSavedCursor.y;
+                        g_hasPendingWarp  = true;
                         s_bbCtrlActive = false;
                         //
                     }
@@ -1095,7 +1400,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         POINT ptCenterClient = { (LONG)itemCenter.x, (LONG)itemCenter.y };
                         POINT ptCenterScreen = ptCenterClient;
                         ClientToScreen(m_Hwnd, &ptCenterScreen);
-                        SetCursorPos(ptCenterScreen.x, ptCenterScreen.y);
+                        g_pendingWarpPt.x = ptCenterScreen.x;
+                        g_pendingWarpPt.y = ptCenterScreen.y;
+                        g_hasPendingWarp  = true;
                     }
                     s_bbCtrlActive = true;
                     s_bbSkipFirstDelta = true;
@@ -1118,9 +1425,30 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     float dy = (float)(ptClient.y - ptCenterClient.y);
                     // Lock cursor to preview center
                     if (s_bbSkipFirstDelta) { dx = 0.0f; dy = 0.0f; s_bbSkipFirstDelta = false; }
-                    SetCursorPos(ptCenterScreen.x, ptCenterScreen.y);
+                    g_pendingWarpPt.x = ptCenterScreen.x;
+                    g_pendingWarpPt.y = ptCenterScreen.y;
+                    g_hasPendingWarp  = true;
+                    ImGuiIO& io = ImGui::GetIO();
+                    float wheel = io.MouseWheel;
                     if (MirvInput* pMirv = Afx_GetMirvInput()) {
                         pMirv->SetCameraControlMode(true);
+                        if (wheel != 0.0f) {
+                            int clicks = (wheel > 0.f) ? (int)floorf(wheel + 0.0001f)
+                                                    : (int)ceilf (wheel - 0.0001f);
+                            double ks = pMirv->GetKeyboardSensitivty();
+
+                            const double up   = 1.10;
+                            const double down = 1.0 / up;
+
+                            if (clicks > 0) for (int i = 0; i < clicks; ++i) ks *= up;
+                            if (clicks < 0) for (int i = 0; i < -clicks; ++i) ks *= down;
+
+                            // Clamp to your preferred range
+                            ks = std::clamp(ks, 0.01, 100.0);
+
+                            pMirv->SetKeyboardSensitivity(ks);
+                            g_uiKsens = (float)ks; g_uiKsensInit = true; // sync UI
+                        }
                         const double sens = pMirv->GetMouseSensitivty();
                         const double yawS = pMirv->MouseYawSpeed_get();
                         const double pitchS = pMirv->MousePitchSpeed_get();
@@ -1177,8 +1505,107 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
                 }
             }
+
+            ImVec2 contentMin = ImGui::GetWindowContentRegionMin();
+            ImVec2 contentMax = ImGui::GetWindowContentRegionMax();
+            const float toggleHeight = ImGui::GetFrameHeight();
+            const float spacingY = ImGui::GetStyle().ItemSpacing.y;
+            const float contentWidth = (std::max)(0.0f, contentMax.x - contentMin.x);
+            const float availableHeight = (std::max)(0.0f, contentMax.y - contentMin.y);
+            const float maxChildHeight = (std::max)(0.0f, availableHeight - toggleHeight - spacingY);
+            const bool hasPlayers = !g_ViewportPlayerCache.empty();
+
+            if (g_ViewportPlayersMenuOpen) {
+                const float spacing_y = ImGui::GetStyle().ItemSpacing.y;
+                const float row_h     = ImGui::GetFrameHeight();      // SmallButton height
+                const int   max_rows  = 2;                            // how many wrapped rows you want visible
+                const float child_h   = row_h * max_rows + spacing_y * (max_rows - 1);
+
+                // position the child at the very bottom-left, right above the toolbar
+                ImGui::SetCursorPos(ImVec2(contentMin.x,
+                                        contentMax.y - toggleHeight - spacing_y - child_h));
+
+                if (ImGui::BeginChild("ViewportPlayerPicker",
+                                    ImVec2(contentWidth, child_h), false,
+                                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+                {
+                    auto& style = ImGui::GetStyle();
+
+                    const float left_x  = ImGui::GetCursorPosX();
+                    const float right_x = left_x + contentWidth;
+
+                    // flow layout with wrapping
+                    for (const ViewportPlayerEntry& entry : g_ViewportPlayerCache) {
+                        const char* label = entry.displayName.c_str();
+
+                        // predict width of SmallButton(label)
+                        ImVec2 sz = ImGui::CalcTextSize(label);
+                        sz.x += style.FramePadding.x * 2.0f;
+                        sz.y  = row_h;
+
+                        // wrap if next button would exceed the row
+                        float next_x = ImGui::GetCursorPosX() + sz.x;
+                        if (next_x > right_x && ImGui::GetCursorPosX() > left_x) {
+                            ImGui::NewLine();
+                        }
+
+                        ImGui::PushID(entry.command.c_str());
+                        if (ImGui::SmallButton(label)) {
+                            Afx_ExecClientCmd(entry.command.c_str());
+                            if (MirvInput* pMirv = Afx_GetMirvInput()) {pMirv->SetCameraControlMode(false);}
+                            g_ViewportPlayersMenuOpen = false;
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("SteamID: %llu",
+                                static_cast<unsigned long long>(entry.steamId));
+                        }
+                        ImGui::PopID();
+
+                        // keep flowing on the same row
+                        ImGui::SameLine(0.0f, style.ItemSpacing.x);
+                    }
+
+                    // end the last SameLine chain
+                    ImGui::NewLine();
+                }
+                ImGui::EndChild();
+            }
+
+            ImGui::SetCursorPos(ImVec2(contentMin.x, contentMax.y - toggleHeight));
+            if (!hasPlayers) {
+                ImGui::BeginDisabled(true);
+            }
+            if (ImGui::SmallButton("<")) {
+                if (MirvInput* pMirv = Afx_GetMirvInput()) {pMirv->SetCameraControlMode(false);}
+                Afx_ExecClientCmd("spec_prev");
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Players")) {
+                if (hasPlayers) {
+                    g_ViewportPlayersMenuOpen = !g_ViewportPlayersMenuOpen;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(">")) {
+                if (MirvInput* pMirv = Afx_GetMirvInput()) {pMirv->SetCameraControlMode(false);}
+                Afx_ExecClientCmd("spec_next");
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("mode")) {
+                if (MirvInput* pMirv = Afx_GetMirvInput()) {pMirv->SetCameraControlMode(false);}
+                Afx_ExecClientCmd("spec_mode");
+            }
+            if (!hasPlayers) {
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("No player controllers found");
+                }
+                ImGui::EndDisabled();
+                g_ViewportPlayersMenuOpen = false;
+            }
         }
         ImGui::End();
+    } else {
+        g_ViewportPlayersMenuOpen = false;
     }
 
     // Sequencer window (ImGui Neo Sequencer)
@@ -2683,6 +3110,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 void OverlayDx11::Render() {
 #ifdef _WIN32
     if (!m_Initialized) return;
+
+    std::lock_guard<std::mutex> lock(g_imguiInputMutex);
+
     // Update backbuffer size cache
     UpdateBackbufferSize();
 
@@ -2691,8 +3121,8 @@ void OverlayDx11::Render() {
         ImGui_ImplDX11_CreateDeviceObjects();
         m_ImGuiNeedRecreate = false;
 
-    // Refresh viewport preview from swapchain just before drawing overlay
-    if (g_ShowBackbufferWindow) { UpdateBackbufferPreviewTexture(); }
+        // Refresh viewport preview from swapchain just before drawing overlay
+        if (g_ShowBackbufferWindow) { UpdateBackbufferPreviewTexture(); }
     }
 
     // Backup current state we might disturb (render targets + viewport)
@@ -2739,7 +3169,15 @@ void OverlayDx11::Render() {
 }
 
 void OverlayDx11::EndFrame() {
-    // Nothing specific for DX11 backend
+#ifdef _WIN32
+    if (!m_Initialized) return;
+
+    // Now flush any pending cursor warp outside the lock
+    if (g_hasPendingWarp && g_windowActive && !g_dropFirstMouseAfterActivate) {
+        ::SetCursorPos(g_pendingWarpPt.x, g_pendingWarpPt.y);
+        g_hasPendingWarp = false;
+    }
+#endif
 }
 
 void OverlayDx11::OnDeviceLost() {
