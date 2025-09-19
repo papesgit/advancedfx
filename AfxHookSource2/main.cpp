@@ -15,6 +15,7 @@
 #include "DeathMsg.h"
 #include "ReplaceName.h"
 #include "SchemaSystem.h"
+#include "SceneSystem.h"
 #include "MirvCommands.h"
 #include "MirvColors.h"
 #include "MirvFix.h"
@@ -24,6 +25,7 @@
 #include "../deps/release/prop/AfxHookSource/SourceInterfaces.h"
 #include "../deps/release/prop/cs2/Source2Client.h"
 #include "../deps/release/prop/cs2/sdk_src/public/tier1/convar.h"
+#include "../deps/release/prop/cs2/sdk_src/public/filesystem.h"
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
 #include "../deps/release/prop/cs2/sdk_src/public/icvar.h"
 #include "../deps/release/prop/cs2/sdk_src/public/igameuiservice.h"
@@ -53,6 +55,10 @@
 HMODULE g_h_engine2Dll = 0;
 HMODULE g_H_ClientDll = 0;
 HMODULE g_H_SchemaSystem = 0;
+HMODULE g_H_ResourceSystemDll = 0;
+HMODULE g_H_FileSystem_stdio = 0;
+
+SOURCESDK::CS2::IFileSystem* g_pFileSystem = nullptr;
 
 advancedfx::CCommandLine  * g_CommandLine = nullptr;
 
@@ -1261,7 +1267,7 @@ void HookClientDll(HMODULE clientDll) {
                  ff ff
 
 	*/
-	{																	// 0x7d8fbb 26.06.24
+	{
 		Afx::BinUtils::MemRange result = FindPatternString(textRange, "48 8b 0d ?? ?? ?? ?? 48 8b 01 ff 90 ?? ?? ?? ?? 0f 57 f6 84 c0 74 63 ba ff ff ff ff");
 																	  
 		if (!result.IsEmpty()) {
@@ -1537,7 +1543,18 @@ int new_CCS2_Client_Init(void* This) {
 
 	HookSchemaSystem(g_H_SchemaSystem);
 
+	if (g_pFileSystem) {
+		std::string path(GetHlaeFolder());
+		path.append("resources\\AfxHookSource2\\cs2");
+		g_pFileSystem->AddSearchPath(path.c_str(), "GAME");
+	}
+
 	return result;
+}
+
+CON_COMMAND(__mirv_print_search_paths, "")
+{
+	g_pFileSystem->PrintSearchPaths();
 }
 
 typedef void(* CCS2_Client_Shutdown_t)(void* This);
@@ -1731,6 +1748,37 @@ void* new_Client_CreateInterface(const char *pName, int *pReturnCode)
 	return pRet;
 }
 
+SOURCESDK::CreateInterfaceFn old_ResourceSystem_CreateInterface = 0;
+
+void* new_ResourceSystem_CreateInterface(const char *pName, int *pReturnCode)
+{
+	static bool bFirstCall = true;
+	void * pRet = old_ResourceSystem_CreateInterface (pName, pReturnCode);
+
+	if(bFirstCall)
+	{
+		bFirstCall = false;
+		if (!(g_pCResourceSystem = (CResourceSystem*)old_ResourceSystem_CreateInterface("ResourceSystem013", NULL))) ErrorBox("Could not get ResourceSystem013 interface.");
+	}
+
+	return pRet;
+}
+
+SOURCESDK::CreateInterfaceFn old_FileSystem_CreateInterface = 0;
+
+void* new_FileSystem_CreateInterface(const char *pName, int *pReturnCode)
+{
+	static bool bFirstCall = true;
+	void * pRet = old_FileSystem_CreateInterface (pName, pReturnCode);
+
+	if(bFirstCall)
+	{
+		bFirstCall = false;
+		if (!(g_pFileSystem = (SOURCESDK::CS2::IFileSystem*)old_FileSystem_CreateInterface("VFileSystem017", NULL))) ErrorBox("Could not get VFileSystem017 interface.");
+	}
+
+	return pRet;
+}
 
 FARPROC WINAPI new_tier0_GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
 {
@@ -1751,6 +1799,22 @@ FARPROC WINAPI new_tier0_GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
 		) {
 			old_Client_CreateInterface = (SOURCESDK::CreateInterfaceFn)nResult;
 			return (FARPROC) &new_Client_CreateInterface;
+		}
+
+		if (
+			hModule == g_H_ResourceSystemDll
+			&& !lstrcmp(lpProcName, "CreateInterface")
+		) {
+			old_ResourceSystem_CreateInterface = (SOURCESDK::CreateInterfaceFn)nResult;
+			return (FARPROC) &new_ResourceSystem_CreateInterface;
+		}
+
+		if (
+			hModule == g_H_FileSystem_stdio
+			&& !lstrcmp(lpProcName, "CreateInterface")
+		) {
+			old_FileSystem_CreateInterface = (SOURCESDK::CreateInterfaceFn)nResult;
+			return (FARPROC) &new_FileSystem_CreateInterface;
 		}
 	}
 
@@ -2153,6 +2217,7 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 	static bool bFirstPanorama = true;
 	static bool bFirstSchemaSystem = true;
 	static bool bFirstSceneSystem = true;
+	static bool bFirstResourceSystem = true;
 	
 	CommonHooks();
 
@@ -2193,12 +2258,14 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 		else
 			ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
-	//else if(bFirstfilesystem_stdio && StringEndsWithW( lpLibFileName, L"filesystem_stdio.dll"))
-	//{
-	//	bFirstfilesystem_stdio = false;
-	//	
-	//	g_Import_filesystem_stdio.Apply(hModule);
-	//}
+	else if(bFirstfilesystem_stdio && StringEndsWithW( lpLibFileName, L"filesystem_stdio.dll"))
+	{
+		bFirstfilesystem_stdio = false;
+
+		g_H_FileSystem_stdio = hModule;
+		
+		// g_Import_filesystem_stdio.Apply(hModule);
+	}
 	else if(bFirstInputsystem && StringEndsWithW(lpLibFileName, L"inputsystem.dll"))
 	{
 		bFirstInputsystem = false;
@@ -2226,6 +2293,7 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 		bFirstSceneSystem = false;
 		g_Import_SceneSystem.Apply(hModule);
 		Hook_SceneSystem(hModule);
+		HookSceneSystem(hModule);
 	}
 	/*else if(bFirstMaterialsystem2 && StringEndsWithW( lpLibFileName, L"materialsystem2.dll"))
 	{
@@ -2273,7 +2341,11 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 		bFirstSchemaSystem = false;
 		g_H_SchemaSystem = hModule;
 	}
-	
+	else if(bFirstResourceSystem && StringEndsWithW(lpLibFileName, L"resourcesystem.dll"))
+	{
+		bFirstResourceSystem = false;
+		g_H_ResourceSystemDll = hModule;
+	}
 }
 
 HMODULE WINAPI new_LoadLibraryA( LPCSTR lpLibFileName ) {

@@ -6,6 +6,26 @@
 
 <release>
 <name>AfxHookSource2</name>
+<version>0.36.15</version>
+<time>2025-09-17T12:44Z</time>
+<changes>
+<change type="fixed">Fixed recording not working.</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
+<version>0.36.14</version>
+<time>2025-09-17T00:40Z</time>
+<changes>
+<change type="fixed">Adjusted to latest CS2 update.</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
 <version>0.36.13</version>
 <time>2025-08-27T22:30Z</time>
 <changes>

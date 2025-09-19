@@ -4,6 +4,14 @@
 
 ### Current
 
+#### Denis 'ChetdeJong' Karkin
+
+2024-05-08
+
+code, test, doc
+
+https://github.com/ChetdeJong
+
 #### Dominik 'dtugend' Tugend
 
 2007-03-01
@@ -388,14 +396,6 @@ code
 
 https://github.com/cademtz
 
-#### Denis 'ChetdeJong' Karkin
-
-2024-05-08 - 2025-07-31
-
-code, test, doc
-
-https://github.com/ChetdeJong
-
 #### wgez
 
 2024-10-02 - 2024-10-02
@@ -409,6 +409,14 @@ https://github.com/wgez
 2025-05-16 - 2025-05-16
 
 test
+
+#### 1mpulse
+
+2025-08-15 - 2025-08-19
+
+code
+
+https://github.com/1mpulse
 
 ## Donors
 
