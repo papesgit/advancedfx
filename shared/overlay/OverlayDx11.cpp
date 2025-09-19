@@ -28,6 +28,8 @@
 #include "../MirvInput.h"
 #include "../../AfxHookSource2/RenderSystemDX11Hooks.h"
 #include "../../AfxHookSource2/ClientEntitySystem.h"
+// mirv_cmd integration
+#include "../CommandSystem.h"
 // For default game folder (…/game/) resolution
 #include "../../AfxHookSource2/hlaeFolder.h"
 
@@ -56,6 +58,7 @@ extern const wchar_t* AfxStreams_GetTakeDir();
 extern const char* AfxStreams_GetRecordNameUtf8();
 // Global campath instance (provided by shared CamPath module)
 extern CamPath g_CamPath;
+extern class CommandSystem g_CommandSystem;
 #endif
 
 namespace advancedfx { namespace overlay {
@@ -197,6 +200,8 @@ static std::mutex g_imguiInputMutex;
 static bool  g_hasPendingWarp = false;
 static POINT g_pendingWarpPt  = {0, 0};
 
+static bool  g_EnableDofTimeline = false;
+
 // Global (file-scope) context for “last selected/edited campath key”
 static CampathCtx g_LastCampathCtx;
 static ImGuizmo::OPERATION g_GizmoOp   = ImGuizmo::TRANSLATE;
@@ -297,6 +302,176 @@ static float g_DofTilt = 0.5f;
 static float g_MaxBlurDefault = 5.0f;
 static float g_DofRadiusScaleDefault = 0.25f;
 static float g_DofTiltDefault = 0.5f;
+// DOF Timeline state
+static bool  g_DofInterpCubic = false; // apply to all curves when >=4 keys
+
+struct DofKeyframe {
+    int   tick = 0;
+    float farBlurry = 2000.0f;
+    float farCrisp = 180.0f;
+    float nearBlurry = -100.0f;
+    float nearCrisp = 0.0f;
+    float maxBlur = 5.0f;
+    float radiusScale = 0.25f;
+    float tilt = 0.5f;
+};
+
+static std::vector<DofKeyframe> g_DofKeys; // authoritative order matches UI order; kept sorted by tick
+static std::vector<ImGui::FrameIndexType> g_DofTicks; // mirrors g_DofKeys.tick for ImGui Neo
+
+static const char* kDofCurveTag  = "overlay_dof_curve";
+static const char* kDofOnceTags[7] = {
+    "overlay_dof_once_far_blurry",
+    "overlay_dof_once_far_crisp",
+    "overlay_dof_once_near_blurry",
+    "overlay_dof_once_near_crisp",
+    "overlay_dof_once_max_blur",
+    "overlay_dof_once_radius_scale",
+    "overlay_dof_once_tilt"
+};
+
+static void Dof_SyncTicksFromKeys()
+{
+    g_DofTicks.clear();
+    g_DofTicks.reserve(g_DofKeys.size());
+    for (const auto& k : g_DofKeys) g_DofTicks.push_back((ImGui::FrameIndexType)k.tick);
+}
+
+static void Dof_RemoveScheduled()
+{
+    // Remove curves entry, if any
+    g_CommandSystem.RemoveByTag(kDofCurveTag);
+    // Remove one-shot entries, if any
+    for (int i = 0; i < 7; ++i) g_CommandSystem.RemoveByTag(kDofOnceTags[i]);
+}
+
+static void Dof_AddOneShotsAtTick(int tick, const DofKeyframe& k)
+{
+    using namespace advancedfx;
+    char buf[64];
+
+    // far_blurry
+    {
+        CFakeCommandArgs a("mirv_cmd"); a.AddArg("addAtTick");
+        _snprintf_s(buf, _TRUNCATE, "%d", tick); a.AddArg(buf);
+        a.AddArg("r_dof_override_far_blurry"); _snprintf_s(buf, _TRUNCATE, "%f", (double)k.farBlurry); a.AddArg(buf);
+        g_CommandSystem.Console_Command(&a);
+        g_CommandSystem.TagLastAdded(kDofOnceTags[0]);
+    }
+    // far_crisp
+    {
+        CFakeCommandArgs a("mirv_cmd"); a.AddArg("addAtTick");
+        _snprintf_s(buf, _TRUNCATE, "%d", tick); a.AddArg(buf);
+        a.AddArg("r_dof_override_far_crisp"); _snprintf_s(buf, _TRUNCATE, "%f", (double)k.farCrisp); a.AddArg(buf);
+        g_CommandSystem.Console_Command(&a);
+        g_CommandSystem.TagLastAdded(kDofOnceTags[1]);
+    }
+    // near_blurry
+    {
+        CFakeCommandArgs a("mirv_cmd"); a.AddArg("addAtTick");
+        _snprintf_s(buf, _TRUNCATE, "%d", tick); a.AddArg(buf);
+        a.AddArg("r_dof_override_near_blurry"); _snprintf_s(buf, _TRUNCATE, "%f", (double)k.nearBlurry); a.AddArg(buf);
+        g_CommandSystem.Console_Command(&a);
+        g_CommandSystem.TagLastAdded(kDofOnceTags[2]);
+    }
+    // near_crisp
+    {
+        CFakeCommandArgs a("mirv_cmd"); a.AddArg("addAtTick");
+        _snprintf_s(buf, _TRUNCATE, "%d", tick); a.AddArg(buf);
+        a.AddArg("r_dof_override_near_crisp"); _snprintf_s(buf, _TRUNCATE, "%f", (double)k.nearCrisp); a.AddArg(buf);
+        g_CommandSystem.Console_Command(&a);
+        g_CommandSystem.TagLastAdded(kDofOnceTags[3]);
+    }
+    // max blur size
+    {
+        CFakeCommandArgs a("mirv_cmd"); a.AddArg("addAtTick");
+        _snprintf_s(buf, _TRUNCATE, "%d", tick); a.AddArg(buf);
+        a.AddArg("r_dof2_maxblursize"); _snprintf_s(buf, _TRUNCATE, "%f", (double)k.maxBlur); a.AddArg(buf);
+        g_CommandSystem.Console_Command(&a);
+        g_CommandSystem.TagLastAdded(kDofOnceTags[4]);
+    }
+    // radius scale
+    {
+        CFakeCommandArgs a("mirv_cmd"); a.AddArg("addAtTick");
+        _snprintf_s(buf, _TRUNCATE, "%d", tick); a.AddArg(buf);
+        a.AddArg("r_dof2_radiusscale"); _snprintf_s(buf, _TRUNCATE, "%f", (double)k.radiusScale); a.AddArg(buf);
+        g_CommandSystem.Console_Command(&a);
+        g_CommandSystem.TagLastAdded(kDofOnceTags[5]);
+    }
+    // tilt to ground
+    {
+        CFakeCommandArgs a("mirv_cmd"); a.AddArg("addAtTick");
+        _snprintf_s(buf, _TRUNCATE, "%d", tick); a.AddArg(buf);
+        a.AddArg("r_dof_override_tilt_to_ground"); _snprintf_s(buf, _TRUNCATE, "%f", (double)k.tilt); a.AddArg(buf);
+        g_CommandSystem.Console_Command(&a);
+        g_CommandSystem.TagLastAdded(kDofOnceTags[6]);
+    }
+}
+
+static void Dof_AddCurves()
+{
+    if (g_DofKeys.size() < 2) return;
+    using namespace advancedfx;
+    char b[64];
+
+    const int startTick = g_DofKeys.front().tick;
+    const int endTick   = g_DofKeys.back().tick;
+
+    CFakeCommandArgs a("mirv_cmd");
+    a.AddArg("addCurves");
+    a.AddArg("tick");
+    _snprintf_s(b, _TRUNCATE, "%d", startTick); a.AddArg(b);
+    _snprintf_s(b, _TRUNCATE, "%d", endTick);   a.AddArg(b);
+
+    const bool useCubic = g_DofInterpCubic && g_DofKeys.size() >= 4;
+
+    auto addCurve = [&](int curveIdx, const char* interp, auto valueOf) {
+        a.AddArg("-");
+        a.AddArg(interp);
+        a.AddArg("space=abs");
+        for (const auto& k : g_DofKeys) {
+            _snprintf_s(b, _TRUNCATE, "%d", k.tick); a.AddArg(b);
+            _snprintf_s(b, _TRUNCATE, "%f", (double)valueOf(k)); a.AddArg(b);
+        }
+    };
+
+    const char* interpArg = useCubic ? "interp=cubic" : "interp=linear";
+    addCurve(0, interpArg, [](const DofKeyframe& k){ return k.farBlurry; });
+    addCurve(1, interpArg, [](const DofKeyframe& k){ return k.farCrisp; });
+    addCurve(2, interpArg, [](const DofKeyframe& k){ return k.nearBlurry; });
+    addCurve(3, interpArg, [](const DofKeyframe& k){ return k.nearCrisp; });
+    addCurve(4, interpArg, [](const DofKeyframe& k){ return k.maxBlur; });
+    addCurve(5, interpArg, [](const DofKeyframe& k){ return k.radiusScale; });
+    addCurve(6, interpArg, [](const DofKeyframe& k){ return k.tilt; });
+
+    a.AddArg("--");
+    {
+        std::string body =
+            std::string("r_dof_override_far_blurry {0}; ")
+            + "r_dof_override_far_crisp {1}; "
+            + "r_dof_override_near_blurry {2}; "
+            + "r_dof_override_near_crisp {3}; "
+            + "r_dof2_maxblursize {4}; "
+            + "r_dof2_radiusscale {5}; "
+            + "r_dof_override_tilt_to_ground {6}";
+        a.AddArg(body.c_str());
+    }
+
+    g_CommandSystem.Console_Command(&a);
+    g_CommandSystem.TagLastAdded(kDofCurveTag);
+}
+
+static void Dof_RebuildScheduled()
+{
+    // Always remove previously scheduled DOF commands first
+    Dof_RemoveScheduled();
+    if (!g_EnableDofTimeline || g_DofKeys.empty()) return;
+    if (g_DofKeys.size() == 1) {
+        Dof_AddOneShotsAtTick(g_DofKeys[0].tick, g_DofKeys[0]);
+        return;
+    }
+    Dof_AddCurves();
+}
 //Viewport stuff
 
 struct ViewportPlayerEntry {
@@ -375,24 +550,18 @@ static void UpdateViewportPlayerCache()
     }
 }
 
-// Sequencer preview behavior: when true, keep the preview pose after releasing slider;
-// when false, restore prior pose if Mirv Camera was enabled before preview.
+// Sequencer preview behavior:
 static bool g_PreviewFollow = false;
 // Sequencer preview normalized position [0..1]
 static float g_PreviewNorm = 0.0f;
 
-// Helper: constrain window height while allowing horizontal resize
-// (removed: height clamp helper; switching to live auto-height adjustment per-frame)
 
-// UI state mirrored for Mirv camera sliders so external changes (e.g., wheel in passthrough)
-// stay in sync with the controls below.
+//Mirv camera sliders
 static bool  g_uiFovInit   = false; static float  g_uiFov = 90.0f;   static float g_uiFovDefault = 90.0f;
 static bool  g_uiRollInit  = false; static float  g_uiRoll = 0.0f;   static float g_uiRollDefault = 0.0f;
 static bool  g_uiKsensInit = false; static float  g_uiKsens = 1.0f;  static float g_uiKsensDefault = 1.0f;
 
 // Overlay UI scale (DPI) control
-// - s_UiScale drives ImGui IO FontGlobalScale and style sizes via ScaleAllSizes
-// - We keep previous value to scale relatively and avoid cumulative drift
 static float g_UiScale = 1.0f;
 
 // Persisted last-used directories (saved in imgui.ini via custom settings handler)
@@ -1249,6 +1418,49 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 }
             }
         }
+        ImGui::SameLine();
+        {
+            const char* dofTimelineLabel = g_EnableDofTimeline ? "Disable Timeline" : "Enable Timeline";
+            if (ImGui::Button(dofTimelineLabel)) {
+                g_EnableDofTimeline = !g_EnableDofTimeline;
+                if (!g_EnableDofTimeline) {
+                    Dof_RemoveScheduled();
+                } else {
+                    Dof_RebuildScheduled();
+                }
+            }
+        }
+        if (g_EnableDofTimeline){
+            if (ImGui::Button("Add Key")) {
+                int curTick = 0;
+                if (g_MirvTime.GetCurrentDemoTick(curTick)) {
+                    DofKeyframe k;
+                    k.tick = curTick;
+                    k.farBlurry   = g_FarBlurry;
+                    k.farCrisp    = g_FarCrisp;
+                    k.nearBlurry  = g_NearBlurry;
+                    k.nearCrisp   = g_NearCrisp;
+                    k.maxBlur     = g_MaxBlur;
+                    k.radiusScale = g_DofRadiusScale;
+                    k.tilt        = g_DofTilt;
+
+                    g_DofKeys.push_back(k);
+                    std::sort(g_DofKeys.begin(), g_DofKeys.end(), [](const DofKeyframe& a, const DofKeyframe& b){ return a.tick < b.tick; });
+                    Dof_SyncTicksFromKeys();
+                    Dof_RebuildScheduled();
+                }
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(g_DofKeys.size() < 4);
+            {
+                bool cubic = g_DofInterpCubic;
+                if (ImGui::Checkbox("Cubic", &cubic)) {
+                    g_DofInterpCubic = cubic;
+                    Dof_RebuildScheduled();
+                }
+            }
+            ImGui::EndDisabled();
+        }
         // Far blur slider (reserve right space so label is always visible)
         {
             ImGuiStyle& st3 = ImGui::GetStyle();
@@ -1762,9 +1974,15 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             float desiredSeqH  = topBarH + neo.TopBarSpacing + zoomH + rowLabelH;
 
             // Clamp: at least 100 px, at most what’s left after the controls row
-            float minSeqH      = ImMax(60.0f, topBarH + neo.TopBarSpacing + zoomH + rowLabelH);
+            float timelineScale = 25.0f;
+            if (!g_EnableDofTimeline) {
+                timelineScale = 30.0f;
+            } else {
+                timelineScale = 60.0f;
+            }
+            float minSeqH      = ImMax(timelineScale * g_UiScale, topBarH + neo.TopBarSpacing + zoomH + rowLabelH);
             float maxSeqHAvail = ImMax(minSeqH, ImMax(55.0f, availY - btnRowH));
-            float seqH         = ImClamp(desiredSeqH, minSeqH, maxSeqHAvail);
+            float seqH         = 50.0f + timelineScale * g_UiScale;
 
             // Use an explicit child height sized to sequencer content for stable layout across DPI scales
             ImGui::BeginChild("seq_child", ImVec2(0.0f, seqH), false); // scrolling lives inside this child
@@ -2072,6 +2290,51 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         ImGui::EndNeoTimeLine();
                     }
                     
+                    if (g_EnableDofTimeline) {
+                        // Ensure ticks mirror keys
+                        if (g_DofTicks.size() != g_DofKeys.size()) Dof_SyncTicksFromKeys();
+                        if (ImGui::BeginNeoTimelineEx("DOF", &open, ImGuiNeoTimelineFlags_None)) {
+                            // Draw keyframes and support selection / context
+                            static int s_dofCtxIndex = -1; // persist selection across frames while popup is open
+                            for (int i = 0; i < (int)g_DofTicks.size(); ++i) {
+                                ImGui::NeoKeyframe(&g_DofTicks[i]);
+                                if (ImGui::IsNeoKeyframeRightClicked()) { s_dofCtxIndex = i; ImGui::OpenPopup("dof_kf_ctx"); }
+                            }
+
+                            // If user finished dragging, commit new ticks back to keys and rebuild
+                            static bool s_dofWasDragging = false;
+                            bool draggingNow = ImGui::NeoIsDraggingSelection();
+                            if (s_dofWasDragging && !draggingNow) {
+                                // Map ticks back, then stable sort by tick
+                                for (size_t i = 0; i < g_DofKeys.size() && i < g_DofTicks.size(); ++i)
+                                    g_DofKeys[i].tick = (int)g_DofTicks[i];
+                                std::sort(g_DofKeys.begin(), g_DofKeys.end(), [](const DofKeyframe& a, const DofKeyframe& b){ return a.tick < b.tick; });
+                                Dof_SyncTicksFromKeys();
+                                Dof_RebuildScheduled();
+                            }
+                            s_dofWasDragging = draggingNow;
+
+                            // Keyframe context menu (Remove only)
+                            if (ImGui::BeginPopup("dof_kf_ctx")) {
+                                if (s_dofCtxIndex >= 0 && s_dofCtxIndex < (int)g_DofKeys.size()) {
+                                    ImGui::Text("Tick: %d", g_DofKeys[s_dofCtxIndex].tick);
+                                    if (ImGui::Selectable("Remove")) {
+                                        g_DofKeys.erase(g_DofKeys.begin() + s_dofCtxIndex);
+                                        Dof_SyncTicksFromKeys();
+                                        Dof_RebuildScheduled();
+                                        s_dofCtxIndex = -1;
+                                        ImGui::CloseCurrentPopup();
+                                    }
+                                } else {
+                                    ImGui::TextDisabled("No selection");
+                                }
+                                ImGui::EndPopup();
+                            }
+                            if (!ImGui::IsPopupOpen("dof_kf_ctx")) s_dofCtxIndex = -1;
+
+                            ImGui::EndNeoTimeLine();
+                        }
+                    }
                     ImGui::EndNeoSequencer();
                 }
             }

@@ -27,7 +27,7 @@ public:
 class CommandSystem
 {
 public:
-	bool Enabled;
+    bool Enabled;
 
 	/// <param name="pExecuteClientCmd">must not be nullptr</param>
 	/// <param name="pGetTick">can be nullptr</param>
@@ -45,10 +45,19 @@ public:
 
 	void OnLevelInitPreEntity(void);
 
-	void Console_Command(advancedfx::ICommandArgs* args);
+    void Console_Command(advancedfx::ICommandArgs* args);
+
+    // Overlay helpers (non-persistent): allow tagging commands and looking them up without relying on indices.
+    // These are intentionally lightweight and do not affect save/load.
+    int  GetTickCommandsCount() const { return (int)m_TickMap.size(); }
+    int  GetTimeCommandsCount() const { return (int)m_TimeMap.size(); }
+    int  FindCommandByTag(const char* tag) const;
+    bool RemoveByTag(const char* tag);
+    bool SetCommandTagByIndex(int index, const char* tag);
+    bool TagLastAdded(const char* tag);
 
 private:
-	class CDoubleInterp
+    class CDoubleInterp
 	{
 	public:
 		enum Method_e {
@@ -140,24 +149,27 @@ private:
 		}
 	};
 
-	class CCommand {
-	public:
-		CCommand()
-		{
-		}
+    class CCommand {
+    public:
+        CCommand()
+        {
+        }
 
 		~CCommand()
 		{
 		}
 
-		size_t GetSize() { return m_Interp.size(); }
-		void SetSize(size_t value) { m_Interp.resize(value); }
+        size_t GetSize() { return m_Interp.size(); }
+        void SetSize(size_t value) { m_Interp.resize(value); }
 
 		bool GetFormated() { return m_Formated; }
 		void SetFormated(bool value) { m_Formated = value; }
 
-		const char* GetCommand() { return m_Command.c_str(); }
-		void SetCommand(const char* value) { m_Command = value; }
+        const char* GetCommand() { return m_Command.c_str(); }
+        void SetCommand(const char* value) { m_Command = value; }
+
+        const char* GetTag() const { return m_Tag.c_str(); }
+        void SetTag(const char* value) { m_Tag = value ? value : ""; }
 
 		CDoubleInterp::Method_e GetInterp(int idx) { return m_Interp[idx].GetMethod(); }
 		void SetInterp(int idx, CDoubleInterp::Method_e value) { m_Interp[idx].SetMethod(value); }
@@ -189,14 +201,15 @@ private:
 			m_Interp.clear();
 		}
 
-		bool DoCommand(double t01, std::queue<std::string> & commandsToExecute);
+        bool DoCommand(double t01, std::queue<std::string> & commandsToExecute);
 
-	private:
-		bool m_OnlyOnce = false;
-		bool m_Formated = false;
-		std::string m_Command;
-		std::vector<CDoubleInterp> m_Interp;
-	};
+    private:
+        bool m_OnlyOnce = false;
+        bool m_Formated = false;
+        std::string m_Command;
+        std::vector<CDoubleInterp> m_Interp;
+        std::string m_Tag; // non-persistent helper label (not serialized)
+    };
 
 	struct Interval {
 
@@ -295,13 +308,17 @@ private:
 			OverlapExecute(root->Right, i);
 	}
 
-	ITNode* m_TickTree = nullptr;
-	ITNode* m_TimeTree = nullptr;
+    ITNode* m_TickTree = nullptr;
+    ITNode* m_TimeTree = nullptr;
 
-	std::multimap<Interval, CCommand*> m_TickMap;
-	std::multimap<Interval, CCommand*> m_TimeMap;
+    std::multimap<Interval, CCommand*> m_TickMap;
+    std::multimap<Interval, CCommand*> m_TimeMap;
 
-	std::queue<std::string> m_CommandsToExecute;
+    std::queue<std::string> m_CommandsToExecute;
+
+    // Pointer to the most recently added command (via Add/AddAt*/AddCurves).
+    // This is not persisted and may be null.
+    CCommand* m_LastAddedCmd = nullptr;
 
 	void DeleteTickTree()
 	{

@@ -36,8 +36,9 @@ void CommandSystem::AddAtTime(char const* command, double time)
 		advancedfx::Warning("Warning: Missing hooks for supporting scheduling by time.\n");
 	}
 
-	CCommand* cmd = new CCommand();
-	cmd->SetCommand(command);
+    CCommand* cmd = new CCommand();
+    cmd->SetCommand(command);
+    m_LastAddedCmd = cmd;
 
 	Interval interval(time, time, true);
 	m_TimeMap.insert({ interval, cmd });
@@ -59,8 +60,9 @@ void CommandSystem::AddAtTick(char const* command, double tick)
 		advancedfx::Warning("Warning: Missing hooks for supporting scheduling by tick.\n");
 	}
 
-	CCommand* cmd = new CCommand();
-	cmd->SetCommand(command);
+    CCommand* cmd = new CCommand();
+    cmd->SetCommand(command);
+    m_LastAddedCmd = cmd;
 
 	Interval interval((double)tick, (double)tick, true);
 	m_TickMap.insert({ interval, cmd });
@@ -609,8 +611,65 @@ void CommandSystem::OnExecuteCommands(void)
 
 void CommandSystem::OnLevelInitPreEntity(void)
 {
-	m_LastTime = -1;
-	m_LastTick = -1;
+    m_LastTime = -1;
+    m_LastTick = -1;
+}
+
+// --- Overlay helper implementations ----------------------------------------------------------
+
+// Return combined index of the first command with matching tag, or -1 if not found.
+int CommandSystem::FindCommandByTag(const char* tag) const
+{
+    if (!tag) return -1;
+    int idx = 0;
+    for (auto it = m_TickMap.begin(); it != m_TickMap.end(); ++it, ++idx) {
+        if (it->second && 0 == _stricmp(it->second->GetTag(), tag)) return idx;
+    }
+    for (auto it = m_TimeMap.begin(); it != m_TimeMap.end(); ++it) {
+        if (it->second && 0 == _stricmp(it->second->GetTag(), tag)) return idx;
+        ++idx;
+    }
+    return -1;
+}
+
+bool CommandSystem::RemoveByTag(const char* tag)
+{
+    bool removedAny = false;
+    while (true) {
+        int idx = FindCommandByTag(tag);
+        if (idx < 0) break;
+        if (!Remove(idx)) break;
+        removedAny = true;
+    }
+    return removedAny;
+}
+
+bool CommandSystem::SetCommandTagByIndex(int index, const char* tag)
+{
+    if (index < 0) return false;
+
+    CCommand* cmd = nullptr;
+    int idx = 0;
+    // Tick commands first
+    for (auto it = m_TickMap.begin(); it != m_TickMap.end(); ++it, ++idx) {
+        if (idx == index) { cmd = it->second; break; }
+    }
+    if (!cmd) {
+        // Time commands follow after ticks
+        for (auto it = m_TimeMap.begin(); it != m_TimeMap.end(); ++it, ++idx) {
+            if (idx == index) { cmd = it->second; break; }
+        }
+    }
+    if (!cmd) return false;
+    cmd->SetTag(tag);
+    return true;
+}
+
+bool CommandSystem::TagLastAdded(const char* tag)
+{
+    if (!m_LastAddedCmd) return false;
+    m_LastAddedCmd->SetTag(tag);
+    return true;
 }
 
 bool CommandSystem::IsSupportedByTime(void)
@@ -708,9 +767,10 @@ void CommandSystem::AddCurves(advancedfx::ICommandArgs* args)
 
 	if (5 <= argC)
 	{
-		CCommand* cmd = new CCommand();
+        CCommand* cmd = new CCommand();
 
-		cmd->SetFormated(true);
+        cmd->SetFormated(true);
+        m_LastAddedCmd = cmd;
 
 		int idx = 4;
 		int dim = 0;
