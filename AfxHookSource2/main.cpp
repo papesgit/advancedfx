@@ -49,6 +49,7 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 
+#include <stdlib.h>
 #include <sstream>
 #include <mutex>
 
@@ -61,6 +62,24 @@ HMODULE g_H_FileSystem_stdio = 0;
 SOURCESDK::CS2::IFileSystem* g_pFileSystem = nullptr;
 
 advancedfx::CCommandLine  * g_CommandLine = nullptr;
+
+typedef void (__fastcall * AddSearchPath_t)(void* This, const char *pPath, const char *pathID, int addType, int priority, int unk );
+AddSearchPath_t org_AddSearchPath = nullptr;
+
+void new_AddSearchPath(void* This, const char *pPath, const char *pathID, int addType, int priority, int unk) {
+	if (0 == strcmp(pathID, "USRLOCAL")) {
+		const wchar_t* USRLOCALCSGO = _wgetenv(L"USRLOCALCSGO");
+		if (nullptr != USRLOCALCSGO) {
+			std::string USRLOCALCSGO_copy = "";
+			WideStringToUTF8String(USRLOCALCSGO, USRLOCALCSGO_copy);
+			if (USRLOCALCSGO_copy.size() > 0) {
+				return org_AddSearchPath(This, USRLOCALCSGO_copy.c_str(), pathID, addType, priority, unk);
+			} 
+		}
+	}
+
+	return org_AddSearchPath(This, pPath, pathID, addType, priority, unk);
+}
 
 FovScaling GetDefaultFovScaling() {
 	return FovScaling_AlienSwarm;
@@ -1547,6 +1566,13 @@ int new_CCS2_Client_Init(void* This) {
 		std::string path(GetHlaeFolder());
 		path.append("resources\\AfxHookSource2\\cs2");
 		g_pFileSystem->AddSearchPath(path.c_str(), "GAME");
+
+		const wchar_t* USRLOCALCSGO = _wgetenv(L"USRLOCALCSGO");
+		if (nullptr != USRLOCALCSGO) {
+			std::string USRLOCALCSGO_copy = "";
+			WideStringToUTF8String(USRLOCALCSGO, USRLOCALCSGO_copy);
+			if (USRLOCALCSGO_copy.size() > 0) g_pFileSystem->AddSearchPath(USRLOCALCSGO_copy.c_str(), "GAME");
+		}
 	}
 
 	return result;
@@ -1622,9 +1648,14 @@ CON_COMMAND(mirv_skip, "for skipping through demos (uses demo_gototick)")
     MirvSkip_ConsoleCommand(args, &g_MirvCampath_Time, &g_MirvSkip_GotoDemoTick);
 }
 
+extern void resetDefaultCloudColors();
+extern void resetCachedMaterials();
+
 typedef void * (* CS2_Client_LevelInitPreEntity_t)(void* This, void * pUnk1, void * pUnk2);
 CS2_Client_LevelInitPreEntity_t old_CS2_Client_LevelInitPreEntity;
 void * new_CS2_Client_LevelInitPreEntity(void* This, void * pUnk1, void * pUnk2) {
+	resetDefaultCloudColors();
+	resetCachedMaterials();
 	void * result = old_CS2_Client_LevelInitPreEntity(This, pUnk1, pUnk2);
 	g_CommandSystem.OnLevelInitPreEntity();
 	return result;
@@ -2263,6 +2294,16 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 		bFirstfilesystem_stdio = false;
 
 		g_H_FileSystem_stdio = hModule;
+
+		org_AddSearchPath = (AddSearchPath_t)getVTableFn(hModule, 31, ".?AVCFileSystem_Stdio@@");
+		if (0 == org_AddSearchPath) ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+		DetourTransactionBegin();
+		DetourUpdateThread(GetCurrentThread());
+		
+		DetourAttach(&(PVOID&)org_AddSearchPath, new_AddSearchPath);
+		
+		if(NO_ERROR != DetourTransactionCommit()) ErrorBox("Failed to detour filesystem_stdio functions.");
 		
 		// g_Import_filesystem_stdio.Apply(hModule);
 	}
@@ -2295,12 +2336,14 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 		Hook_SceneSystem(hModule);
 		HookSceneSystem(hModule);
 	}
-	/*else if(bFirstMaterialsystem2 && StringEndsWithW( lpLibFileName, L"materialsystem2.dll"))
+	else if(bFirstMaterialsystem2 && StringEndsWithW( lpLibFileName, L"materialsystem2.dll"))
 	{
 		bFirstMaterialsystem2 = false;
 
-		g_Import_materialsystem2.Apply(hModule);
-	}*/
+		HookMaterialSystem(hModule);
+
+		// g_Import_materialsystem2.Apply(hModule);
+	}
 	else if(bFirstRenderSystemDX11 && StringEndsWithW( lpLibFileName, L"rendersystemdx11.dll"))
 	{
 		bFirstRenderSystemDX11 = false;
