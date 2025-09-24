@@ -20,6 +20,8 @@
 #include "MirvColors.h"
 #include "MirvFix.h"
 #include "MirvTime.h"
+#include "ClientEntitySystem.h"
+#include "../shared/AfxMath.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/AfxHookSource/SourceInterfaces.h"
@@ -52,6 +54,7 @@
 #include <stdlib.h>
 #include <sstream>
 #include <mutex>
+#include <vector>
 
 HMODULE g_h_engine2Dll = 0;
 HMODULE g_H_ClientDll = 0;
@@ -837,6 +840,131 @@ CON_COMMAND(mirv_sfm, "Source Filmmaker helpers (import)")
     );
 }
 
+// ----------------------------------------------------------------------------
+// mirv_attach: Attach camera to entity attachment (position + angles)
+// ----------------------------------------------------------------------------
+
+struct MirvAttachState {
+    bool enabled = false;
+    int entIndex = -1;
+    bool useName = true;
+    std::string name;
+    int index1Based = 0; // if !useName
+    float posOfs[3] = {0,0,0}; // local offsets: X=forward, Y=left, Z=up
+    float angOfs[3] = {0,0,0}; // Euler degrees: pitch, yaw, roll
+} g_MirvAttach;
+
+static void MirvAttach_PrintHelp(const char* cmd)
+{
+    advancedfx::Message(
+        "%s enable <0|1>\n"
+        "%s entity <index>\n"
+        "%s name <attachmentName>\n"
+        "%s index <idx1Based>\n"
+        "%s offset pos <x> <y> <z>   (local: X=forward, Y=left, Z=up)\n"
+        "%s offset ang <pitch> <yaw> <roll>\n"
+        "%s status\n",
+        cmd, cmd, cmd, cmd, cmd, cmd, cmd
+    );
+}
+
+CON_COMMAND(mirv_attach, "Attach camera to entity attachment (local space)")
+{
+    const char* cmd = args->ArgV(0);
+    int argc = args->ArgC();
+    if(argc < 2) { MirvAttach_PrintHelp(cmd); return; }
+
+    const char* a1 = args->ArgV(1);
+    if(!_stricmp(a1,"enable")) {
+        if(argc >= 3) g_MirvAttach.enabled = 0 != atoi(args->ArgV(2));
+        advancedfx::Message("mirv_attach: enabled=%d\n", g_MirvAttach.enabled?1:0);
+        return;
+    }
+    if(!_stricmp(a1,"entity")) {
+        if(argc >= 3) g_MirvAttach.entIndex = atoi(args->ArgV(2));
+        advancedfx::Message("mirv_attach: entIndex=%d\n", g_MirvAttach.entIndex);
+        return;
+    }
+    if(!_stricmp(a1,"name")) {
+        if(argc >= 3) { g_MirvAttach.useName = true; g_MirvAttach.name = args->ArgV(2); }
+        advancedfx::Message("mirv_attach: name='%s'\n", g_MirvAttach.name.c_str());
+        return;
+    }
+    if(!_stricmp(a1,"index")) {
+        if(argc >= 3) { g_MirvAttach.useName = false; g_MirvAttach.index1Based = atoi(args->ArgV(2)); }
+        advancedfx::Message("mirv_attach: index=%d\n", g_MirvAttach.index1Based);
+        return;
+    }
+    if(!_stricmp(a1,"offset")) {
+        if(argc >= 3) {
+            const char* a2 = args->ArgV(2);
+            if(!_stricmp(a2,"pos")) {
+                if(argc >= 6) {
+                    g_MirvAttach.posOfs[0] = (float)atof(args->ArgV(3));
+                    g_MirvAttach.posOfs[1] = (float)atof(args->ArgV(4));
+                    g_MirvAttach.posOfs[2] = (float)atof(args->ArgV(5));
+                }
+                advancedfx::Message("mirv_attach: posOfs=(%g,%g,%g)\n", g_MirvAttach.posOfs[0], g_MirvAttach.posOfs[1], g_MirvAttach.posOfs[2]);
+                return;
+            }
+            if(!_stricmp(a2,"ang")) {
+                if(argc >= 6) {
+                    g_MirvAttach.angOfs[0] = (float)atof(args->ArgV(3));
+                    g_MirvAttach.angOfs[1] = (float)atof(args->ArgV(4));
+                    g_MirvAttach.angOfs[2] = (float)atof(args->ArgV(5));
+                }
+                advancedfx::Message("mirv_attach: angOfs=(%g,%g,%g)\n", g_MirvAttach.angOfs[0], g_MirvAttach.angOfs[1], g_MirvAttach.angOfs[2]);
+                return;
+            }
+        }
+        MirvAttach_PrintHelp(cmd); return;
+    }
+    if(!_stricmp(a1,"status")) {
+        advancedfx::Message(
+            "enabled=%d entIndex=%d name='%s' useName=%d index=%d posOfs=(%g,%g,%g) angOfs=(%g,%g,%g)\n",
+            g_MirvAttach.enabled?1:0, g_MirvAttach.entIndex, g_MirvAttach.name.c_str(), g_MirvAttach.useName?1:0,
+            g_MirvAttach.index1Based, g_MirvAttach.posOfs[0], g_MirvAttach.posOfs[1], g_MirvAttach.posOfs[2],
+            g_MirvAttach.angOfs[0], g_MirvAttach.angOfs[1], g_MirvAttach.angOfs[2]
+        );
+        return;
+    }
+
+    MirvAttach_PrintHelp(cmd);
+}
+
+// Helper: apply mirv_attach to camera when enabled. Returns true if it wrote Tx/Ty/Tz/Rx/Ry/Rz.
+static bool MirvAttach_Apply(float & Tx, float & Ty, float & Tz, float & Rx, float & Ry, float & Rz)
+{
+    if(!g_MirvAttach.enabled) return false;
+    if(!(g_GetEntityFromIndex && g_pEntityList)) return false;
+    auto ent = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, g_MirvAttach.entIndex);
+    if(!ent) return false;
+
+    int idx = g_MirvAttach.useName ? CS2_LookupAttachmentIndex(ent, g_MirvAttach.name.c_str()) : g_MirvAttach.index1Based;
+    if(!(1 <= idx && idx <= 255)) return false;
+
+    float pos[3], ang[3];
+    if(!CS2_GetAttachmentPosAngByIndex(ent, idx, pos, ang)) return false;
+
+    // Local offset: X=forward, Y=left, Z=up. Build axes from final Euler.
+    // Invert pitch to match camera convention (attachment up -> camera looks down).
+    float fPitch = -ang[0] + g_MirvAttach.angOfs[0];
+    float fYaw   =  ang[1] + g_MirvAttach.angOfs[1];
+    float fRoll  = -ang[2] + g_MirvAttach.angOfs[2];
+
+    double fwd[3], right[3], up[3];
+    Afx::Math::MakeVectors( // MakeVectors expects (roll, pitch, yaw)
+        (double)fRoll, (double)fPitch, (double)fYaw,
+        fwd, right, up);
+
+    Tx = pos[0] + (float)( fwd[0]*g_MirvAttach.posOfs[0] - right[0]*g_MirvAttach.posOfs[1] + up[0]*g_MirvAttach.posOfs[2]);
+    Ty = pos[1] + (float)( fwd[1]*g_MirvAttach.posOfs[0] - right[1]*g_MirvAttach.posOfs[1] + up[1]*g_MirvAttach.posOfs[2]);
+    Tz = pos[2] + (float)( fwd[2]*g_MirvAttach.posOfs[0] - right[2]*g_MirvAttach.posOfs[1] + up[2]*g_MirvAttach.posOfs[2]);
+    Rx = fPitch;
+    Ry = fYaw;
+    Rz = fRoll;
+    return true;
+}
 
 static bool g_bViewOverriden = false;
 static float g_fFovOverride = 90.0f;
@@ -936,7 +1064,10 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 		}
 	}	
 
-	if(MirvFovOverride(Fov)) originOrAnglesOverriden = true;
+    // mirv_attach (attach camera to entity attachment)
+    if(MirvAttach_Apply(Tx,Ty,Tz,Rx,Ry,Rz)) originOrAnglesOverriden = true;
+
+    if(MirvFovOverride(Fov)) originOrAnglesOverriden = true;
 
 	if(g_MirvInputEx.m_MirvInput->Override(g_MirvInputEx.LastFrameTime, Tx,Ty,Tz,Rx,Ry,Rz,Fov)) originOrAnglesOverriden = true;
 
@@ -1267,6 +1398,27 @@ void HookClientDll(HMODULE clientDll) {
 			if(!sections.Eof()){
 				dataRange = sections.GetMemRange();
 			}
+
+    // Resolve CS2 attachment helper functions (owner -> ctx, transform, string->token)
+    {
+        // Find GetAttachment call pattern in .text
+        Afx::BinUtils::MemRange r = FindPatternString(textRange, "0F B6 D3 4C 8B C6 48 8B C8 E8 ?? ?? ?? ??");
+        if(r.IsEmpty()) ErrorBox(MkErrStr(__FILE__, __LINE__));
+        size_t callGet = r.Start + 9; // E8 at +9
+        int relGet = *(int*)(callGet + 1);
+        void* pGetAttachment = (void*)((callGet + 5) + (ptrdiff_t)relGet);
+
+        // Try resolve AttachmentName_ResolveOrNormalize (FUN_1806243d0):
+        // 48 89 5C 24 08 57 48 83 EC 20 48 8B 89 30 03 00 00 49 8B D8 48 8B FA 48 8B 01 FF 50 40
+        // 4C 8B C3 48 8B D7 48 8B C8 E8 ?? ?? ?? ?? 48 8B 5C 24 30 48 8B C7 48 83 C4 20 5F C3
+        void* pResolveName = nullptr;
+        {
+            Afx::BinUtils::MemRange r3 = FindPatternString(textRange,
+                "48 89 5C 24 08 57 48 83 EC 20 48 8B 89 30 03 00 00 49 8B D8 48 8B FA 48 8B 01 FF 50 40 4C 8B C3 48 8B D7 48 8B C8 E8 ?? ?? ?? ?? 48 8B 5C 24 30 48 8B C7 48 83 C4 20 5F C3");
+            if(!r3.IsEmpty()) pResolveName = (void*)r3.Start;
+        }        CS2_Attachments_SetupResolvers(pGetAttachment, pResolveName);
+        advancedfx::Message("[CS2 Attachments] Resolved: get=%p name=%p\n", pGetAttachment, pResolveName);
+    }
 		}
 	}
 

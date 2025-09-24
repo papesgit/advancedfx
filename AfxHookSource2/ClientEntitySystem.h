@@ -66,6 +66,21 @@ typedef void * (__fastcall * GetEntityFromIndex_t)(void * pEntityList, int index
 extern GetHighestEntityIndex_t  g_GetHighestEntityIndex;
 extern GetEntityFromIndex_t g_GetEntityFromIndex;
 
+// Attachment helpers (CS2)
+
+// Returns orientation as Euler angles in degrees (pitch,yaw,roll) via outAng.
+bool CS2_GetAttachmentPosAngByIndex(void* pEntity /* CEntityInstance* */, int idx1Based, float outPos[3], float outAng[3]);
+
+// Returns 1-based index or 0 if not found.
+int CS2_LookupAttachmentIndex(void* pEntity /* CEntityInstance* */, const char* name);
+
+// Programmatic resolver injection (used by auto-scanner in main).
+void CS2_Attachments_SetupResolvers(
+    void* pGetAttachment,
+    void* pResolveName
+);
+
+
 extern void ** g_pEntityList;
 
 int GetHighestEntityIndex();
