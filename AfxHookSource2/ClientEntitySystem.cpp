@@ -3,11 +3,12 @@
 #include "ClientEntitySystem.h"
 #include "DeathMsg.h"
 #include "WrpConsole.h"
+#include "Globals.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 
 #include "../shared/AfxConsole.h"
-#include "../shared/binutils.h"
+//#include "../shared/binutils.h"
 #include "../shared/FFITools.h"
 #include "../shared/StringTools.h"
 
@@ -176,6 +177,37 @@ SOURCESDK::CS2::CBaseHandle CEntityInstance::GetHandle() {
 	return SOURCESDK::CS2::CEntityHandle::CEntityHandle();
 }
 
+typedef	void (__fastcall * org_LookupAttachment_t)(void* This, uint8_t& outIdx, const char* attachmentName);
+org_LookupAttachment_t org_LookupAttachment = nullptr;
+
+typedef	bool (__fastcall * org_GetAttachment_t)(void* This, uint8_t idx, void* out);
+org_GetAttachment_t org_GetAttachment = nullptr;
+
+uint8_t CEntityInstance::LookupAttachment(const char* attachmentName) {
+	uint8_t idx = 0;
+	org_LookupAttachment(this, idx, attachmentName);
+	return idx;
+}
+
+bool CEntityInstance::GetAttachment(uint8_t idx, SOURCESDK::Vector &origin, SOURCESDK::Quaternion &angles) {
+	alignas(16) float resData[8] = {0};
+
+	if(org_GetAttachment(this, idx, resData)) {
+		origin.x = resData[0];
+		origin.y = resData[1];
+		origin.z = resData[2];
+
+		angles.x = resData[4];
+		angles.y = resData[5];
+		angles.z = resData[6];
+		angles.w = resData[7];
+
+		return true;
+	}
+
+	return false;
+}
+
 class CAfxEntityInstanceRef {
 public:
     static CAfxEntityInstanceRef * Aquire(CEntityInstance * pInstance) {
@@ -310,6 +342,35 @@ bool Hook_ClientEntitySystem2() {
     }
 
     return firstResult;    
+}
+
+void Hook_ClientEntitySystem3(HMODULE clientDll) {
+	// these two called one after each other
+	//
+	// 1808ce654 e8  d7  50       CALL       FUN_180623730
+	//           d5  ff
+	// 1808ce659 80  bd  e0       CMP        byte ptr [RBP + local_res8], 0x0
+	//           04  00  00  00
+	// 1808ce660 0f  84  c5       JZ         LAB_1808cf52b
+	//           0e  00  00
+	// 1808ce666 0f  b6  95       MOVZX      EDX, byte ptr [RBP + local_res10]
+	//           e8  04  00  00
+	// 1808ce66d 84  d2           TEST       DL,DL
+	// 1808ce66f 0f  84  b6       JZ         LAB_1808cf52b
+	//           0e  00  00
+	// 1808ce675 4c  8d  45  40   LEA        R8=>local_498, [RBP + 0x40]
+	// 1808ce679 48  8b  cf       MOV        RCX, RDI
+	// 1808ce67c e8  5f  67       CALL       FUN_180614de0
+	//           d4  ff
+	//
+	// Function where they called has "weapon_hand_R" string
+	// also it's 2th in vtable for ".?AV?$_Func_impl_no_alloc@V<lambda_2>@?8??FrameUpdateBegin@CPlayerPawnFrameUpdateSystem@@QEAAXXZ@X$$V@std@@"
+	// vtable could be find near "AsyncFrameUpdate" where it queues it
+
+	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 80 BD ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? 0F B6 95 ?? ?? ?? ?? 84 D2 0F 84 ?? ?? ?? ?? 4C 8D 45 ?? 48 8B CF E8 ?? ?? ?? ??")) {
+		org_LookupAttachment = (org_LookupAttachment_t)(startAddr + 5 + *(int32_t*)(startAddr + 1));
+		org_GetAttachment = (org_GetAttachment_t)(startAddr + 40 + 5 + *(int32_t*)(startAddr + 40 + 1));
+	} else ErrorBox(MkErrStr(__FILE__, __LINE__));
 }
 
 int GetHighestEntityIndex() {
@@ -602,197 +663,27 @@ extern "C" int afx_hook_source2_get_entity_ref_observer_target_handle(void * pRe
     return SOURCESDK_CS2_INVALID_EHANDLE_INDEX;
 }
 
-// Attachment helpers
+extern "C" FFIBool afx_hook_source2_get_entity_ref_attachment(void * pRef, const char* attachmentName, double outPosition[3], double outAngles[4]) {
+    if(auto pInstance = ((CAfxEntityInstanceRef *)pRef)->GetInstance()) {
+		auto idx = pInstance->LookupAttachment(attachmentName);
+		if (0 == idx) return FFIBOOL_FALSE;
+		
+		SOURCESDK::Vector origin;
+		SOURCESDK::Quaternion angles;
 
-namespace {
-    // Helper: check if a pointer lies in client.dll executable sections.
-    static bool IsClientCodePtr(void* p) {
-        if(!p) return false;
-        if(!g_H_ClientDll) return false;
-        Afx::BinUtils::ImageSectionsReader reader(g_H_ClientDll);
-        while(!reader.Eof()) {
-            reader.Next(IMAGE_SCN_MEM_EXECUTE);
-            if(reader.Eof()) break;
-            auto r = reader.GetMemRange();
-            if(r.Start <= (size_t)p && (size_t)p < r.End) return true;
-        }
-        return false;
-    }
-    typedef char  (__fastcall * GetAttachment_t)(void* pCtx, unsigned char idx1Based, void* pOut, void* pTmp);
-    typedef void (__fastcall * ResolveAttachmentName_t)(void* pCtxOrEnt, unsigned char* pOutIdx, const char* name);
+		if (pInstance->GetAttachment(idx, origin, angles)) {
+			outPosition[0] = origin.x;
+			outPosition[1] = origin.y;
+			outPosition[2] = origin.z;
 
-    static GetAttachment_t                    g_pGetAttachment   = nullptr;    // FUN_180615a30
-    static ResolveAttachmentName_t            g_pResolveName     = nullptr;    // FUN_1806243d0 (optional)
+			outAngles[0] = angles.w;
+			outAngles[1] = angles.x;
+			outAngles[2] = angles.y;
+			outAngles[3] = angles.z;
 
-    // Calls owner vfunc at +0x1B8 to get the attachment context.
-    static void* GetAttachmentContext(void* pEnt) {
-        if(!pEnt) return nullptr; void** vtbl = *(void***)pEnt;
-        // 0x1B8 / 8 = 55
-        void* candidate = vtbl[55];
-        if(!IsClientCodePtr(candidate)) return nullptr;
-        auto fn = (void* (__fastcall*)(void*))candidate;
-        return fn ? fn(pEnt) : nullptr;
+			return FFIBOOL_TRUE;
+		}
     }
 
-    // Helper to print a one-time message for missing resolver pieces.
-    static void PrintResolverHintOnce(const char* which) {
-        static bool once = false;
-        if(once) return; once = true;
-        advancedfx::Message("[CS2 Attachments] Resolver missing: %s\n", which);
-    }
-}
-
-bool CS2_GetAttachmentPosAngByIndex(void* pEntity, int idx1Based, float outPos[3], float outAng[3])
-{
-    if(!g_pGetAttachment) return false;
-    if(!pEntity || idx1Based <= 0 || idx1Based > 255 || !outPos || !outAng) return false;
-    void* ctx = GetAttachmentContext(pEntity);
-    if(!ctx) return false;
-    struct OutBuf { float x; float y; float z; } outBuf = {0};
-    float eul[4] = {0,0,0,0};
-    char ok = g_pGetAttachment(ctx, (unsigned char)idx1Based, &outBuf, eul);
-    if(!ok) return false;
-    outPos[0] = outBuf.x; outPos[1] = outBuf.y; outPos[2] = outBuf.z;
-    outAng[0] = eul[0]; outAng[1] = eul[1]; outAng[2] = eul[2];
-    return true;
-}
-
-int CS2_LookupAttachmentIndex(void* pEntity, const char* name)
-{
-    if(!pEntity || !name || !*name) return 0;
-
-    void* ctx = GetAttachmentContext(pEntity);
-    if(!ctx) return 0;
-
-    if(g_pResolveName) {
-        unsigned char outIdx = 0;
-        g_pResolveName(ctx, &outIdx, name);
-        if(outIdx) {
-            return (int)outIdx;
-        } else {
-            advancedfx::Message("[CS2 Attachments] g_pResolveName present but returned 0 for '%s', falling back.\n", name);
-        }
-    }
-    unsigned char outIdx = 0;
-    return (int)outIdx; // 1-based; 0 means not found
-}
-
-void CS2_Attachments_SetupResolvers(
-    void* pGetAttachment,
-    void* pResolveName
-)
-{
-    g_pGetAttachment   = (GetAttachment_t)pGetAttachment;
-    g_pResolveName     = (ResolveAttachmentName_t)pResolveName;
-}
-CON_COMMAND(_mirv_debug_attachment_addrs, "Print CS2 attachment resolver addresses")
-{
-    advancedfx::Message(
-        "[CS2 Attachments] get=%p resolveName=%p\n",
-        g_pGetAttachment, g_pResolveName
-    );
-}
-
-// Debug console commands
-CON_COMMAND(_mirv_debug_attachment_index, "Print world pos+angles for entity attachment index (CS2)")
-{
-    int argc = args->ArgC();
-    if(argc < 3) {
-        advancedfx::Message("Usage: %s <entIndex> <idx1Based>\n", args->ArgV(0));
-        return;
-    }
-    int entIndex = atoi(args->ArgV(1));
-    int idx = atoi(args->ArgV(2));
-
-    if(!g_pEntityList || !g_GetEntityFromIndex) {
-        advancedfx::Message("Entity system not initialized.\n");
-        return;
-    }
-    auto ent = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, entIndex);
-    if(!ent) { advancedfx::Message("Entity %d not found.\n", entIndex); return; }
-
-    float pos[3]; float ang[3];
-    if(CS2_GetAttachmentPosAngByIndex(ent, idx, pos, ang)) {
-        advancedfx::Message("ent=%d idx=%d pos=(%g,%g,%g) angles=(%g,%g,%g)\n", entIndex, idx, pos[0], pos[1], pos[2], ang[0], ang[1], ang[2]);
-    } else {
-        advancedfx::Message("Failed to resolve attachment transform.\n");
-    }
-}
-
-CON_COMMAND(_mirv_debug_attachment_name, "Print world pos+angles for entity attachment name (CS2)")
-{
-    int argc = args->ArgC();
-    if(argc < 3) {
-        advancedfx::Message("Usage: %s <entIndex> <name>\n", args->ArgV(0));
-        return;
-    }
-    int entIndex = atoi(args->ArgV(1));
-    const char* name = args->ArgV(2);
-
-    if(!g_pEntityList || !g_GetEntityFromIndex) {
-        advancedfx::Message("Entity system not initialized.\n");
-        return;
-    }
-    auto ent = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, entIndex);
-    if(!ent) { advancedfx::Message("Entity %d not found.\n", entIndex); return; }
-
-    int idx = CS2_LookupAttachmentIndex(ent, name);
-    if(idx <= 0) { advancedfx::Message("Attachment '%s' not found. [entity=%p]\n", name, ent); return; }
-
-    float pos[3]; float ang[3];
-    if(CS2_GetAttachmentPosAngByIndex(ent, idx, pos, ang)) {
-        advancedfx::Message("ent=%d name=%s idx=%d pos=(%g,%g,%g) angles=(%g,%g,%g)\n",
-            entIndex, name, idx, pos[0], pos[1], pos[2], ang[0], ang[1], ang[2]);
-    } else {
-        advancedfx::Message("Resolved index=%d for '%s' but transform failed (check resolver).\n", idx, name);
-    }
-}
-
-CON_COMMAND(_mirv_debug_attachment_list, "List attachment indices and tokens for entity (CS2)")
-{
-    int argc = args->ArgC();
-    if(argc < 2) {
-        advancedfx::Message("Usage: %s <entIndex>\n", args->ArgV(0));
-        return;
-    }
-    int entIndex = atoi(args->ArgV(1));
-    if(!g_pEntityList || !g_GetEntityFromIndex) {
-        advancedfx::Message("Entity system not initialized.\n");
-        return;
-    }
-    auto ent = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, entIndex);
-    if(!ent) { advancedfx::Message("Entity %d not found.\n", entIndex); return; }
-
-    void* ctx = GetAttachmentContext(ent);
-    if(!ctx) { advancedfx::Message("No ctx for ent=%d.\n", entIndex); return; }
-
-    //probe indices by attempting transform. Print indices that resolve.
-    int found = 0;
-    for(int i=1;i<=64;++i) {
-        float pos[3]; float ang[3];
-        if(CS2_GetAttachmentPosAngByIndex(ent, i, pos, ang)) {
-            if(0 == found) advancedfx::Message("Usable attachments (index => name):\n");
-            found++;
-            const char* resolved = nullptr;
-            if(ctx && g_pResolveName) {
-                static const char* kCandidates[] = {
-                    "knife","eholster","pistol","leg_l_iktarget","leg_r_iktarget","defusekit","grenade0","grenade1",
-                    "grenade2","grenade3","grenade4","primary","primary_smg","c4","look_straight_ahead_stand",
-                    "clip_limit","weapon_hand_l","weapon_hand_r","gun_accurate","weaponhier_l_iktarget",
-                    "weaponhier_r_iktarget","look_straight_ahead_crouch","axis_of_intent","muzzle_flash","muzzle_flash2",
-                    "camera_inventory","shell_eject","stattrak","weapon_holster_center","stattrak_legacy","nametag",
-                    "nametag_legacy","keychain","keychain_legacy"
-
-                };
-                for(size_t k=0; k<sizeof(kCandidates)/sizeof(kCandidates[0]); ++k) {
-                    unsigned char idx2 = 0;
-                    g_pResolveName(ctx, &idx2, kCandidates[k]);
-                    if(idx2 == (unsigned char)i) { resolved = kCandidates[k]; break; }
-                }
-            }
-            if(resolved) advancedfx::Message("  %d => %s\n", i, resolved);
-            else advancedfx::Message("  %d\n", i);
-        }
-    }
-    if(0 == found) advancedfx::Message("No attachments found by probing 1..64.\n");
+    return FFIBOOL_FALSE;
 }

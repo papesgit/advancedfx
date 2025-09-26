@@ -9,6 +9,8 @@ bool Hook_ClientEntitySystem( void* pEntityList, void * pFnGetHighestEntityItera
 
 bool Hook_ClientEntitySystem2();
 
+void Hook_ClientEntitySystem3(HMODULE clientDll);
+
 bool Hook_GetSplitScreenPlayer( void* pAddr);
 
 class CAfxEntityInstanceRef;
@@ -58,6 +60,9 @@ public:
     SOURCESDK::CS2::CBaseHandle GetObserverTarget();
 
     SOURCESDK::CS2::CBaseHandle GetHandle();
+
+    uint8_t LookupAttachment(const char* attachmentName);
+	bool GetAttachment(uint8_t idx, SOURCESDK::Vector &origin, SOURCESDK::Quaternion &angles);
 };
 
 typedef int (__fastcall * GetHighestEntityIndex_t)(void * pEntityList, bool bUnknown);
@@ -65,21 +70,6 @@ typedef void * (__fastcall * GetEntityFromIndex_t)(void * pEntityList, int index
 
 extern GetHighestEntityIndex_t  g_GetHighestEntityIndex;
 extern GetEntityFromIndex_t g_GetEntityFromIndex;
-
-// Attachment helpers (CS2)
-
-// Returns orientation as Euler angles in degrees (pitch,yaw,roll) via outAng.
-bool CS2_GetAttachmentPosAngByIndex(void* pEntity /* CEntityInstance* */, int idx1Based, float outPos[3], float outAng[3]);
-
-// Returns 1-based index or 0 if not found.
-int CS2_LookupAttachmentIndex(void* pEntity /* CEntityInstance* */, const char* name);
-
-// Programmatic resolver injection (used by auto-scanner in main).
-void CS2_Attachments_SetupResolvers(
-    void* pGetAttachment,
-    void* pResolveName
-);
-
 
 extern void ** g_pEntityList;
 
