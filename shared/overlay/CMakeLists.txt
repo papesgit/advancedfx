@@ -40,6 +40,8 @@ set(HLAE_OVERLAY_SOURCES
     IOverlayRenderer.h
     Overlay.h
     Overlay.cpp
+    AttachCameraState.h
+    AttachCameraState.cpp
     OverlayVk.h
     InputRouter.h
     InputRouter.cpp

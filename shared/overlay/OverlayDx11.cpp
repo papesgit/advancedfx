@@ -17,6 +17,7 @@
 #include "third_party/imguizmo/ImGuizmo.h"
 #include "../AfxConsole.h"
 #include "../AfxMath.h"
+#include "AttachCameraState.h"
 #ifdef IMGUI_ENABLE_FREETYPE
 #include "third_party/imgui/misc/freetype/imgui_freetype.h"
 #endif
@@ -45,10 +46,12 @@
 #include <float.h>
 #include <vector>
 #include <string>
+#include <string.h>
 #include <algorithm>
 #include <filesystem>
 #include <chrono>
 #include <unordered_set>
+#include <unordered_map>
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -281,6 +284,115 @@ static void CurveCache_Rebuild()
 }
 
 //Misc
+
+static bool g_ShowAttachmentControl = false;
+
+// Camera attach-to-attachment state
+struct AttachEntityEntry {
+    int index = -1;      // entity list index
+    int handle = -1;     // stable handle
+    std::string name;    // display name
+    bool isPawn = false; // player pawn
+    bool isWeapon = false; // weapon-ish client classes
+};
+
+static std::vector<AttachEntityEntry> g_AttachEntityCache;
+static std::chrono::steady_clock::time_point g_AttachEntityCacheNextRefresh{};
+
+static bool  g_AttachCamEnabled = false;
+static int   g_AttachSelectedHandle = -1; // currently selected (combobox) entity handle
+static int   g_AttachSelectedIndex  = -1; // entity index (best effort, may go stale)
+static int   g_AttachSelectedAttachmentIdx = 1; // 1-based, 0 is invalid per engine semantics
+static float g_AttachOffsetPos[3] = { 0.0f, 0.0f, 0.0f };    // forward, right, up (Source axes)
+static float g_AttachOffsetRot[3] = { 0.0f, 0.0f, 0.0f };    // pitch, yaw, roll (degrees)
+
+// Previous camera state to restore on detach
+// legacy MirvInput snapshot not needed for hook-based attach
+
+static void UpdateAttachEntityCache()
+{
+    using clock = std::chrono::steady_clock;
+    const clock::time_point now = clock::now();
+    if (now < g_AttachEntityCacheNextRefresh)
+        return;
+
+    g_AttachEntityCacheNextRefresh = now + std::chrono::milliseconds(500);
+    g_AttachEntityCache.clear();
+
+    if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex)
+        return;
+
+    const int highest = GetHighestEntityIndex();
+    if (highest < 0) return;
+
+    for (int idx = 0; idx <= highest; ++idx) {
+        if (auto* ent = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, idx))) {
+            const bool isPawn = ent->IsPlayerPawn();
+            // Controllers don't hold attachments we want; prefer pawn over controller
+            const bool isController = ent->IsPlayerController();
+
+            // Heuristic weapon detection: client class name contains "Weapon"
+            bool isWeapon = false;
+            if (const char* ccn = ent->GetClassName()) {
+                if (ccn && *ccn && nullptr != strstr(ccn, "weapon")) isWeapon = true;
+            }
+
+            if (!(isPawn || isWeapon)) continue;
+
+            const char* display = nullptr;
+            std::string name;
+            if (isPawn) {
+                // Resolve name from the corresponding PlayerController
+                display = nullptr;
+                auto ctrlHandle = ent->GetPlayerControllerHandle();
+                if (ctrlHandle.ToInt() != 0) {
+                    int ctrlIdx = ctrlHandle.GetEntryIndex();
+                    if (ctrlIdx >= 0 && ctrlIdx <= highest) {
+                        if (auto* ctrl = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, ctrlIdx))) {
+                            const char* nm = ctrl->GetSanitizedPlayerName();
+                            if (!nm || !*nm) nm = ctrl->GetPlayerName();
+                            if (!nm || !*nm) nm = ctrl->GetDebugName();
+                            display = nm;
+                        }
+                    }
+                }
+                if (!display || !*display) display = ent->GetDebugName();
+                name = display && *display ? display : "Player";
+            } else {
+                const char* c1 = ent->GetClientClassName();
+                const char* c2 = ent->GetClassName();
+                name = c1 && *c1 ? c1 : (c2 && *c2 ? c2 : "Weapon");
+            }
+
+            AttachEntityEntry e;
+            e.index = idx;
+            e.handle = ent->GetHandle().ToInt();
+            e.isPawn = isPawn && !isController; // prefer pawn flag only when it's actually a pawn
+            e.isWeapon = isWeapon && !isPawn;
+            e.name = std::move(name);
+            g_AttachEntityCache.emplace_back(std::move(e));
+        }
+    }
+}
+
+static CEntityInstance* FindEntityByHandle(int handle, int* outIndex = nullptr)
+{
+    if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) return nullptr;
+    const int highest = GetHighestEntityIndex();
+    if (highest < 0) return nullptr;
+    for (int idx = 0; idx <= highest; ++idx) {
+        if (auto* ent = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, idx))) {
+            if (ent->GetHandle().ToInt() == handle) {
+                if (outIndex) *outIndex = idx;
+                return ent;
+            }
+        }
+    }
+    return nullptr;
+}
+
+// No per-frame MirvInput camera updates here anymore; camera attach is applied
+// in the engine hook (CSetupView) based on the shared state updated by this UI.
 
 //DOF
 static bool g_ShowDofWindow = false;
@@ -1257,6 +1369,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     g_cvarsUnhidden = true;
                 }
             }
+            if (ImGui::Checkbox("Show Attachment Control", &g_ShowAttachmentControl)) {
+            }
             static bool s_nearZtoggle = false;
             if (ImGui::Checkbox("Near-Z 1", &s_nearZtoggle)) {
                 if (s_nearZtoggle) Afx_ExecClientCmd("r_nearz 1"); else Afx_ExecClientCmd("r_nearz -1");
@@ -1404,6 +1518,156 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     }
 
     ImGui::End();
+    if (g_ShowAttachmentControl) {
+        ImGui::Begin("Attachment Control");
+        {
+            UpdateAttachEntityCache();
+
+            // Enable/Disable button
+            const char* btnLbl = g_AttachCamEnabled ? "Detach Camera" : "Attach Camera";
+            if (ImGui::Button(btnLbl)) {
+                if (!g_AttachCamEnabled) {
+                    // Enable: mark attach active only if an entity is selected
+                    g_AttachCamEnabled = (g_AttachSelectedHandle > 0);
+                    advancedfx::overlay::AttachCam_SetEnabled(g_AttachCamEnabled);
+                    advancedfx::overlay::AttachCam_SetEntityHandle(g_AttachSelectedHandle);
+                    advancedfx::overlay::AttachCam_SetAttachmentIndex(g_AttachSelectedAttachmentIdx);
+                    advancedfx::overlay::AttachCam_SetOffsetPos(g_AttachOffsetPos);
+                    advancedfx::overlay::AttachCam_SetOffsetRot(g_AttachOffsetRot);
+                    advancedfx::Message("Overlay: attach camera %s\n", g_AttachCamEnabled ? "on" : "off (no entity selected)");
+                } else {
+                    // Disable: just clear the attach flag
+                    g_AttachCamEnabled = false;
+                    advancedfx::overlay::AttachCam_SetEnabled(false);
+                    advancedfx::Message("Overlay: attach camera off\n");
+                }
+            }
+
+            // Entity selection (players and weapons)
+            ImGui::SeparatorText("Entity");
+            std::string curEntLabel = "<none>";
+            if (g_AttachSelectedHandle > 0) {
+                // Try to find current name from cache
+                for (const auto& e : g_AttachEntityCache) {
+                    if (e.handle == g_AttachSelectedHandle) { curEntLabel = e.name; break; }
+                }
+            }
+            if (ImGui::BeginCombo("##attach_entity", curEntLabel.c_str())) {
+                for (const auto& e : g_AttachEntityCache) {
+                    char label[256];
+                    _snprintf_s(label, _TRUNCATE, "%s %s (idx %d)", e.isPawn ? "[Player]" : (e.isWeapon ? "[Weapon]" : "[Other]"), e.name.c_str(), e.index);
+                    bool selected = (g_AttachSelectedHandle == e.handle);
+                    if (ImGui::Selectable(label, selected)) {
+                        g_AttachSelectedHandle = e.handle;
+                        g_AttachSelectedIndex = e.index;
+                        // Reset attachment index guess when entity changes
+                        g_AttachSelectedAttachmentIdx = 1;
+                        advancedfx::overlay::AttachCam_SetEntityHandle(g_AttachSelectedHandle);
+                        advancedfx::overlay::AttachCam_SetAttachmentIndex(g_AttachSelectedAttachmentIdx);
+                    }
+                    if (selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Select a player pawn or weapon entity");
+            }
+
+            // Attachment selection: probe name heuristics then fill with remaining indices
+            ImGui::SeparatorText("Attachment");
+            struct AttItem { int idx; const char* name; };
+            static const char* kAttachNames[] = {
+                "knife","eholster","pistol","leg_l_iktarget","leg_r_iktarget","defusekit","grenade0","grenade1",
+                "grenade2","grenade3","grenade4","primary","primary_smg","c4","look_straight_ahead_stand",
+                "clip_limit","weapon_hand_l","weapon_hand_r","gun_accurate","weaponhier_l_iktarget",
+                "weaponhier_r_iktarget","look_straight_ahead_crouch","axis_of_intent","muzzle_flash","muzzle_flash2",
+                "camera_inventory","shell_eject","stattrak","weapon_holster_center","stattrak_legacy","nametag",
+                "nametag_legacy","keychain","keychain_legacy"
+            };
+
+            std::vector<AttItem> items;
+            std::unordered_set<int> seen;
+            std::unordered_map<int, std::string> idxToName;
+
+            if (g_AttachSelectedHandle > 0) {
+                CEntityInstance* ent = FindEntityByHandle(g_AttachSelectedHandle, &g_AttachSelectedIndex);
+                if (ent) {
+                    // First, attempt to resolve indices via name lookup
+                    for (const char* an : kAttachNames) {
+                        uint8_t idx = ent->LookupAttachment(an);
+                        if (idx != 0 && seen.insert((int)idx).second) {
+                            idxToName[(int)idx] = an; // prefer this name for the index
+                        }
+                    }
+                    // Then, probe numeric indices for any additional available ones
+                    SOURCESDK::Vector o; SOURCESDK::Quaternion q;
+                    for (int i = 1; i <= 64; ++i) {
+                        if (ent->GetAttachment((uint8_t)i, o, q)) {
+                            seen.insert(i);
+                            if (!idxToName.count(i)) idxToName[i] = std::string();
+                        }
+                    }
+                    // Build item list sorted by index
+                    items.reserve(idxToName.size());
+                    for (const auto& kv : idxToName) {
+                        items.push_back(AttItem{kv.first, kv.second.empty() ? nullptr : kv.second.c_str()});
+                    }
+                    std::sort(items.begin(), items.end(), [](const AttItem& a, const AttItem& b){ return a.idx < b.idx; });
+                }
+            }
+
+            // Current selection label
+            char curBuf[128];
+            {
+                const auto it = idxToName.find(g_AttachSelectedAttachmentIdx);
+                if (it != idxToName.end() && !it->second.empty()) {
+                    _snprintf_s(curBuf, _TRUNCATE, "%d - %s", g_AttachSelectedAttachmentIdx, it->second.c_str());
+                } else if (!items.empty()) {
+                    _snprintf_s(curBuf, _TRUNCATE, "%d", g_AttachSelectedAttachmentIdx);
+                } else {
+                    strcpy_s(curBuf, "<none>");
+                }
+            }
+
+            if (ImGui::BeginCombo("##attach_index", curBuf)) {
+                for (const auto& it : items) {
+                    const bool sel = (g_AttachSelectedAttachmentIdx == it.idx);
+                    char label[128];
+                    if (it.name) _snprintf_s(label, _TRUNCATE, "%d - %s", it.idx, it.name);
+                    else _snprintf_s(label, _TRUNCATE, "%d", it.idx);
+                    if (ImGui::Selectable(label, sel)) {
+                        g_AttachSelectedAttachmentIdx = it.idx;
+                        advancedfx::overlay::AttachCam_SetAttachmentIndex(it.idx);
+                    }
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Attachment index (1-based). Names to come later.");
+            }
+
+            // Offsets
+            ImGui::SeparatorText("Offsets");
+            ImGui::TextUnformatted("Position (Fwd, Right, Up)");
+            if (ImGui::DragFloat3("##attach_ofs_pos", g_AttachOffsetPos, 0.1f)) {
+                advancedfx::overlay::AttachCam_SetOffsetPos(g_AttachOffsetPos);
+            }
+            ImGui::TextUnformatted("Rotation (Pitch, Yaw, Roll)");
+            if (ImGui::DragFloat3("##attach_ofs_rot", g_AttachOffsetRot, 0.5f)) {
+                advancedfx::overlay::AttachCam_SetOffsetRot(g_AttachOffsetRot);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset")) {
+                g_AttachOffsetPos[0] = g_AttachOffsetPos[1] = g_AttachOffsetPos[2] = 0.0f;
+                g_AttachOffsetRot[0] = g_AttachOffsetRot[1] = g_AttachOffsetRot[2] = 0.0f;
+                advancedfx::overlay::AttachCam_SetOffsetPos(g_AttachOffsetPos);
+                advancedfx::overlay::AttachCam_SetOffsetRot(g_AttachOffsetRot);
+            }
+        }
+        ImGui::End();
+    }
     if (g_ShowDofWindow) {
         ImGui::Begin("DOF Control");
         {
@@ -3475,6 +3739,7 @@ void OverlayDx11::Render() {
         // Refresh viewport preview from swapchain just before drawing overlay
         if (g_ShowBackbufferWindow) { UpdateBackbufferPreviewTexture(); }
     }
+    // Per-frame Mirv rendering below (no attach-camera updates here)
 
     // Backup current state we might disturb (render targets + viewport)
     ID3D11RenderTargetView* prevRtv = nullptr;
@@ -3669,10 +3934,3 @@ void OverlayDx11::UpdateBackbufferSize() {
 
 }} // namespace
 #endif
-
-
-
-
-
-
-

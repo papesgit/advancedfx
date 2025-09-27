@@ -43,6 +43,8 @@
 #include "../shared/MirvCampath.h"
 #include "../shared/MirvInput.h"
 #include "../shared/MirvSkip.h"
+#include "../shared/overlay/AttachCameraState.h"
+#include "../shared/AfxMath.h"
 
 #include "../deps/release/Detours/src/detours.h"
 
@@ -934,10 +936,61 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 			Fov = (float)camData.Fov;
 		}
 	}	
+    // Attachment-based camera override (from overlay UI)
+    bool didAttachOverride = false;
+    {
+        advancedfx::overlay::AttachCamSettings s;
+        advancedfx::overlay::AttachCam_GetSettings(s);
+        if (s.enabled && s.entityHandle > 0 && s.attachmentIndex > 0 && g_pEntityList && *g_pEntityList && g_GetEntityFromIndex && !g_MirvInputEx.m_MirvInput->GetCameraControlMode()) {
+            const int highest = GetHighestEntityIndex();
+            if (highest >= 0) {
+                CEntityInstance* ent = nullptr;
+                for (int i = 0; i <= highest; ++i) {
+                    if (auto* e = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, i)) {
+                        if (e->GetHandle().ToInt() == s.entityHandle) { ent = e; break; }
+                    }
+                }
+                if (ent) {
+                    SOURCESDK::Vector o; SOURCESDK::Quaternion q;
+                    const uint8_t ai = (uint8_t)s.attachmentIndex;
+                    if (ai != 0 && ent->GetAttachment(ai, o, q)) {
+                        using namespace Afx::Math;
+                        // Engine Quaternion is (x,y,z,w); our math takes (w,x,y,z)
+                        Quaternion qAtt((double)q.w, (double)q.x, (double)q.y, (double)q.z);
+                        Quaternion qOff = Quaternion::FromQREulerAngles(QREulerAngles::FromQEulerAngles(QEulerAngles(
+                            (double)s.offsetRot[0], (double)s.offsetRot[1], (double)s.offsetRot[2])));
+                        Quaternion qCam = (qAtt * qOff).Normalized();
+                        QEulerAngles eCam = qCam.ToQREulerAngles().ToQEulerAngles();
+
+                        // Offset in attachment local basis (forward/right/up)
+                        double fwd[3], right[3], up[3];
+                        QEulerAngles eAtt = qAtt.ToQREulerAngles().ToQEulerAngles();
+                        MakeVectors(eAtt.Roll, eAtt.Pitch, eAtt.Yaw, fwd, right, up);
+
+                        const double dx = (double)s.offsetPos[0];
+                        const double dy = (double)s.offsetPos[1];
+                        const double dz = (double)s.offsetPos[2];
+
+                        Tx = (float)((double)o.x + dx * fwd[0] + dy * right[0] + dz * up[0]);
+                        Ty = (float)((double)o.y + dx * fwd[1] + dy * right[1] + dz * up[1]);
+                        Tz = (float)((double)o.z + dx * fwd[2] + dy * right[2] + dz * up[2]);
+                        Rx = (float)eCam.Pitch;
+                        Ry = (float)eCam.Yaw;
+                        Rz = (float)eCam.Roll;
+
+                        originOrAnglesOverriden = true;
+                        didAttachOverride = true;
+                    }
+                }
+            }
+        }
+    }
 
     if(MirvFovOverride(Fov)) originOrAnglesOverriden = true;
 
-	if(g_MirvInputEx.m_MirvInput->Override(g_MirvInputEx.LastFrameTime, Tx,Ty,Tz,Rx,Ry,Rz,Fov)) originOrAnglesOverriden = true;
+	if(!didAttachOverride) {
+		if(g_MirvInputEx.m_MirvInput->Override(g_MirvInputEx.LastFrameTime, Tx,Ty,Tz,Rx,Ry,Rz,Fov)) originOrAnglesOverriden = true;
+	}
 
 	if(g_b_on_c_view_render_setup_view) {
 		AfxHookSourceRsView currentView = {Tx,Ty,Tz,Rx,Ry,Rz,Fov};
