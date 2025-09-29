@@ -297,7 +297,7 @@ struct AttachEntityEntry {
 };
 
 static std::vector<AttachEntityEntry> g_AttachEntityCache;
-static std::chrono::steady_clock::time_point g_AttachEntityCacheNextRefresh{};
+static bool g_AttachEntityCacheValid = false;
 
 static bool  g_AttachCamEnabled = false;
 static int   g_AttachSelectedHandle = -1; // currently selected (combobox) entity handle
@@ -306,17 +306,8 @@ static int   g_AttachSelectedAttachmentIdx = 1; // 1-based, 0 is invalid per eng
 static float g_AttachOffsetPos[3] = { 0.0f, 0.0f, 0.0f };    // forward, right, up (Source axes)
 static float g_AttachOffsetRot[3] = { 0.0f, 0.0f, 0.0f };    // pitch, yaw, roll (degrees)
 
-// Previous camera state to restore on detach
-// legacy MirvInput snapshot not needed for hook-based attach
-
 static void UpdateAttachEntityCache()
 {
-    using clock = std::chrono::steady_clock;
-    const clock::time_point now = clock::now();
-    if (now < g_AttachEntityCacheNextRefresh)
-        return;
-
-    g_AttachEntityCacheNextRefresh = now + std::chrono::milliseconds(500);
     g_AttachEntityCache.clear();
 
     if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex)
@@ -391,8 +382,61 @@ static CEntityInstance* FindEntityByHandle(int handle, int* outIndex = nullptr)
     return nullptr;
 }
 
-// No per-frame MirvInput camera updates here anymore; camera attach is applied
-// in the engine hook (CSetupView) based on the shared state updated by this UI.
+// Attachment name/index cache for current selection
+struct AttachListItem { int idx; const char* name; };
+static std::unordered_map<int, std::string> g_AttachIdxToName; // idx -> name (empty string if unnamed)
+static std::vector<AttachListItem> g_AttachItems;              // sorted by idx, pointers into map strings
+static int g_AttachCacheHandle = -1;
+static bool g_AttachCacheValid = false;
+
+static void InvalidateAttachmentCache() {
+    g_AttachIdxToName.clear();
+    g_AttachItems.clear();
+    g_AttachCacheHandle = -1;
+    g_AttachCacheValid = false;
+}
+
+static void RebuildAttachmentCacheForSelected() {
+    InvalidateAttachmentCache();
+    if (g_AttachSelectedHandle <= 0) return;
+    int idxTmp = -1;
+    CEntityInstance* ent = FindEntityByHandle(g_AttachSelectedHandle, &idxTmp);
+    if (!ent) return;
+
+    // Known names to probe
+    static const char* kAttachNames[] = {
+        "knife","eholster","pistol","leg_l_iktarget","leg_r_iktarget","defusekit","grenade0","grenade1",
+        "grenade2","grenade3","grenade4","primary","primary_smg","c4","look_straight_ahead_stand",
+        "clip_limit","weapon_hand_l","weapon_hand_r","gun_accurate","weaponhier_l_iktarget",
+        "weaponhier_r_iktarget","look_straight_ahead_crouch","axis_of_intent","muzzle_flash","muzzle_flash2",
+        "camera_inventory","shell_eject","stattrak","weapon_holster_center","stattrak_legacy","nametag",
+        "nametag_legacy","keychain","keychain_legacy"
+    };
+
+    std::unordered_set<int> seen;
+    for (const char* an : kAttachNames) {
+        uint8_t idx = ent->LookupAttachment(an);
+        if (idx != 0 && seen.insert((int)idx).second) {
+            g_AttachIdxToName[(int)idx] = an;
+        }
+    }
+    SOURCESDK::Vector o; SOURCESDK::Quaternion q;
+    for (int i = 1; i <= 64; ++i) {
+        if (ent->GetAttachment((uint8_t)i, o, q)) {
+            if (!seen.count(i)) {
+                g_AttachIdxToName[i] = std::string();
+                seen.insert(i);
+            }
+        }
+    }
+    g_AttachItems.reserve(g_AttachIdxToName.size());
+    for (auto& kv : g_AttachIdxToName) {
+        g_AttachItems.push_back({kv.first, kv.second.empty() ? nullptr : kv.second.c_str()});
+    }
+    std::sort(g_AttachItems.begin(), g_AttachItems.end(), [](const AttachListItem& a, const AttachListItem& b){ return a.idx < b.idx; });
+    g_AttachCacheHandle = g_AttachSelectedHandle;
+    g_AttachCacheValid = true;
+}
 
 //DOF
 static bool g_ShowDofWindow = false;
@@ -1521,8 +1565,6 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     if (g_ShowAttachmentControl) {
         ImGui::Begin("Attachment Control");
         {
-            UpdateAttachEntityCache();
-
             // Enable/Disable button
             const char* btnLbl = g_AttachCamEnabled ? "Detach Camera" : "Attach Camera";
             if (ImGui::Button(btnLbl)) {
@@ -1542,7 +1584,6 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     advancedfx::Message("Overlay: attach camera off\n");
                 }
             }
-
             // Entity selection (players and weapons)
             ImGui::SeparatorText("Entity");
             std::string curEntLabel = "<none>";
@@ -1552,7 +1593,12 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     if (e.handle == g_AttachSelectedHandle) { curEntLabel = e.name; break; }
                 }
             }
+            static bool entityRefreshed = false;
             if (ImGui::BeginCombo("##attach_entity", curEntLabel.c_str())) {
+                if (!entityRefreshed){
+                    UpdateAttachEntityCache();
+                    entityRefreshed = true;
+                }
                 for (const auto& e : g_AttachEntityCache) {
                     char label[256];
                     _snprintf_s(label, _TRUNCATE, "%s %s (idx %d)", e.isPawn ? "[Player]" : (e.isWeapon ? "[Weapon]" : "[Other]"), e.name.c_str(), e.index);
@@ -1569,61 +1615,20 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Select a player pawn or weapon entity");
-            }
+            } else {entityRefreshed = false;}
 
             // Attachment selection: probe name heuristics then fill with remaining indices
+            // build when selection changes, when combo opens, or on refresh
             ImGui::SeparatorText("Attachment");
-            struct AttItem { int idx; const char* name; };
-            static const char* kAttachNames[] = {
-                "knife","eholster","pistol","leg_l_iktarget","leg_r_iktarget","defusekit","grenade0","grenade1",
-                "grenade2","grenade3","grenade4","primary","primary_smg","c4","look_straight_ahead_stand",
-                "clip_limit","weapon_hand_l","weapon_hand_r","gun_accurate","weaponhier_l_iktarget",
-                "weaponhier_r_iktarget","look_straight_ahead_crouch","axis_of_intent","muzzle_flash","muzzle_flash2",
-                "camera_inventory","shell_eject","stattrak","weapon_holster_center","stattrak_legacy","nametag",
-                "nametag_legacy","keychain","keychain_legacy"
-            };
 
-            std::vector<AttItem> items;
-            std::unordered_set<int> seen;
-            std::unordered_map<int, std::string> idxToName;
-
-            if (g_AttachSelectedHandle > 0) {
-                CEntityInstance* ent = FindEntityByHandle(g_AttachSelectedHandle, &g_AttachSelectedIndex);
-                if (ent) {
-                    // First, attempt to resolve indices via name lookup
-                    for (const char* an : kAttachNames) {
-                        uint8_t idx = ent->LookupAttachment(an);
-                        if (idx != 0 && seen.insert((int)idx).second) {
-                            idxToName[(int)idx] = an; // prefer this name for the index
-                        }
-                    }
-                    // Then, probe numeric indices for any additional available ones
-                    SOURCESDK::Vector o; SOURCESDK::Quaternion q;
-                    for (int i = 1; i <= 64; ++i) {
-                        if (ent->GetAttachment((uint8_t)i, o, q)) {
-                            seen.insert(i);
-                            if (!idxToName.count(i)) idxToName[i] = std::string();
-                        }
-                    }
-                    // Build item list sorted by index
-                    items.reserve(idxToName.size());
-                    for (const auto& kv : idxToName) {
-                        items.push_back(AttItem{kv.first, kv.second.empty() ? nullptr : kv.second.c_str()});
-                    }
-                    std::sort(items.begin(), items.end(), [](const AttItem& a, const AttItem& b){ return a.idx < b.idx; });
-                }
-            }
-
+            const bool needBuild = (!g_AttachCacheValid || g_AttachCacheHandle != g_AttachSelectedHandle);
             // Current selection label
             char curBuf[128];
             {
-                const auto it = idxToName.find(g_AttachSelectedAttachmentIdx);
-                if (it != idxToName.end() && !it->second.empty()) {
+                const auto it = g_AttachIdxToName.find(g_AttachSelectedAttachmentIdx);
+                if (it != g_AttachIdxToName.end() && !it->second.empty()) {
                     _snprintf_s(curBuf, _TRUNCATE, "%d - %s", g_AttachSelectedAttachmentIdx, it->second.c_str());
-                } else if (!items.empty()) {
+                } else if (!g_AttachItems.empty()) {
                     _snprintf_s(curBuf, _TRUNCATE, "%d", g_AttachSelectedAttachmentIdx);
                 } else {
                     strcpy_s(curBuf, "<none>");
@@ -1631,7 +1636,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             }
 
             if (ImGui::BeginCombo("##attach_index", curBuf)) {
-                for (const auto& it : items) {
+                if (needBuild) RebuildAttachmentCacheForSelected();
+                for (const auto& it : g_AttachItems) {
                     const bool sel = (g_AttachSelectedAttachmentIdx == it.idx);
                     char label[128];
                     if (it.name) _snprintf_s(label, _TRUNCATE, "%d - %s", it.idx, it.name);
@@ -1643,9 +1649,6 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     if (sel) ImGui::SetItemDefaultFocus();
                 }
                 ImGui::EndCombo();
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Attachment index (1-based). Names to come later.");
             }
 
             // Offsets
