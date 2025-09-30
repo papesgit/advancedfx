@@ -52,6 +52,8 @@
 #include <chrono>
 #include <unordered_set>
 #include <unordered_map>
+#include <map>
+#include <thread>
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -240,6 +242,25 @@ static bool g_CurveNormalize = true;             // normalize each channel to it
 static bool g_CurveShow[7] = { false, false, false, false, false, false, false }; // start with no curves visible by default
 // Focused channel for editing handles (-1 = all visible channels editable)
 static int g_CurveFocusChannel = -1;
+
+// Multikill Browser (demo parser integration)
+static bool g_ShowMultikillWindow = false;
+struct MultikillEvent {
+    uint64_t steamId = 0;
+    std::string player;
+    int round = 0;
+    int count = 0;
+    int startTick = 0;
+    int endTick = 0;
+    std::vector<std::string> victims;
+};
+static std::vector<MultikillEvent> g_MkEvents;
+static bool g_MkParsing = false;
+static std::string g_MkParseError;
+static char g_MkParserPath[1024] = "x64/DemoParser.exe";  // defaults to PATH lookup
+static char g_MkDemoPath[2048] = "";
+static std::thread g_MkWorker;
+static std::mutex g_MkMutex; // protects g_MkEvents / g_MkParseError while worker updates
 
 // Context menu target (you already added this var earlier)
 static int g_CurveCtxKeyIndex = -1;
@@ -745,6 +766,267 @@ static bool CallImGuiWndProcGuarded(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
     bool handled = ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam) ? true : false;
     s_in_imgui = false;
     return handled;
+}
+
+
+// Multikill Parser helpers
+static std::wstring Mk_Utf8ToWide(const std::string& s)
+{
+    if (s.empty()) return std::wstring();
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return std::wstring();
+    std::wstring ws; ws.resize((size_t)wlen - 1);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], wlen);
+    return ws;
+}
+
+static bool Mk_RunProcessCapture(const std::wstring& cmdLine, std::string& outStdout, std::string& outError)
+{
+    outStdout.clear(); outError.clear();
+
+    SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
+    HANDLE hReadOut = NULL, hWriteOut = NULL;
+    HANDLE hReadErr = NULL, hWriteErr = NULL;
+    if (!CreatePipe(&hReadOut, &hWriteOut, &sa, 0)) { outError = "CreatePipe stdout failed"; return false; }
+    if (!CreatePipe(&hReadErr, &hWriteErr, &sa, 0)) { CloseHandle(hReadOut); CloseHandle(hWriteOut); outError = "CreatePipe stderr failed"; return false; }
+    SetHandleInformation(hReadOut, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(hReadErr, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    si.dwFlags |= STARTF_USESTDHANDLES;
+    si.hStdOutput = hWriteOut;
+    si.hStdError  = hWriteErr;
+
+    PROCESS_INFORMATION pi{};
+    std::wstring cl = cmdLine; // CreateProcessW may modify buffer
+    BOOL ok = CreateProcessW(
+        nullptr,
+        &cl[0],
+        nullptr,
+        nullptr,
+        TRUE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &si,
+        &pi
+    );
+    CloseHandle(hWriteOut); hWriteOut = NULL;
+    CloseHandle(hWriteErr); hWriteErr = NULL;
+
+    if (!ok) {
+        DWORD err = GetLastError();
+        char buf[128]; _snprintf_s(buf, _TRUNCATE, "CreateProcessW failed (%lu)", (unsigned long)err);
+        outError = buf;
+        CloseHandle(hReadOut); CloseHandle(hReadErr);
+        return false;
+    }
+
+    // Read pipes until both are closed
+    auto read_all = [](HANDLE h, std::string& dst){
+        char tmp[4096]; DWORD got = 0;
+        for (;;) {
+            if (!ReadFile(h, tmp, (DWORD)sizeof(tmp), &got, nullptr) || got == 0) break;
+            dst.append(tmp, tmp + got);
+        }
+    };
+
+    read_all(hReadOut, outStdout);
+    read_all(hReadErr, outError);
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(hReadOut);
+    CloseHandle(hReadErr);
+    return true;
+}
+
+static std::wstring Mk_SearchExeOnPath(const std::wstring& exeName)
+{
+    wchar_t buf[MAX_PATH];
+    DWORD n = SearchPathW(nullptr, exeName.c_str(), nullptr, (DWORD)MAX_PATH, buf, nullptr);
+    if (n > 0 && n < MAX_PATH) return std::wstring(buf);
+    return exeName; // fall back to provided name
+}
+
+// Split a JSON stream (array or NDJSON or concatenated objects) into object strings.
+static std::vector<std::string> Mk_SplitJsonObjects(const std::string& s)
+{
+    std::vector<std::string> out;
+    size_t i = 0, n = s.size();
+    // Skip optional whitespace and an opening '[' if present
+    while (i < n && (unsigned char)s[i] <= ' ') ++i;
+    bool hadArray = (i < n && s[i] == '[');
+    if (hadArray) ++i;
+
+    int depth = 0; bool inStr = false; bool esc = false; size_t start = std::string::npos;
+    for (; i < n; ++i) {
+        char c = s[i];
+        if (inStr) {
+            if (esc) { esc = false; continue; }
+            if (c == '\\') { esc = true; continue; }
+            if (c == '"') { inStr = false; }
+            continue;
+        } else {
+            if (c == '"') { inStr = true; continue; }
+            if (c == '{') {
+                if (depth == 0) start = i;
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0 && start != std::string::npos) {
+                    out.emplace_back(s.substr(start, i - start + 1));
+                    start = std::string::npos;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+static bool Mk_ExtractQuoted(const std::string& s, size_t& i, std::string& out)
+{
+    out.clear();
+    if (i >= s.size() || s[i] != '"') return false;
+    ++i; bool esc = false;
+    for (; i < s.size(); ++i) {
+        char c = s[i];
+        if (esc) { out.push_back(c); esc = false; continue; }
+        if (c == '\\') { esc = true; continue; }
+        if (c == '"') { ++i; return true; }
+        out.push_back(c);
+    }
+    return false;
+}
+
+static bool Mk_FindStringField(const std::string& obj, const char* key, std::string& out)
+{
+    out.clear();
+    std::string pat = std::string("\"") + key + "\"";
+    size_t p = obj.find(pat);
+    if (p == std::string::npos) return false;
+    p = obj.find(':', p);
+    if (p == std::string::npos) return false;
+    // skip whitespace
+    while (p < obj.size() && (unsigned char)obj[p] != '"') ++p;
+    if (p >= obj.size()) return false;
+    return Mk_ExtractQuoted(obj, p, out);
+}
+
+static bool Mk_FindIntField(const std::string& obj, const char* key, long long& out)
+{
+    std::string pat = std::string("\"") + key + "\"";
+    size_t p = obj.find(pat);
+    if (p == std::string::npos) return false;
+    p = obj.find(':', p);
+    if (p == std::string::npos) return false;
+    ++p; // after ':'
+    // skip whitespace
+    while (p < obj.size() && (unsigned char)obj[p] <= ' ') ++p;
+    // optional quotes (just in case)
+    bool quoted = (p < obj.size() && obj[p] == '"');
+    if (quoted) ++p;
+    size_t start = p;
+    while (p < obj.size() && (obj[p] == '-' || (obj[p] >= '0' && obj[p] <= '9'))) ++p;
+    if (p == start) return false;
+    std::string num = obj.substr(start, p - start);
+    out = _strtoui64(num.c_str(), nullptr, 10);
+    return true;
+}
+
+static bool Mk_FindVictimsArray(const std::string& obj, std::vector<std::string>& victims)
+{
+    victims.clear();
+    std::string pat = "\"Victims\"";
+    size_t p = obj.find(pat);
+    if (p == std::string::npos) return false;
+    p = obj.find(':', p);
+    if (p == std::string::npos) return false;
+    ++p; while (p < obj.size() && (unsigned char)obj[p] <= ' ') ++p;
+    if (p >= obj.size() || obj[p] != '[') return false;
+    ++p;
+    while (p < obj.size()) {
+        while (p < obj.size() && (unsigned char)obj[p] <= ' ') ++p;
+        if (p < obj.size() && obj[p] == ']') { ++p; break; }
+        if (p >= obj.size()) break;
+        std::string v;
+        if (!Mk_ExtractQuoted(obj, p, v)) break;
+        victims.push_back(v);
+        while (p < obj.size() && (unsigned char)obj[p] <= ' ') ++p;
+        if (p < obj.size() && obj[p] == ',') { ++p; continue; }
+    }
+    return !victims.empty();
+}
+
+static bool Mk_ParseJsonObject(const std::string& obj, MultikillEvent& ev)
+{
+    ev = MultikillEvent();
+    long long tmp = 0;
+    if (Mk_FindIntField(obj, "SteamID", tmp)) ev.steamId = (uint64_t)tmp; else ev.steamId = 0;
+    Mk_FindStringField(obj, "Player", ev.player);
+    if (Mk_FindIntField(obj, "Round", tmp)) ev.round = (int)tmp;
+    if (Mk_FindIntField(obj, "Count", tmp)) ev.count = (int)tmp;
+    if (Mk_FindIntField(obj, "StartTick", tmp)) ev.startTick = (int)tmp;
+    if (Mk_FindIntField(obj, "EndTick", tmp)) ev.endTick = (int)tmp;
+    Mk_FindVictimsArray(obj, ev.victims);
+    // consider valid if we have at least round + start tick
+    return ev.round > 0 && ev.startTick >= 0;
+}
+
+static void Mk_StartParseThread(const std::string& parserPathUtf8, const std::string& demoPathUtf8)
+{
+    if (g_MkParsing) return;
+    if (g_MkWorker.joinable()) {
+        // prior worker finished, join it now
+        g_MkWorker.join();
+    }
+    g_MkParsing = true;
+    g_MkParseError.clear();
+    {
+        std::lock_guard<std::mutex> lk(g_MkMutex);
+        g_MkEvents.clear();
+    }
+    g_MkWorker = std::thread([parserPathUtf8, demoPathUtf8]() {
+        std::wstring wExe = Mk_Utf8ToWide(parserPathUtf8);
+        if (wExe.find(L"\\") == std::wstring::npos && wExe.find(L"/") == std::wstring::npos) {
+            wExe = Mk_SearchExeOnPath(wExe);
+        }
+        std::wstring wDemo = Mk_Utf8ToWide(demoPathUtf8);
+        std::wstring cmd = L"\"" + wExe + L"\" \"" + wDemo + L"\"";
+
+        std::string out; std::string err;
+        bool ok = Mk_RunProcessCapture(cmd, out, err);
+        std::vector<MultikillEvent> parsed;
+        std::string parseError;
+        if (!ok) {
+            parseError = err.empty() ? std::string("Failed to start DemoParser.exe") : err;
+        } else {
+            auto objs = Mk_SplitJsonObjects(out);
+            for (const auto& o : objs) {
+                MultikillEvent ev; if (Mk_ParseJsonObject(o, ev)) parsed.push_back(ev);
+            }
+            if (parsed.empty()) {
+                // If no objects recognized, try NDJSON by lines
+                size_t pos = 0; size_t nl;
+                while (pos < out.size() && (nl = out.find('\n', pos)) != std::string::npos) {
+                    std::string line = out.substr(pos, nl - pos);
+                    pos = nl + 1;
+                    if (line.find('{') != std::string::npos && line.find('}') != std::string::npos) {
+                        MultikillEvent ev; if (Mk_ParseJsonObject(line, ev)) parsed.push_back(ev);
+                    }
+                }
+                if (parsed.empty() && !err.empty()) parseError = err;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(g_MkMutex);
+            if (!parseError.empty()) g_MkParseError = parseError; else g_MkParseError.clear();
+            g_MkEvents = std::move(parsed);
+        }
+        g_MkParsing = false;
+    });
 }
 
 
@@ -1415,6 +1697,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             }
             if (ImGui::Checkbox("Show Attachment Control", &g_ShowAttachmentControl)) {
             }
+            ImGui::Checkbox("Show Multikill Browser", &g_ShowMultikillWindow);
             static bool s_nearZtoggle = false;
             if (ImGui::Checkbox("Near-Z 1", &s_nearZtoggle)) {
                 if (s_nearZtoggle) Afx_ExecClientCmd("r_nearz 1"); else Afx_ExecClientCmd("r_nearz -1");
@@ -1901,6 +2184,163 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
         ImGui::End();
 
+    }
+
+    if (g_ShowMultikillWindow) {
+        ImGui::Begin("Multikill Browser", &g_ShowMultikillWindow, ImGuiWindowFlags_NoCollapse);
+        // One-time default parser path: HLAE folder + DemoParser.exe if available
+        static bool s_mkInit = false;
+        if (!s_mkInit) {
+            const wchar_t* hf = GetHlaeFolderW();
+            if (hf && *hf) {
+                std::wstring w = hf; w += L"x64/DemoParser.exe";
+                DWORD attr = GetFileAttributesW(w.c_str());
+                if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                    int needed = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                    if (needed > 0) {
+                        std::string u; u.resize((size_t)needed - 1);
+                        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &u[0], needed, nullptr, nullptr);
+                        strncpy_s(g_MkParserPath, u.c_str(), _TRUNCATE);
+                    }
+                }
+            }
+            s_mkInit = true;
+        }
+        // Inputs: parser path and demo path
+        ImGuiStyle& stMk = ImGui::GetStyle();
+        float availMk = ImGui::GetContentRegionAvail().x;
+        float btnW = ImGui::CalcTextSize("Browse...").x + stMk.FramePadding.x * 2.0f;
+        float gap = stMk.ItemInnerSpacing.x;
+        float boxW = availMk - (btnW + gap);
+        if (boxW < 100.0f) boxW = 100.0f;
+
+        ImGui::TextUnformatted("Demo (.dem)");
+        ImGui::SetNextItemWidth(boxW);
+        ImGui::InputText("##mk_demo", g_MkDemoPath, (int)sizeof(g_MkDemoPath));
+        ImGui::SameLine();
+        static ImGui::FileBrowser s_mkDialog(
+            ImGuiFileBrowserFlags_CloseOnEsc |
+            ImGuiFileBrowserFlags_EditPathString |
+            ImGuiFileBrowserFlags_CreateNewDir
+        );
+        static bool s_mkDialogInit = false;
+        if (!s_mkDialogInit) { s_mkDialog.SetTitle("Select demo"); s_mkDialogInit = true; }
+        if (ImGui::Button("Browse...##mk_demo")) {
+            if (!g_OverlayPaths.demoDir.empty()) s_mkDialog.SetDirectory(g_OverlayPaths.demoDir);
+            s_mkDialog.Open();
+        }
+        s_mkDialog.Display();
+        if (s_mkDialog.HasSelected()) {
+            const std::string path = s_mkDialog.GetSelected().string();
+            strncpy_s(g_MkDemoPath, path.c_str(), _TRUNCATE);
+            try { g_OverlayPaths.demoDir = std::filesystem::path(path).parent_path().string(); } catch(...) {}
+            ImGui::MarkIniSettingsDirty();
+            s_mkDialog.ClearSelected();
+        }
+
+        // Parse button
+        bool canParse = !g_MkParsing && g_MkDemoPath[0] != 0 && g_MkParserPath[0] != 0;
+        if (!canParse) ImGui::BeginDisabled();
+        if (ImGui::Button("Parse demo")) {
+            Mk_StartParseThread(std::string(g_MkParserPath), std::string(g_MkDemoPath));
+        }
+        if (!canParse) ImGui::EndDisabled();
+        if (g_MkParsing) {
+            ImGui::SameLine();
+            ImGui::TextUnformatted("Parsing... please wait");
+        }
+        // Results
+        std::vector<MultikillEvent> snapshot;
+        std::string parseErr;
+        {
+            std::lock_guard<std::mutex> lk(g_MkMutex);
+            snapshot = g_MkEvents;
+            parseErr = g_MkParseError;
+        }
+        if (!parseErr.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255,80,80,255));
+            ImGui::TextWrapped("%s", parseErr.c_str());
+            ImGui::PopStyleColor();
+        }
+        if (!snapshot.empty()) {
+            const ImGuiTableFlags tblFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable;
+            if (ImGui::BeginTable("##mk_tbl_all", 4, tblFlags)) {
+                // Columns: Round, Player, Kills, Victims, Actions
+                ImGui::TableSetupColumn("Round", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("0000").x + ImGui::GetStyle().FramePadding.x * 2.0f);
+                ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("Kills", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("0000").x + ImGui::GetStyle().FramePadding.x * 2.0f);
+                ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Goto Start").x + ImGui::GetStyle().FramePadding.x * 8.0f);
+                ImGui::TableHeadersRow();
+
+                // Build order
+                std::vector<int> order; order.reserve(snapshot.size());
+                for (int i = 0; i < (int)snapshot.size(); ++i) order.push_back(i);
+
+                // Apply sort specs (primary column only)
+                if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
+                    if (sort->SpecsCount > 0) {
+                        const ImGuiTableColumnSortSpecs& sp = sort->Specs[0];
+                        const bool asc = (sp.SortDirection == ImGuiSortDirection_Ascending);
+                        auto icompare = [&](int a, int b)->bool {
+                            const auto& ea = snapshot[(size_t)a];
+                            const auto& eb = snapshot[(size_t)b];
+                            int r = 0;
+                            switch (sp.ColumnIndex) {
+                                case 0: // Round
+                                    r = (ea.round < eb.round) ? -1 : (ea.round > eb.round ? 1 : 0);
+                                    break;
+                                case 1: // Player
+                                    r = _stricmp(ea.player.c_str(), eb.player.c_str());
+                                    break;
+                                case 2: // Kills
+                                    r = (ea.count < eb.count) ? -1 : (ea.count > eb.count ? 1 : 0);
+                                    break;
+                                default:
+                                    r = 0; break;
+                            }
+                            return asc ? (r < 0) : (r > 0);
+                        };
+                        std::stable_sort(order.begin(), order.end(), icompare);
+                        sort->SpecsDirty = false;
+                    } else {
+                        std::stable_sort(order.begin(), order.end(), [&](int a, int b){ return snapshot[(size_t)a].round < snapshot[(size_t)b].round; });
+                    }
+                } else {
+                    std::stable_sort(order.begin(), order.end(), [&](int a, int b){ return snapshot[(size_t)a].round < snapshot[(size_t)b].round; });
+                }
+
+                for (int idx : order) {
+                    const auto& e = snapshot[(size_t)idx];
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0); ImGui::Text("%d", e.round);
+                    ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(e.player.c_str());
+                    ImGui::TableSetColumnIndex(2); ImGui::Text("%d", e.count);
+                    if (ImGui::IsItemHovered()) {
+                        std::string vj; vj.reserve(64);
+                        for (size_t vi = 0; vi < e.victims.size(); ++vi) { if (vi) vj += ", "; vj += e.victims[vi]; }
+                        ImGui::SetTooltip("%s", vj.c_str());
+                    }
+                    ImGui::TableSetColumnIndex(3);
+                    char startLbl[64]; _snprintf_s(startLbl, _TRUNCATE, "Goto Start##mk_%d", idx);
+                    static double s_gotoFrame = -1.0;
+                    static std::string s_pendingCmd;
+                    if (ImGui::SmallButton(startLbl)) {
+                        s_gotoFrame = ImGui::GetFrameCount();
+                        char cmd1[128]; _snprintf_s(cmd1, _TRUNCATE, "demo_gototick %d", e.startTick - 128);
+                        char cmd2[128]; _snprintf_s(cmd2, _TRUNCATE, "spec_player %s; spec_mode 2", e.player.c_str());
+                        s_pendingCmd = cmd2;
+                        Afx_ExecClientCmd(cmd1);
+                    }
+                    if (s_gotoFrame >= 0.0 && ImGui::GetFrameCount() > s_gotoFrame) {
+                        Afx_ExecClientCmd(s_pendingCmd.c_str());
+                        s_pendingCmd.clear();
+                        s_gotoFrame = -1.0;
+                    }
+                }
+                ImGui::EndTable();
+            }
+        }
+        ImGui::End();
     }
 
     if (g_ShowBackbufferWindow) {

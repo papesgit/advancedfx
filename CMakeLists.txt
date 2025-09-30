@@ -265,5 +265,29 @@ elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
             ${AFXHOOKSOURCE2SNIPPETS_OUTPUTS}
         DESTINATION "bin/resources/AfxHookSource2/snippets"
     )
-endif()
+    # DemoParser(.NET)
+    # Let users override where 'dotnet' is if needed:
+    set(DOTNET_EXE "dotnet" CACHE FILEPATH "Path to dotnet CLI")
 
+    set(DP_SRC   "${CMAKE_SOURCE_DIR}/tools/DemoParser")
+    set(DP_PROJ  "${DP_SRC}/DemoParser.csproj")
+    set(DP_OUT   "${CMAKE_BINARY_DIR}/DemoParser-publish/win-x64")
+
+    # publish framework-dependent
+    add_custom_command(
+    OUTPUT "${DP_OUT}/stamp"
+    COMMAND "${DOTNET_EXE}" restore "${DP_PROJ}"
+    COMMAND "${DOTNET_EXE}" publish "${DP_PROJ}"
+            -c $<CONFIG> -r win-x64 --self-contained false
+            -o "${DP_OUT}"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${DP_OUT}/stamp"
+    WORKING_DIRECTORY "${DP_SRC}"
+    COMMENT "Publishing DemoParser (framework-dependent, multi-file)"
+    VERBATIM
+    )
+    add_custom_target(DemoParser ALL DEPENDS "${DP_OUT}/stamp")
+
+    # Install
+    install(DIRECTORY "${DP_OUT}/" DESTINATION "bin/x64")
+
+endif()
