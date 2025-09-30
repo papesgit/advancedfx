@@ -1316,6 +1316,10 @@ bool OverlayDx11::Initialize() {
 void OverlayDx11::Shutdown() {
 #ifdef _WIN32
     if (!m_Initialized) return;
+    // Ensure multikill worker thread is not left joinable (MSVC debug would abort on destruction).
+    if (g_MkWorker.joinable()) {
+        g_MkWorker.join();
+    }
     m_Rtv.width = m_Rtv.height = 0;
     ReleaseBackbufferPreview();
     ImGui_ImplDX11_Shutdown();
@@ -2339,6 +2343,10 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 }
                 ImGui::EndTable();
             }
+        }
+        // Ensure background parser thread is joined after completion to avoid Debug CRT abort on joinable destructor.
+        if (!g_MkParsing && g_MkWorker.joinable()) {
+            g_MkWorker.join();
         }
         ImGui::End();
     }
