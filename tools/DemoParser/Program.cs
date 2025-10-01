@@ -3,22 +3,31 @@ using System.Diagnostics;
 using System.Text.Json;
 using DemoFile;
 using DemoFile.Game.Cs;
+using System.Linq;
 
-record MultiKill(
-    ulong SteamID, string Player, int Round, int Count,
-    int StartTick, int EndTick, string[] Victims
+record RoundKills(
+    int Round,
+    int StartTick,
+    List<KillEvent> Kills
 );
 
-// per-section payload (like StringBuilder in the sample)
-record SectionData(
-    List<Kill> Kills,
-    List<int> RoundStarts
-);
-
-record Kill(
+record KillEvent(
     int Tick,
-    ulong AttackerSid, string AttackerName,
-    ulong VictimSid,   string VictimName
+    ulong AttackerSid, string AttackerName, string AttackerTeam,
+    ulong VictimSid,   string VictimName, string VictimTeam,
+    string Weapon,
+    bool Headshot,
+    bool Noscope,
+    bool Attackerinair,
+    bool Attackerblind,
+    int  Penetrated,
+    bool Thrusmoke
+);
+
+// Data we collect per parallel section
+record SectionData(
+    List<KillEvent> Kills,
+    List<int> RoundStarts
 );
 
 class Program
@@ -28,85 +37,93 @@ class Program
         var path = args.SingleOrDefault() ?? throw new Exception("Expected a single argument: <path to .dem>");
         var sw = Stopwatch.StartNew();
 
-        // Parse in parallel exactly like the sample
         var sections = await DemoFileReader<CsDemoParser>.ReadAllParallelAsync(
             File.ReadAllBytes(path),
             SetupSection,
             default
         );
 
-        // ---------- MERGE PHASE ----------
-        // 1) merge & de-dupe kills across sections (boundary overlap)
-        var allKills = sections.SelectMany(s => s.Kills)
-            .GroupBy(k => (k.Tick, k.AttackerSid, k.VictimSid))
+        // ---- MERGE PHASE ----
+
+        // Merge & de-dupe kills across sections (boundary overlap)
+        var allKills = sections
+            .SelectMany(s => s.Kills)
+            .GroupBy(k => (k.Tick, k.AttackerSid, k.VictimSid)) // sufficient to de-dupe
             .Select(g => g.First())
             .OrderBy(k => k.Tick)
             .ToList();
 
-        // 2) merge & sort RoundStart ticks
+        // Merge & sort RoundStart ticks
         var starts = sections.SelectMany(s => s.RoundStarts)
             .Distinct()
             .OrderBy(t => t)
             .ToList();
 
-        // helper: round index via last start ≤ tick (1-based). returns -1 if before first start.
-        int RoundOfTick(int tick)
+        // Prepare an output round bucket for each start
+        var rounds = starts.Select((s, i) => new RoundKills(i + 1, s, new List<KillEvent>())).ToList();
+
+        // Helper: find last start <= tick (binary search). Returns index, or -1 if before first start.
+        int IndexOfRound(int tick)
         {
-            if (starts.Count == 0) return -1;
-            int i = starts.BinarySearch(tick);
-            if (i < 0) i = ~i - 1;     // index of last start <= tick
-            return i >= 0 ? i + 1 : -1;
+            if (rounds.Count == 0) return -1;
+            var startTicks = starts; // alias
+            int i = startTicks.BinarySearch(tick);
+            if (i < 0) i = ~i - 1;
+            return i;
         }
 
-        // 3) assign kills to rounds, then aggregate multikills
-        var multiKills = allKills
-            .Select(k => (Round: RoundOfTick(k.Tick), K: k))
-            .Where(x => x.Round > 0) // skip warmup / pregame
-            .GroupBy(x => (x.Round, x.K.AttackerSid))
-            .Select(g =>
-            {
-                var kills = g.Select(x => x.K).OrderBy(k => k.Tick).ToList();
-                if (kills.Count < 2) return null; // only multi-kills
+        // Assign each kill to its round
+        foreach (var k in allKills)
+        {
+            int idx = IndexOfRound(k.Tick);
+            if (idx >= 0 && idx < rounds.Count)
+                rounds[idx].Kills.Add(k);
+        }
 
-                // choose the most frequent attacker name we saw in that round
-                var name = kills.Select(k => k.AttackerName)
-                                .GroupBy(n => n)
-                                .OrderByDescending(gg => gg.Count())
-                                .First().Key;
+        // Optional: drop empty rounds (if any)
+        var output = rounds.Where(r => r.Kills.Count > 0).ToList();
 
-                return new MultiKill(
-                    g.Key.AttackerSid,
-                    name,
-                    g.Key.Round,
-                    kills.Count,
-                    kills.First().Tick,
-                    kills.Last().Tick,
-                    kills.Select(k => k.VictimName).ToArray()
-                );
-            })
-            .Where(m => m is not null)!
-            .OrderBy(m => m!.StartTick)
-            .ToList();
-
-        Console.WriteLine(JsonSerializer.Serialize(multiKills, new JsonSerializerOptions { WriteIndented = true }));
+        Console.WriteLine(JsonSerializer.Serialize(output, new JsonSerializerOptions { WriteIndented = true }));
         Console.Error.WriteLine($"Finished in {sw.Elapsed.TotalSeconds:N3}s");
     }
 
-    // Mirrors the sample’s SetupSection, but we store Kills + RoundStarts
+    // Mirrors the repo's MultiThreaded SetupSection, but records richer kill info + RoundStarts
     private static SectionData SetupSection(CsDemoParser demo)
     {
-        var kills = new List<Kill>();
+        var kills = new List<KillEvent>();
         var starts = new List<int>();
 
         demo.Source1GameEvents.PlayerDeath += e =>
         {
             if (e.Attacker is null || e.Player is null) return;
-            if (ReferenceEquals(e.Attacker, e.Player)) return; // suicides
+            if (ReferenceEquals(e.Attacker, e.Player)) return; // ignore suicides
 
-            kills.Add(new Kill(
-                demo.CurrentDemoTick.Value,
-                e.Attacker.SteamID, e.Attacker.PlayerName ?? e.Attacker.SteamID.ToString(),
-                e.Player.SteamID,   e.Player.PlayerName   ?? "unknown"
+            var tick = demo.CurrentDemoTick.Value;
+
+            // NB: Property names use what you listed (Noscope, Attackerinair, Attackerblind, Penetrated).
+            var weapon   = e.Weapon ?? "";
+            var headshot = e.Headshot;
+            var noscope  = e.Noscope;
+            var inAir    = e.Attackerinair;
+            var blind    = e.Attackerblind;
+            var pen      = e.Penetrated;
+            var smoke    = e.Thrusmoke;
+
+            kills.Add(new KillEvent(
+                Tick: tick,
+                AttackerSid: e.Attacker.SteamID,
+                AttackerName: e.Attacker.PlayerName ?? e.Attacker.SteamID.ToString(),
+                AttackerTeam: e.Attacker.Team.Teamname,
+                VictimSid: e.Player.SteamID,
+                VictimName: e.Player.PlayerName ?? "unknown",
+                VictimTeam: e.Player.Team.Teamname,
+                Weapon: weapon,
+                Headshot: headshot,
+                Noscope: noscope,
+                Attackerinair: inAir,
+                Attackerblind: blind,
+                Penetrated: pen,
+                Thrusmoke: smoke
             ));
         };
 
@@ -115,7 +132,11 @@ class Program
             starts.Add(demo.CurrentDemoTick.Value);
         };
 
-        // We intentionally DO NOT use RoundEnd for round assignment.
+        demo.Source1GameEvents.RoundAnnounceMatchStart += _ =>
+        {
+            starts.Add(demo.CurrentDemoTick.Value);
+        };
+
         return new SectionData(kills, starts);
     }
 }

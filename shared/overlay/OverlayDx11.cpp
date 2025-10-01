@@ -54,6 +54,7 @@
 #include <unordered_map>
 #include <map>
 #include <thread>
+#include <limits.h>
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -245,6 +246,8 @@ static int g_CurveFocusChannel = -1;
 
 // Multikill Browser (demo parser integration)
 static bool g_ShowMultikillWindow = false;
+// Event browser view mode: 0=Multikills, 1=Noscope, 2=Wallbang, 3=Jumpshot
+static int g_MkViewMode = 0;
 struct MultikillEvent {
     uint64_t steamId = 0;
     std::string player;
@@ -255,6 +258,23 @@ struct MultikillEvent {
     std::vector<std::string> victims;
 };
 static std::vector<MultikillEvent> g_MkEvents;
+// Flat kill rows for alternate event views
+struct Mk_EventKill {
+    int round = 0;
+    int tick = 0;
+    uint64_t attackerSid = 0;
+    std::string attackerName;
+    std::string victimName;
+    std::string attackerTeam;
+    std::string victimTeam;
+    std::string weapon;
+    bool noscope = false;
+    bool inAir = false; // Attackerinair
+    bool blind = false; // Attackerblind
+    int penetrated = 0; // >0 means wallbang
+    bool smoke = false;
+};
+static std::vector<Mk_EventKill> g_MkAllKills;
 static bool g_MkParsing = false;
 static std::string g_MkParseError;
 static char g_MkParserPath[1024] = "x64/DemoParser.exe";  // defaults to PATH lookup
@@ -935,43 +955,142 @@ static bool Mk_FindIntField(const std::string& obj, const char* key, long long& 
     return true;
 }
 
-static bool Mk_FindVictimsArray(const std::string& obj, std::vector<std::string>& victims)
+static bool Mk_FindBoolField(const std::string& obj, const char* key, bool& out)
 {
-    victims.clear();
-    std::string pat = "\"Victims\"";
+    std::string pat = std::string("\"") + key + "\"";
+    size_t p = obj.find(pat);
+    if (p == std::string::npos) return false;
+    p = obj.find(':', p);
+    if (p == std::string::npos) return false;
+    ++p; // after ':'
+    while (p < obj.size() && (unsigned char)obj[p] <= ' ') ++p;
+    if (p >= obj.size()) return false;
+    char c = obj[p];
+    if (c == 't' || c == 'T' || c == 'f' || c == 'F') {
+        // unquoted true/false
+        if (p + 4 <= obj.size() && 0 == _strnicmp(&obj[p], "true", 4)) { out = true; return true; }
+        if (p + 5 <= obj.size() && 0 == _strnicmp(&obj[p], "false", 5)) { out = false; return true; }
+        // Fallback: treat any token starting with 't' as true, 'f' as false
+        out = (c == 't' || c == 'T');
+        return true;
+    }
+    if (c == '0' || c == '1') { out = (c == '1'); return true; }
+    if (c == '"') {
+        ++p; size_t start = p;
+        while (p < obj.size() && obj[p] != '"') ++p;
+        if (p > start) {
+            std::string val = obj.substr(start, p - start);
+            out = (0 == _stricmp(val.c_str(), "true") || 0 == _stricmp(val.c_str(), "1") || 0 == _stricmp(val.c_str(), "yes"));
+            return true;
+        }
+    }
+    return false;
+}
+
+struct Mk_KillRow {
+    int tick = 0;
+    uint64_t attackerSid = 0;
+    std::string attackerName;
+    std::string victimName;
+    std::string attackerTeam;
+    std::string victimTeam;
+    std::string weapon;
+    bool noscope = false;
+    bool inAir = false;
+    bool blind = false;
+    int penetrated = 0;
+    bool smoke = false;
+};
+
+static bool Mk_FindArrayOfObjects(const std::string& obj, const char* key, std::vector<std::string>& objects)
+{
+    objects.clear();
+    std::string pat = std::string("\"") + key + "\"";
     size_t p = obj.find(pat);
     if (p == std::string::npos) return false;
     p = obj.find(':', p);
     if (p == std::string::npos) return false;
     ++p; while (p < obj.size() && (unsigned char)obj[p] <= ' ') ++p;
     if (p >= obj.size() || obj[p] != '[') return false;
-    ++p;
-    while (p < obj.size()) {
-        while (p < obj.size() && (unsigned char)obj[p] <= ' ') ++p;
-        if (p < obj.size() && obj[p] == ']') { ++p; break; }
-        if (p >= obj.size()) break;
-        std::string v;
-        if (!Mk_ExtractQuoted(obj, p, v)) break;
-        victims.push_back(v);
-        while (p < obj.size() && (unsigned char)obj[p] <= ' ') ++p;
-        if (p < obj.size() && obj[p] == ',') { ++p; continue; }
+    // Parse bracketed list extracting object substrings by brace depth
+    int depth = 0; bool inStr = false; bool esc = false; size_t startObj = std::string::npos; ++p; // skip '['
+    for (; p < obj.size(); ++p) {
+        char c = obj[p];
+        if (inStr) {
+            if (esc) { esc = false; continue; }
+            if (c == '\\') { esc = true; continue; }
+            if (c == '"') { inStr = false; }
+            continue;
+        } else {
+            if (c == '"') { inStr = true; continue; }
+            if (c == '{') { if (depth == 0) startObj = p; depth++; }
+            else if (c == '}') { depth--; if (depth == 0 && startObj != std::string::npos) { objects.emplace_back(obj.substr(startObj, p - startObj + 1)); startObj = std::string::npos; } }
+            else if (c == ']') { break; }
+        }
     }
-    return !victims.empty();
+    return !objects.empty();
 }
 
-static bool Mk_ParseJsonObject(const std::string& obj, MultikillEvent& ev)
+static bool Mk_ParseKillObject(const std::string& obj, Mk_KillRow& row)
 {
-    ev = MultikillEvent();
+    row = Mk_KillRow();
     long long tmp = 0;
-    if (Mk_FindIntField(obj, "SteamID", tmp)) ev.steamId = (uint64_t)tmp; else ev.steamId = 0;
-    Mk_FindStringField(obj, "Player", ev.player);
-    if (Mk_FindIntField(obj, "Round", tmp)) ev.round = (int)tmp;
-    if (Mk_FindIntField(obj, "Count", tmp)) ev.count = (int)tmp;
-    if (Mk_FindIntField(obj, "StartTick", tmp)) ev.startTick = (int)tmp;
-    if (Mk_FindIntField(obj, "EndTick", tmp)) ev.endTick = (int)tmp;
-    Mk_FindVictimsArray(obj, ev.victims);
-    // consider valid if we have at least round + start tick
-    return ev.round > 0 && ev.startTick >= 0;
+    if (Mk_FindIntField(obj, "Tick", tmp)) row.tick = (int)tmp; else return false;
+    if (Mk_FindIntField(obj, "AttackerSid", tmp)) row.attackerSid = (uint64_t)tmp; else row.attackerSid = 0;
+    Mk_FindStringField(obj, "AttackerName", row.attackerName);
+    Mk_FindStringField(obj, "VictimName", row.victimName);
+    Mk_FindStringField(obj, "AttackerTeam", row.attackerTeam);
+    Mk_FindStringField(obj, "VictimTeam", row.victimTeam);
+    Mk_FindStringField(obj, "Weapon", row.weapon);
+    // booleans and ints (lenient parsing from literal/string/number)
+    long long iv = 0; bool bv = false;
+    if (Mk_FindIntField(obj, "Penetrated", iv)) row.penetrated = (int)iv;
+    if (Mk_FindBoolField(obj, "Noscope", bv)) row.noscope = bv;
+    if (Mk_FindBoolField(obj, "Attackerinair", bv) || Mk_FindBoolField(obj, "AttackerInAir", bv)) row.inAir = bv;
+    if (Mk_FindBoolField(obj, "Attackerblind", bv) || Mk_FindBoolField(obj, "AttackerBlind", bv)) row.blind = bv;
+    if (Mk_FindBoolField(obj, "Thrusmoke", bv) || Mk_FindBoolField(obj, "Thrusmoke", bv)) row.smoke = bv;
+    return !row.attackerName.empty();
+}
+
+static bool Mk_ParseRoundObject(const std::string& obj, std::vector<MultikillEvent>& outEvents, std::vector<Mk_EventKill>& outKills)
+{
+    outEvents.clear();
+    long long r = 0; long long startTick = 0;
+    if (!Mk_FindIntField(obj, "Round", r)) return false;
+    Mk_FindIntField(obj, "StartTick", startTick); // optional
+
+    std::vector<std::string> killObjs;
+    if (!Mk_FindArrayOfObjects(obj, "Kills", killObjs)) return false;
+
+    // Parse rows and aggregate per attacker
+    std::unordered_map<uint64_t, std::vector<Mk_KillRow>> bySid;
+    std::unordered_map<std::string, std::vector<Mk_KillRow>> byName; // fallback if no sid
+    for (const auto& ko : killObjs) {
+        Mk_KillRow row; if (!Mk_ParseKillObject(ko, row)) continue;
+        // Skip teamkills: only count kills where attacker and victim are on different teams (when info present)
+        if (!row.attackerTeam.empty() && !row.victimTeam.empty()) {
+            if (0 == _stricmp(row.attackerTeam.c_str(), row.victimTeam.c_str())) {
+                continue; // ignore teamkill
+            }
+        }
+        // Record for per-kill event views
+        Mk_EventKill ke; ke.round=(int)r; ke.tick=row.tick; ke.attackerSid=row.attackerSid; ke.attackerName=row.attackerName; ke.victimName=row.victimName; ke.attackerTeam=row.attackerTeam; ke.victimTeam=row.victimTeam; ke.weapon=row.weapon; ke.noscope=row.noscope; ke.inAir=row.inAir; ke.blind=row.blind; ke.penetrated=row.penetrated; ke.smoke=row.smoke; outKills.push_back(std::move(ke));
+        if (row.attackerSid != 0) bySid[row.attackerSid].push_back(row);
+        else byName[row.attackerName].push_back(row);
+    }
+    auto emitFrom = [&](auto& vec, uint64_t sid, const std::string& name){
+        if (vec.size() < 2) return; // multi-kills only
+        int minTick = INT_MAX, maxTick = INT_MIN; std::vector<std::string> victims; victims.reserve(vec.size());
+        for (const auto& k : vec) { if (k.tick < minTick) minTick = k.tick; if (k.tick > maxTick) maxTick = k.tick; if(!k.victimName.empty()) victims.push_back(k.victimName); }
+        MultikillEvent ev; ev.steamId = sid; ev.player = name; ev.round = (int)r; ev.count = (int)vec.size(); ev.startTick = (minTick==INT_MAX)?(int)startTick:minTick; ev.endTick = (maxTick==INT_MIN)?(int)startTick:maxTick; ev.victims = std::move(victims); outEvents.push_back(std::move(ev));
+    };
+    for (auto& kv : bySid) {
+        const uint64_t sid = kv.first; auto& rows = kv.second; std::string name = rows.empty()?std::string():rows.front().attackerName; emitFrom(rows, sid, name);
+    }
+    for (auto& kv : byName) {
+        const std::string& name = kv.first; auto& rows = kv.second; emitFrom(rows, 0, name);
+    }
+    return !outEvents.empty();
 }
 
 static void Mk_StartParseThread(const std::string& parserPathUtf8, const std::string& demoPathUtf8)
@@ -1002,28 +1121,33 @@ static void Mk_StartParseThread(const std::string& parserPathUtf8, const std::st
         if (!ok) {
             parseError = err.empty() ? std::string("Failed to start DemoParser.exe") : err;
         } else {
+            std::vector<Mk_EventKill> allKills;
             auto objs = Mk_SplitJsonObjects(out);
             for (const auto& o : objs) {
-                MultikillEvent ev; if (Mk_ParseJsonObject(o, ev)) parsed.push_back(ev);
+                std::vector<MultikillEvent> roundEvents;
+                if (Mk_ParseRoundObject(o, roundEvents, allKills)) {
+                    parsed.insert(parsed.end(), roundEvents.begin(), roundEvents.end());
+                }
             }
             if (parsed.empty()) {
-                // If no objects recognized, try NDJSON by lines
+                // If no objects recognized, try NDJSON by lines (per-round only)
                 size_t pos = 0; size_t nl;
                 while (pos < out.size() && (nl = out.find('\n', pos)) != std::string::npos) {
                     std::string line = out.substr(pos, nl - pos);
                     pos = nl + 1;
                     if (line.find('{') != std::string::npos && line.find('}') != std::string::npos) {
-                        MultikillEvent ev; if (Mk_ParseJsonObject(line, ev)) parsed.push_back(ev);
+                        std::vector<MultikillEvent> roundEvents; if (Mk_ParseRoundObject(line, roundEvents, allKills)) { parsed.insert(parsed.end(), roundEvents.begin(), roundEvents.end()); }
                     }
                 }
                 if (parsed.empty() && !err.empty()) parseError = err;
             }
-        }
 
-        {
-            std::lock_guard<std::mutex> lk(g_MkMutex);
-            if (!parseError.empty()) g_MkParseError = parseError; else g_MkParseError.clear();
-            g_MkEvents = std::move(parsed);
+            {
+                std::lock_guard<std::mutex> lk(g_MkMutex);
+                if (!parseError.empty()) g_MkParseError = parseError; else g_MkParseError.clear();
+                g_MkEvents = std::move(parsed);
+                g_MkAllKills = std::move(allKills);
+            }
         }
         g_MkParsing = false;
     });
@@ -1701,7 +1825,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             }
             if (ImGui::Checkbox("Show Attachment Control", &g_ShowAttachmentControl)) {
             }
-            ImGui::Checkbox("Show Multikill Browser", &g_ShowMultikillWindow);
+            ImGui::Checkbox("Show Event Browser", &g_ShowMultikillWindow);
             static bool s_nearZtoggle = false;
             if (ImGui::Checkbox("Near-Z 1", &s_nearZtoggle)) {
                 if (s_nearZtoggle) Afx_ExecClientCmd("r_nearz 1"); else Afx_ExecClientCmd("r_nearz -1");
@@ -2191,7 +2315,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     }
 
     if (g_ShowMultikillWindow) {
-        ImGui::Begin("Multikill Browser", &g_ShowMultikillWindow, ImGuiWindowFlags_NoCollapse);
+        ImGui::Begin("Event Browser", &g_ShowMultikillWindow, ImGuiWindowFlags_NoCollapse);
         // One-time default parser path: HLAE folder + DemoParser.exe if available
         static bool s_mkInit = false;
         if (!s_mkInit) {
@@ -2256,24 +2380,35 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         // Results
         std::vector<MultikillEvent> snapshot;
         std::string parseErr;
+        std::vector<Mk_EventKill> killsnap;
         {
             std::lock_guard<std::mutex> lk(g_MkMutex);
             snapshot = g_MkEvents;
             parseErr = g_MkParseError;
+            killsnap = g_MkAllKills;
+        }
+        if (!g_MkParsing && (!snapshot.empty() || !killsnap.empty())) {
+            ImGui::SameLine();
+            const char* modes[] = { "Multikills", "Noscope", "Wallbang", "Jumpshot", "Smoke", "Blind", "AWP" };
+            int prev = g_MkViewMode;
+            ImGui::SetNextItemWidth(ImGui::CalcTextSize("Multikills   ").x + ImGui::GetStyle().FramePadding.x * 6.0f);
+            ImGui::Combo("##mk_view", &g_MkViewMode, modes, (int)(sizeof(modes)/sizeof(modes[0])));
+            (void)prev;
         }
         if (!parseErr.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255,80,80,255));
             ImGui::TextWrapped("%s", parseErr.c_str());
             ImGui::PopStyleColor();
         }
-        if (!snapshot.empty()) {
+        if (g_MkViewMode == 0) {
+            if (!snapshot.empty()) {
             const ImGuiTableFlags tblFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable;
             if (ImGui::BeginTable("##mk_tbl_all", 4, tblFlags)) {
                 // Columns: Round, Player, Kills, Victims, Actions
                 ImGui::TableSetupColumn("Round", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("0000").x + ImGui::GetStyle().FramePadding.x * 2.0f);
                 ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch);
                 ImGui::TableSetupColumn("Kills", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("0000").x + ImGui::GetStyle().FramePadding.x * 2.0f);
-                ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Goto Start").x + ImGui::GetStyle().FramePadding.x * 8.0f);
+                ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Goto").x + ImGui::GetStyle().FramePadding.x * 8.0f);
                 ImGui::TableHeadersRow();
 
                 // Build order
@@ -2325,7 +2460,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         ImGui::SetTooltip("%s", vj.c_str());
                     }
                     ImGui::TableSetColumnIndex(3);
-                    char startLbl[64]; _snprintf_s(startLbl, _TRUNCATE, "Goto Start##mk_%d", idx);
+                    char startLbl[64]; _snprintf_s(startLbl, _TRUNCATE, "Goto##mk_%d", idx);
                     static double s_gotoFrame = -1.0;
                     static std::string s_pendingCmd;
                     if (ImGui::SmallButton(startLbl)) {
@@ -2342,6 +2477,77 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     }
                 }
                 ImGui::EndTable();
+            }
+            }
+        } else {
+            // Alternate event views based on per-kill flags
+            // Build filtered index
+            std::vector<int> order; order.reserve(killsnap.size());
+            for (int i = 0; i < (int)killsnap.size(); ++i) {
+                const auto& k = killsnap[(size_t)i];
+                bool keep = false;
+                if (g_MkViewMode == 1) keep = k.noscope;
+                else if (g_MkViewMode == 2) keep = (k.penetrated > 0);
+                else if (g_MkViewMode == 3) keep = k.inAir;
+                else if (g_MkViewMode == 4) keep = k.smoke;
+                else if (g_MkViewMode == 5) keep = k.blind;
+                else if (g_MkViewMode == 6) keep = (k.weapon == "awp");
+                if (keep) order.push_back(i);
+            }
+            if (!order.empty()) {
+                const ImGuiTableFlags tblFlags2 = ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable;
+                if (ImGui::BeginTable("##mk_tbl_kills", 4, tblFlags2)) {
+                    ImGui::TableSetupColumn("Round", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("0000").x + ImGui::GetStyle().FramePadding.x * 2.0f);
+                    ImGui::TableSetupColumn("Player", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("Victim", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Goto").x + ImGui::GetStyle().FramePadding.x * 8.0f);
+                    ImGui::TableHeadersRow();
+
+                    if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs()) {
+                        if (sort->SpecsCount > 0) {
+                            const ImGuiTableColumnSortSpecs& sp = sort->Specs[0];
+                            const bool asc = (sp.SortDirection == ImGuiSortDirection_Ascending);
+                            auto cmp = [&](int a, int b){
+                                const auto &ka = killsnap[(size_t)a], &kb = killsnap[(size_t)b];
+                                int r = 0;
+                                switch (sp.ColumnIndex) {
+                                    case 0: r = (ka.round < kb.round) ? -1 : (ka.round > kb.round ? 1 : 0); break;
+                                    case 1: r = _stricmp(ka.attackerName.c_str(), kb.attackerName.c_str()); break;
+                                    case 2: r = _stricmp(ka.victimName.c_str(), kb.victimName.c_str()); break;
+                                    default: r = 0; break;
+                                }
+                                return asc ? (r < 0) : (r > 0);
+                            };
+                            std::stable_sort(order.begin(), order.end(), cmp);
+                            sort->SpecsDirty = false;
+                        } else {
+                            std::stable_sort(order.begin(), order.end(), [&](int a, int b){ return killsnap[(size_t)a].round < killsnap[(size_t)b].round; });
+                        }
+                    }
+
+                    for (int idx : order) {
+                        const auto& k = killsnap[(size_t)idx];
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0); ImGui::Text("%d", k.round);
+                        ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(k.attackerName.c_str());
+                        ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(k.victimName.c_str());
+                        ImGui::TableSetColumnIndex(3);
+                        char gotoLbl[64]; _snprintf_s(gotoLbl, _TRUNCATE, "Goto##mk_k_%d", idx);
+                        static double s2_gotoFrame = -1.0; static std::string s2_pending;
+                        if (ImGui::SmallButton(gotoLbl)) {
+                            s2_gotoFrame = ImGui::GetFrameCount();
+                            char cmd1[128]; _snprintf_s(cmd1, _TRUNCATE, "demo_gototick %d", k.tick - 128);
+                            char cmd2[256]; _snprintf_s(cmd2, _TRUNCATE, "spec_player %s; spec_mode 2", k.attackerName.c_str());
+                            s2_pending = cmd2;
+                            Afx_ExecClientCmd(cmd1);
+                        }
+                        if (s2_gotoFrame >= 0.0 && ImGui::GetFrameCount() > s2_gotoFrame) {
+                            Afx_ExecClientCmd(s2_pending.c_str()); s2_pending.clear(); s2_gotoFrame = -1.0;
+                        }
+                    }
+
+                    ImGui::EndTable();
+                }
             }
         }
         // Ensure background parser thread is joined after completion to avoid Debug CRT abort on joinable destructor.
