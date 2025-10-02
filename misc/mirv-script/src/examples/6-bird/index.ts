@@ -112,15 +112,20 @@
     }
 
     enum Phase { Idle = 0, AscendA = 1, HoldA = 2, ToB = 3, HoldB = 4, DescendB = 5 }
+    enum Mode { Goto = 0, Player = 1 }
 
     const state = {
         active: false,
+        mode: Mode.Goto as Mode,
         phase: Phase.Idle,
         fromIdx: -1,
         toIdx: -1,
         height: 500.0,
-        holdTime: 1.0,
+        holdTimeA: 1.0,
+        holdTimeB: 1.0,
         phaseStart: 0.0,
+        // One-shot angle snap on next frame (used for player snap)
+        forceSnapAngles: false,
         // Kinematics
         pos: [0, 0, 0] as Vec3,
         vel: [0, 0, 0] as Vec3,
@@ -282,11 +287,19 @@
                 const step = Math.min(speedMag * dt, dist);
                 state.pos = v.add(state.pos, v.scale(dir as Vec3, step));
                 state.vel = v.scale(dir as Vec3, step > 0 && dt > 0 ? (step / dt) : 0);
-            } else { // DescendB: constant-speed linear approach with exact stop
-                const speedMag = Math.max(state.minSpeed, Math.min(state.linSpeed, dist / Math.max(dt, 1e-6)));
-                const step = Math.min(speedMag * dt, dist);
-                state.pos = v.add(state.pos, v.scale(dir as Vec3, step));
-                state.vel = v.scale(dir as Vec3, step > 0 && dt > 0 ? (step / dt) : 0);
+            } else { // DescendB
+                if (state.mode === Mode.Player) {
+                    // Player-return: lock XY to the player's eyes, smooth only Z for tight tracking
+                    const sz = smoothDamp1D(state.pos[2], targetPos[2], state.vel[2], state.velSmoothTime, state.linSpeed, dt);
+                    state.pos = [targetPos[0], targetPos[1], sz.value];
+                    state.vel = [0, 0, sz.vel];
+                } else {
+                    // Goto: constant-speed linear approach with exact stop
+                    const speedMag = Math.max(state.minSpeed, Math.min(state.linSpeed, dist / Math.max(dt, 1e-6)));
+                    const step = Math.min(speedMag * dt, dist);
+                    state.pos = v.add(state.pos, v.scale(dir as Vec3, step));
+                    state.vel = v.scale(dir as Vec3, step > 0 && dt > 0 ? (step / dt) : 0);
+                }
             }
         }
 
@@ -299,11 +312,17 @@
             const factor = Math.max(0.15, Math.min(1.0, distForAng / blendRadius));
             angSmooth = Math.max(0.06, state.angSmoothTime * factor);
         }
-        const pr = smoothDampAngle1D(state.ang[0], targetAngles[0], state.angVel[0], angSmooth, maxAngSpeed, dt);
-        const yr = smoothDampAngle1D(state.ang[1], targetAngles[1], state.angVel[1], angSmooth, maxAngSpeed, dt);
-        const rr = smoothDampAngle1D(state.ang[2], targetAngles[2], state.angVel[2], angSmooth, maxAngSpeed, dt);
-        state.ang = [pr.value, yr.value, rr.value];
-        state.angVel = [pr.vel, yr.vel, rr.vel];
+        if (state.forceSnapAngles) {
+            state.ang = [targetAngles[0], targetAngles[1], targetAngles[2]];
+            state.angVel = [0, 0, 0];
+            state.forceSnapAngles = false;
+        } else {
+            const pr = smoothDampAngle1D(state.ang[0], targetAngles[0], state.angVel[0], angSmooth, maxAngSpeed, dt);
+            const yr = smoothDampAngle1D(state.ang[1], targetAngles[1], state.angVel[1], angSmooth, maxAngSpeed, dt);
+            const rr = smoothDampAngle1D(state.ang[2], targetAngles[2], state.angVel[2], angSmooth, maxAngSpeed, dt);
+            state.ang = [pr.value, yr.value, rr.value];
+            state.angVel = [pr.vel, yr.vel, rr.vel];
+        }
 
         // Arrival checks and phase progression
         if (state.phase === Phase.AscendA) {
@@ -315,7 +334,7 @@
                 beginPhase(Phase.HoldA);
             }
         } else if (state.phase === Phase.HoldA) {
-            if ((mirv.getCurTime() - state.phaseStart) >= state.holdTime) {
+            if ((mirv.getCurTime() - state.phaseStart) >= state.holdTimeA) {
                 // Switch spectated player to destination so releasing later lands on them
                 const outName = getNameForControllerIndex(state.toIdx);
                 const qName = outName.includes(' ') ? `"${outName.replaceAll('"', '\\"')}"` : outName;
@@ -334,8 +353,10 @@
                 beginPhase(Phase.HoldB);
             }
         } else if (state.phase === Phase.HoldB) {
-            if ((mirv.getCurTime() - state.phaseStart) >= state.holdTime) {
-                beginPhase(Phase.DescendB);
+            if (state.mode === Mode.Goto) {
+                if ((mirv.getCurTime() - state.phaseStart) >= state.holdTimeB) {
+                    beginPhase(Phase.DescendB);
+                }
             }
         } else if (state.phase === Phase.DescendB) {
             const d = v.len(v.sub(state.pos, targetPos));
@@ -370,14 +391,16 @@
                         state.toIdx = toIdx;
                         state.height = height;
                         // Optional tuning via extra args
-                        state.linSpeed = argc >= 5 ? Math.max(50, parseFloat(args.argV(4)) || 500) : 500.0;
-                        state.holdTime = argc >= 6 ? Math.max(0.0, parseFloat(args.argV(5)) || 1.0) : 1.0;
-                        state.velSmoothTime = argc >= 7 ? Math.max(0.05, parseFloat(args.argV(6)) || 0.5) : 0.5;
-                        state.angSmoothTime = argc >= 8 ? Math.max(0.05, parseFloat(args.argV(7)) || 0.25) : 0.25;
-                        state.margin = argc >= 9 ? Math.max(0.5, parseFloat(args.argV(8)) || 5.0) : 5.0;
+                        state.linSpeed = argc >= 5 ? Math.max(50, parseFloat(args.argV(4)) || 1000) : 1000.0;
+                        state.holdTimeA = argc >= 6 ? Math.max(0.0, parseFloat(args.argV(5)) || 1.0) : 1.0;
+                        state.holdTimeB = argc >= 7 ? Math.max(0.0, parseFloat(args.argV(6)) || 1.0) : 1.0;
+                        state.velSmoothTime = argc >= 8 ? Math.max(0.05, parseFloat(args.argV(7)) || 0.5) : 0.5;
+                        state.angSmoothTime = argc >= 9 ? Math.max(0.05, parseFloat(args.argV(8)) || 0.25) : 0.25;
+                        state.margin = argc >= 10 ? Math.max(0.5, parseFloat(args.argV(9)) || 5.0) : 5.0;
                         
 
-                        state.active = true; state.initialized = false;
+                        state.mode = Mode.Goto;
+                        state.active = true; state.initialized = false; state.downYawInit = false;
                         mirv.onCViewRenderSetupView = onView;
                         beginPhase(Phase.AscendA);
 
@@ -386,11 +409,84 @@
                         const qFrom = fromName.includes(' ') ? `"${fromName.replaceAll('"', '\\"')}"` : fromName;
                         mirv.exec('spec_mode 5');
                         mirv.exec(`spec_player ${qFrom}`);
-                        mirv.message(`mirv_bird: from ${fromName} -> ${toName} height=${height.toFixed(1)} speed=${state.linSpeed.toFixed(0)} hold=${state.holdTime.toFixed(1)}s\n`);
+                        mirv.message(`mirv_bird: from ${fromName} -> ${toName} height=${height.toFixed(1)} speed=${state.linSpeed.toFixed(0)} holdA=${state.holdTimeA.toFixed(1)}s holdB=${state.holdTimeB.toFixed(1)}s\n`);
                         return;
                     }
                 }
-                mirv.message(`${cmd} goto <controllerIndex> <height> [speed=500] [hold=1.0] [velSmooth=0.5] [angSmooth=0.25] [margin=5]\n`);
+                mirv.message(`${cmd} goto <controllerIndex> <height> [speed=1000] [holdA=1.0] [holdB=1.0] [velSmooth=0.5] [angSmooth=0.25] [margin=5]\n`);
+                return;
+            }
+            if (sub === 'player') {
+                // mirv_bird player <height> [speed=1000] [transition=1] [velSmooth=0.5] [angSmooth=0.25] [margin=5]
+                if (argc >= 3) {
+                    const height = parseFloat(args.argV(2));
+                    if (Number.isFinite(height) && height > 0) {
+                        const toIdx = getObservedControllerIndex();
+                        if (toIdx === null) {
+                            mirv.warning('mirv_bird: could not detect current observed player (ensure you are in a player POV).\n');
+                            return;
+                        }
+                        state.toIdx = toIdx;
+                        state.height = height;
+                        state.linSpeed = argc >= 4 ? Math.max(50, parseFloat(args.argV(3)) || 1000) : 1000.0;
+                        const transition = argc >= 5 ? (parseInt(args.argV(4)) !== 0) : true;
+                        state.velSmoothTime = argc >= 6 ? Math.max(0.05, parseFloat(args.argV(5)) || 0.5) : 0.5;
+                        state.angSmoothTime = argc >= 7 ? Math.max(0.05, parseFloat(args.argV(6)) || 0.25) : 0.25;
+                        state.margin = argc >= 8 ? Math.max(0.5, parseFloat(args.argV(7)) || 5.0) : 5.0;
+
+                        state.mode = Mode.Player;
+                        state.active = true; state.initialized = false; state.downYawInit = false; state.forceSnapAngles = false;
+                        mirv.onCViewRenderSetupView = onView;
+
+                        // Ensure spectator will be on the selected player when we return
+                        const toName = getNameForControllerIndex(toIdx);
+                        const qTo = toName.includes(' ') ? `"${toName.replaceAll('"', '\\"')}"` : toName;
+                        mirv.exec('spec_mode 5');
+                        mirv.exec(`spec_player ${qTo}`);
+
+                        if (transition) {
+                            // For player mode, ascend vertically with tight XY lock
+                            state.fromIdx = toIdx;
+                            state.holdTimeA = 0.0;
+                            beginPhase(Phase.AscendA);
+                            mirv.message(`mirv_bird: player ${toName} height=${height.toFixed(1)} speed=${state.linSpeed.toFixed(0)} (transition)\n`);
+                        } else {
+                            // Snap immediately to birds-eye top-down
+                            state.forceSnapAngles = true;
+                            beginPhase(Phase.HoldB);
+                            mirv.message(`mirv_bird: player ${toName} height=${height.toFixed(1)} (snap)\n`);
+                        }
+                        return;
+                    }
+                }
+                mirv.message(`${cmd} player <height> [speed=1000] [transition=1] [velSmooth=0.5] [angSmooth=0.25] [margin=5]\n`);
+                return;
+            }
+            if (sub === 'player_return') {
+                if (state.active && state.mode === Mode.Player) {
+                    state.linSpeed = argc >= 3 ? Math.max(50, parseFloat(args.argV(2)) || 1000) : 1000.0;
+                    beginPhase(Phase.DescendB);
+                    mirv.message(`mirv_bird: returning to player speed=${state.linSpeed.toFixed(0)}\n`);
+                } else {
+                    mirv.warning('mirv_bird: not in player hold mode.\n');
+                }
+                return;
+            }
+            if (sub === 'indexlist') {
+                const hi = mirv.getHighestEntityIndex();
+                let any = false;
+                for (let i = 0; i <= hi; i++) {
+                    try {
+                        const ent = mirv.getEntityFromIndex(i);
+                        if (ent && ent.isPlayerController()) {
+                            any = true;
+                            const s = ent.getSanitizedPlayerName();
+                            const name = (s && s.length) ? s : `#${i}`;
+                            mirv.message(`${i}: ${name}\n`);
+                        }
+                    } catch { /* ignore */ }
+                }
+                if (!any) mirv.message('No player controllers found.\n');
                 return;
             }
             if (sub === 'stop') {
@@ -401,7 +497,10 @@
         }
 
         mirv.message(
-            `${cmd} goto <controllerIndex> <height> [speed=500] [hold=1.0] [velSmooth=0.5] [angSmooth=0.25] [margin=5]\n` +
+            `${cmd} goto <controllerIndex> <height> [speed=1000] [holdA=1.0] [holdB=1.0] [velSmooth=0.5] [angSmooth=0.25] [margin=5]\n` +
+            `${cmd} player <height> [speed=1000] [transition=1] [velSmooth=0.5] [angSmooth=0.25] [margin=5]\n` +
+            `${cmd} player_return [speed=1000]\n` +
+            `${cmd} indexlist\n` +
             `${cmd} stop\n`.dedent()
         );
     };
