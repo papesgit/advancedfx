@@ -1120,6 +1120,235 @@ bool g_bDetectSmoke2 = false;
 bool g_bDetectedSmoke = false;
 ID3D11DepthStencilView* g_pSmokeDepthStencilView = nullptr;
 
+// CS2ObserverTools: shared DX11 frame export to external GUI
+namespace CS2ObserverTools_Shared
+{
+    struct SharedMeta
+    {
+        UINT Width;
+        UINT Height;
+        UINT Format;
+        UINT Misc;
+        UINT64 SharedHandle;
+        UINT64 AdapterLuid;
+        UINT FrameCounter;
+        UINT Reserved0;
+        UINT64 Reserved1;
+    };
+
+    static HANDLE g_hMetaMapping = nullptr;
+    static HANDLE g_hFrameEvent = nullptr;
+    static SharedMeta* g_pMeta = nullptr;
+
+    static ID3D11Texture2D* g_pSharedTexture = nullptr;
+    static IDXGIKeyedMutex* g_pSharedMutex = nullptr;
+    static HANDLE g_hSharedHandle = nullptr;
+    static D3D11_TEXTURE2D_DESC g_SharedDesc = {};
+
+    static void EnsureIpc()
+    {
+        if (!g_hMetaMapping)
+        {
+            g_hMetaMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(SharedMeta), L"Local\\CS2ObserverTools_SharedMeta");
+            if (g_hMetaMapping)
+            {
+                void* p = MapViewOfFile(g_hMetaMapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedMeta));
+                g_pMeta = p ? (SharedMeta*)p : nullptr;
+                if (g_pMeta)
+                {
+                    ZeroMemory(g_pMeta, sizeof(SharedMeta));
+                }
+            }
+        }
+        if (!g_hFrameEvent)
+        {
+            g_hFrameEvent = CreateEventW(nullptr, TRUE, FALSE, L"Local\\CS2ObserverTools_FrameReady");
+        }
+    }
+
+    static void ReleaseShared()
+    {
+        if (g_pSharedMutex) { g_pSharedMutex->Release(); g_pSharedMutex = nullptr; }
+        if (g_pSharedTexture) { g_pSharedTexture->Release(); g_pSharedTexture = nullptr; }
+        if (g_pSharedMutex) { g_pSharedMutex->Release(); g_pSharedMutex = nullptr; }
+        if (g_hSharedHandle) { CloseHandle(g_hSharedHandle); g_hSharedHandle = nullptr; }
+        ZeroMemory(&g_SharedDesc, sizeof(g_SharedDesc));
+        if (g_pMeta)
+        {
+            ZeroMemory(g_pMeta, sizeof(SharedMeta));
+        }
+    }
+
+    // Safe variant used by our code paths
+    static void ReleaseSharedSafe()
+    {
+        if (g_pSharedMutex) { g_pSharedMutex->Release(); g_pSharedMutex = nullptr; }
+        if (g_pSharedTexture) { g_pSharedTexture->Release(); g_pSharedTexture = nullptr; }
+        if (g_hSharedHandle) { CloseHandle(g_hSharedHandle); g_hSharedHandle = nullptr; }
+        ZeroMemory(&g_SharedDesc, sizeof(g_SharedDesc));
+        if (g_pMeta) ZeroMemory(g_pMeta, sizeof(SharedMeta));
+    }
+
+    static void EnsureSharedForBackBuffer(ID3D11Device* pDevice, ID3D11Texture2D* pBackBuffer)
+    {
+        EnsureIpc();
+
+        D3D11_TEXTURE2D_DESC bbDesc{};
+        pBackBuffer->GetDesc(&bbDesc);
+
+        bool needNew = g_pSharedTexture == nullptr
+            || g_SharedDesc.Width != bbDesc.Width
+            || g_SharedDesc.Height != bbDesc.Height
+            || g_SharedDesc.Format != bbDesc.Format;
+
+        if (!needNew) return;
+
+        ReleaseSharedSafe();
+
+        D3D11_TEXTURE2D_DESC desc = bbDesc;
+        // Some drivers require RTV as well for shared textures, be permissive:
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        desc.CPUAccessFlags = 0;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+
+        // Update meta early for diagnostics
+        if (g_pMeta)
+        {
+            g_pMeta->Width = desc.Width;
+            g_pMeta->Height = desc.Height;
+            g_pMeta->Format = (UINT)desc.Format;
+        }
+
+        HRESULT hrCreate = pDevice->CreateTexture2D(&desc, nullptr, &g_pSharedTexture);
+        if (FAILED(hrCreate) || nullptr == g_pSharedTexture)
+        {
+            advancedfx::Warning("AFXERROR: CreateTexture2D(shared|keyed) failed hr=0x%08X, retrying without KEYEDMUTEX.\n", (unsigned)hrCreate);
+            // Retry without KEYEDMUTEX as a compatibility fallback:
+            desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+            hrCreate = pDevice->CreateTexture2D(&desc, nullptr, &g_pSharedTexture);
+            if (FAILED(hrCreate) || nullptr == g_pSharedTexture)
+            {
+                advancedfx::Warning("AFXERROR: CreateTexture2D(shared) failed hr=0x%08X\n", (unsigned)hrCreate);
+                return;
+            }
+        }
+
+        IDXGIResource* pRes = nullptr;
+        HRESULT hrQi = g_pSharedTexture->QueryInterface(__uuidof(IDXGIResource), (void**)&pRes);
+        if (SUCCEEDED(hrQi) && pRes)
+        {
+            HRESULT hrGsh = pRes->GetSharedHandle(&g_hSharedHandle);
+            if (FAILED(hrGsh) || nullptr == g_hSharedHandle)
+            {
+                advancedfx::Warning("AFXERROR: IDXGIResource::GetSharedHandle failed hr=0x%08X\n", (unsigned)hrGsh);
+                pRes->Release();
+                ReleaseSharedSafe();
+                return;
+            }
+            pRes->Release();
+        }
+        else
+        {
+            advancedfx::Warning("AFXERROR: QI IDXGIResource failed hr=0x%08X\n", (unsigned)hrQi);
+            ReleaseSharedSafe();
+            return;
+        }
+
+        // Only present if KEYEDMUTEX was kept:
+        g_pSharedTexture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&g_pSharedMutex);
+        g_SharedDesc = desc;
+
+        if (g_pMeta)
+        {
+            g_pMeta->Width = desc.Width;
+            g_pMeta->Height = desc.Height;
+            g_pMeta->Format = (UINT)desc.Format;
+            g_pMeta->Misc = desc.MiscFlags;
+            g_pMeta->SharedHandle = (UINT64)(uintptr_t)g_hSharedHandle;
+            // Determine adapter LUID of the device that owns the resource
+            IDXGIDevice* pDxgiDevice = nullptr;
+            if (SUCCEEDED(pDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&pDxgiDevice)) && pDxgiDevice)
+            {
+                IDXGIAdapter* pAdapter = nullptr;
+                if (SUCCEEDED(pDxgiDevice->GetAdapter(&pAdapter)) && pAdapter)
+                {
+                    DXGI_ADAPTER_DESC adapterDesc;
+                    if (SUCCEEDED(pAdapter->GetDesc(&adapterDesc)))
+                    {
+                        UINT64 luid = (((UINT64)(UINT)adapterDesc.AdapterLuid.HighPart) << 32) | adapterDesc.AdapterLuid.LowPart;
+                        g_pMeta->AdapterLuid = luid;
+                    }
+                    pAdapter->Release();
+                }
+                pDxgiDevice->Release();
+            }
+            g_pMeta->FrameCounter = 0;
+        }
+    }
+
+    static void CopyToShared(ID3D11DeviceContext* pContext, ID3D11Texture2D* pBackBuffer)
+    {
+        if (!g_pSharedTexture || !pBackBuffer) return;
+
+        D3D11_TEXTURE2D_DESC bbDesc{};
+        pBackBuffer->GetDesc(&bbDesc);
+
+        if (g_pSharedMutex)
+        {
+            g_pSharedMutex->AcquireSync(0, 5);
+        }
+
+        if (bbDesc.SampleDesc.Count > 1)
+        {
+            pContext->ResolveSubresource(g_pSharedTexture, 0, pBackBuffer, 0, bbDesc.Format);
+        }
+        else
+        {
+            pContext->CopyResource(g_pSharedTexture, pBackBuffer);
+        }
+
+        if (g_pMeta)
+        {
+            g_pMeta->FrameCounter++;
+        }
+
+        if (g_pSharedMutex)
+        {
+            g_pSharedMutex->ReleaseSync(1);
+        }
+
+        if (g_hFrameEvent)
+        {
+            SetEvent(g_hFrameEvent);
+        }
+    }
+
+    void OnBeforePresent(ID3D11DeviceContext* pContext)
+    {
+        if (!pContext) return;
+        ID3D11Texture2D* pTexture = nullptr;
+        if (g_pSwapChain)
+        {
+            g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pTexture);
+        }
+        if (!pTexture) return;
+        ID3D11Device* pDev = nullptr;
+        pContext->GetDevice(&pDev);
+        if (pDev)
+        {
+            EnsureSharedForBackBuffer(pDev, pTexture);
+            CopyToShared(pContext, pTexture);
+            pDev->Release();
+        }
+        pTexture->Release();
+    }
+}
+
 extern void ErrorBox(char const * messageText);
 
 /*
@@ -1761,6 +1990,12 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
             pRenderPassCommands->OnBeforePresent(pTexture);
             if(pTexture) pTexture->Release();
         }
+    }
+
+    // CS2ObserverTools: export backbuffer to shared texture before present
+    if (g_pImmediateContext)
+    {
+        CS2ObserverTools_Shared::OnBeforePresent(g_pImmediateContext);
     }
 
     HRESULT result = g_OldPresent(This, SyncInterval, Flags);

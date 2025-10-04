@@ -51,6 +51,11 @@
 #include <stdlib.h>
 #include <sstream>
 #include <mutex>
+#include <thread>
+#include <atomic>
+#include <string>
+#include <vector>
+#include <sstream>
 
 HMODULE g_h_engine2Dll = 0;
 HMODULE g_H_ClientDll = 0;
@@ -2231,6 +2236,60 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 			g_ConsolePrinter = new CConsolePrinter();
 
 			g_CampathDrawer.Begin();
+
+			// Start CS2ObserverTools command pipe server in background.
+			auto pipeThread = std::thread([]()
+			{
+				const wchar_t* kPipeName = L"\\\\.\\pipe\\CS2ObserverTools.Commands";
+				while (true)
+				{
+					HANDLE hPipe = CreateNamedPipeW(
+						kPipeName,
+						PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+						PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+						1,
+						4096, 4096,
+						NMPWAIT_USE_DEFAULT_WAIT,
+						nullptr);
+					if (hPipe == INVALID_HANDLE_VALUE)
+					{
+						Sleep(1000);
+						continue;
+					}
+
+					BOOL connected = ConnectNamedPipe(hPipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+					if (!connected)
+					{
+						CloseHandle(hPipe);
+						continue;
+					}
+
+					std::string acc;
+					char buffer[512];
+					DWORD bytesRead = 0;
+					while (ReadFile(hPipe, buffer, sizeof(buffer), &bytesRead, nullptr) && bytesRead > 0)
+					{
+						acc.append(buffer, buffer + bytesRead);
+						size_t pos;
+						while ((pos = acc.find('\n')) != std::string::npos)
+						{
+							std::string line = acc.substr(0, pos);
+							acc.erase(0, pos + 1);
+							if (!line.empty())
+							{
+								if (g_pEngineToClient)
+								{
+									g_pEngineToClient->ExecuteClientCmd(0, line.c_str(), false);
+								}
+							}
+						}
+					}
+
+					DisconnectNamedPipe(hPipe);
+					CloseHandle(hPipe);
+				}
+			});
+			pipeThread.detach();
 
 			if (int idx = g_CommandLine->FindParam(L"-afxFixNetCon")) {
 				// https://github.com/ValveSoftware/csgo-osx-linux/issues/3603#issuecomment-2163695087
