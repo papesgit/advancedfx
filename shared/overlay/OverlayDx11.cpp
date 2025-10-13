@@ -85,6 +85,12 @@ static bool SafeIsPlayerPawn(CEntityInstance* ent) {
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+static bool SafeIsPlayerController(CEntityInstance* ent) {
+    if (!ent) return false;
+    __try { return ent->IsPlayerController(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 static int SafeGetTeam(CEntityInstance* ent) {
     if (!ent) return 0;
     __try { return ent->GetTeam(); }
@@ -113,6 +119,42 @@ static int SafeGetPlayerControllerEntryIndex(CEntityInstance* ent) {
     __except (EXCEPTION_EXECUTE_HANDLER) {
         return -1;
     }
+}
+
+static const char* SafeGetSanitizedPlayerName(CEntityInstance* ent) {
+    if (!ent) return nullptr;
+    __try { return ent->GetSanitizedPlayerName(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+static const char* SafeGetPlayerName(CEntityInstance* ent) {
+    if (!ent) return nullptr;
+    __try { return ent->GetPlayerName(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+static const char* SafeGetDebugName(CEntityInstance* ent) {
+    if (!ent) return nullptr;
+    __try { return ent->GetDebugName(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+static const char* SafeGetClassName(CEntityInstance* ent) {
+    if (!ent) return nullptr;
+    __try { return ent->GetClassName(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+static const char* SafeGetClientClassName(CEntityInstance* ent) {
+    if (!ent) return nullptr;
+    __try { return ent->GetClientClassName(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+static uint64_t SafeGetSteamId(CEntityInstance* ent) {
+    if (!ent) return 0ULL;
+    __try { return ent->GetSteamId(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0ULL; }
 }
 #endif
 
@@ -464,13 +506,13 @@ static void UpdateAttachEntityCache()
 
     for (int idx = 0; idx <= highest; ++idx) {
         if (auto* ent = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, idx))) {
-            const bool isPawn = ent->IsPlayerPawn();
+            const bool isPawn = SafeIsPlayerPawn(ent);
             // Controllers don't hold attachments we want; prefer pawn over controller
-            const bool isController = ent->IsPlayerController();
+            const bool isController = SafeIsPlayerController(ent);
 
             // Heuristic weapon detection: client class name contains "Weapon"
             bool isWeapon = false;
-            if (const char* ccn = ent->GetClassName()) {
+            if (const char* ccn = SafeGetClassName(ent)) {
                 if (ccn && *ccn && nullptr != strstr(ccn, "weapon")) isWeapon = true;
             }
 
@@ -481,29 +523,26 @@ static void UpdateAttachEntityCache()
             if (isPawn) {
                 // Resolve name from the corresponding PlayerController
                 display = nullptr;
-                auto ctrlHandle = ent->GetPlayerControllerHandle();
-                if (ctrlHandle.ToInt() != 0) {
-                    int ctrlIdx = ctrlHandle.GetEntryIndex();
-                    if (ctrlIdx >= 0 && ctrlIdx <= highest) {
-                        if (auto* ctrl = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, ctrlIdx))) {
-                            const char* nm = ctrl->GetSanitizedPlayerName();
-                            if (!nm || !*nm) nm = ctrl->GetPlayerName();
-                            if (!nm || !*nm) nm = ctrl->GetDebugName();
-                            display = nm;
-                        }
+                int ctrlIdx = SafeGetPlayerControllerEntryIndex(ent);
+                if (ctrlIdx >= 0 && ctrlIdx <= highest) {
+                    if (auto* ctrl = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, ctrlIdx))) {
+                        const char* nm = SafeGetSanitizedPlayerName(ctrl);
+                        if (!nm || !*nm) nm = SafeGetPlayerName(ctrl);
+                        if (!nm || !*nm) nm = SafeGetDebugName(ctrl);
+                        display = nm;
                     }
                 }
-                if (!display || !*display) display = ent->GetDebugName();
+                if (!display || !*display) display = SafeGetDebugName(ent);
                 name = display && *display ? display : "Player";
             } else {
-                const char* c1 = ent->GetClientClassName();
-                const char* c2 = ent->GetClassName();
+                const char* c1 = SafeGetClientClassName(ent);
+                const char* c2 = SafeGetClassName(ent);
                 name = c1 && *c1 ? c1 : (c2 && *c2 ? c2 : "Weapon");
             }
 
             AttachEntityEntry e;
             e.index = idx;
-            e.handle = ent->GetHandle().ToInt();
+            e.handle = SafeGetHandleInt(ent);
             e.isPawn = isPawn && !isController; // prefer pawn flag only when it's actually a pawn
             e.isWeapon = isWeapon && !isPawn;
             e.name = std::move(name);
@@ -605,7 +644,7 @@ static char g_RadarMapName[128] = "de_mirage";        // default example
 static bool g_RadarAssetsLoaded = false;
 static Radar::Context g_RadarCtx;                     // holds cfg, texture SRV, smoothers
 static bool g_ShowHud = false;                        // draw native HUD in viewport
-static int  g_GsiPort = 31982;                        // must match CS2 cfg
+static int  g_GsiPort = 31983;                        // must match CS2 cfg
 static GsiHttpServer g_GsiServer;
 // Built-in radar assets
 static bool g_RadarMapsLoaded = false;
@@ -919,22 +958,18 @@ static void UpdateViewportPlayerCache()
 
     for (int index = 0; index <= highestIndex; ++index) {
         if (auto* instance = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, index))) {
-            if (!instance->IsPlayerController()) {
+            if (!SafeIsPlayerController(instance)) {
                 continue;
             }
 
-            const uint64_t steamId = instance->GetSteamId();
+            const uint64_t steamId = SafeGetSteamId(instance);
             if (!seenSteamIds.insert(steamId).second) {
                 continue;
             }
 
-            const char* name = instance->GetSanitizedPlayerName();
-            if (!name || !*name) {
-                name = instance->GetPlayerName();
-            }
-            if (!name || !*name) {
-                name = instance->GetDebugName();
-            }
+            const char* name = SafeGetSanitizedPlayerName(instance);
+            if (!name || !*name) name = SafeGetPlayerName(instance);
+            if (!name || !*name) name = SafeGetDebugName(instance);
 
             ViewportPlayerEntry entry;
             entry.displayName = (name && *name) ? name : "Unknown";
@@ -3063,15 +3098,11 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 int highest = GetHighestEntityIndex();
                 for (int i = 0; i <= highest; i++) {
                     if (auto* ent = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, i))) {
-                        if (ent->IsPlayerController()) {
+                        if (SafeIsPlayerController(ent)) {
                             // Use same pattern as other code: try sanitized name first, then regular name
-                            const char* name = ent->GetSanitizedPlayerName();
-                            if (!name || !*name) {
-                                name = ent->GetPlayerName();
-                            }
-                            if (!name || !*name) {
-                                name = ent->GetDebugName();
-                            }
+                            const char* name = SafeGetSanitizedPlayerName(ent);
+                            if (!name || !*name) name = SafeGetPlayerName(ent);
+                            if (!name || !*name) name = SafeGetDebugName(ent);
 
                             // Fallback to generic name if still invalid
                             if (name && *name) {

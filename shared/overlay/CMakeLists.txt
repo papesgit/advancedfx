@@ -171,7 +171,7 @@ endif()
 
 # Install built-in radar assets alongside other resources so runtime can pick them automatically.
 install(FILES assets/radar/radars.json DESTINATION "bin/resources/overlay/radar")
-install(FILES assets/gamestate_integration_drweissbrot_hud.cfg DESTINATION "bin/resources")
+install(FILES assets/gamestate_integration_drweissbrot_hud_paper.cfg DESTINATION "bin/resources")
 install(DIRECTORY assets/radar/ingame DESTINATION "bin/resources/overlay/radar")
 install(DIRECTORY assets/icons DESTINATION "bin/resources/overlay")
 install(DIRECTORY assets/weapons DESTINATION "bin/resources/overlay")
