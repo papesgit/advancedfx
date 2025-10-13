@@ -1,3 +1,8 @@
+## FORK INFO
+This fork adds an in-game overlay for faster camera work, observing, and recording.
+
+📖 Read the overview [here](https://github.com/papesgit/advancedfx/wiki)
+
 # Half-Life Advanced Effects - advancedfx
 
 ## About
