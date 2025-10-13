@@ -36,9 +36,11 @@
 
 #include <d3d11.h>
 #include <dxgi.h>
+#include <wincodec.h>
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "windowscodecs.lib")
 
 #include <math.h>
 #include <stdio.h>
@@ -55,6 +57,11 @@
 #include <map>
 #include <thread>
 #include <limits.h>
+
+// cs-hud radar integration
+#include "radar/Radar.h"
+#include "Hud.h"
+#include "GsiHttpServer.h"
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -68,6 +75,90 @@ extern class CommandSystem g_CommandSystem;
 #endif
 
 namespace advancedfx { namespace overlay {
+
+#ifdef _WIN32
+// Defensive wrappers around entity queries to avoid hard crashes if an entity is invalid
+// or a vtable slot is not present momentarily. Prefer skipping bad entities over crashing.
+static bool SafeIsPlayerPawn(CEntityInstance* ent) {
+    if (!ent) return false;
+    __try { return ent->IsPlayerPawn(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static int SafeGetTeam(CEntityInstance* ent) {
+    if (!ent) return 0;
+    __try { return ent->GetTeam(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static uint8_t SafeGetObserverMode(CEntityInstance* ent) {
+    if (!ent) return 0;
+    __try { return ent->GetObserverMode(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static int SafeGetHandleInt(CEntityInstance* ent) {
+    if (!ent) return 0;
+    __try { return ent->GetHandle().ToInt(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static int SafeGetPlayerControllerEntryIndex(CEntityInstance* ent) {
+    if (!ent) return -1;
+    __try {
+        auto h = ent->GetPlayerControllerHandle();
+        if (h.ToInt() == 0) return -1;
+        return h.GetEntryIndex();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+#endif
+
+// Persistent radar number assignment per controller index so labels don't change when players die.
+// - CT (team=3): uses digits '1','2','3','4','5'
+// - T  (team=2): uses digits '6','7','8','9','0'
+static std::unordered_map<int, char> g_RadarLabelByController; // controllerIndex -> digit
+static std::unordered_map<int, int>  g_RadarLabelTeam;         // controllerIndex -> team (2 or 3)
+
+static char Radar_AssignDigit(int team)
+{
+    static const char kCtDigits[5] = { '1','2','3','4','5' };
+    static const char kTDigits[5]  = { '6','7','8','9','0' };
+    const char* list = (team == 3) ? kCtDigits : ((team == 2) ? kTDigits : nullptr);
+    if (!list) return 0;
+    // Build used set for this team
+    std::unordered_set<char> used;
+    for (const auto &kv : g_RadarLabelByController) {
+        int ctrl = kv.first; char dig = kv.second;
+        auto itT = g_RadarLabelTeam.find(ctrl);
+        if (itT != g_RadarLabelTeam.end() && itT->second == team) used.insert(dig);
+    }
+    for (int i = 0; i < 5; ++i) if (!used.count(list[i])) return list[i];
+    return 0; // none available (shouldn't happen for 5v5)
+}
+
+static char Radar_GetOrAssignDigitForController(int controllerIndex, int team)
+{
+    if (controllerIndex < 0 || !(team == 2 || team == 3)) return 0;
+    auto it = g_RadarLabelByController.find(controllerIndex);
+    auto itTeam = g_RadarLabelTeam.find(controllerIndex);
+    if (it != g_RadarLabelByController.end() && itTeam != g_RadarLabelTeam.end()) {
+        if (itTeam->second == team) return it->second;
+        // Team changed: release old and reassign on new team
+        g_RadarLabelByController.erase(it);
+        g_RadarLabelTeam.erase(itTeam);
+    }
+    char d = Radar_AssignDigit(team);
+    if (d != 0) {
+        g_RadarLabelByController[controllerIndex] = d;
+        g_RadarLabelTeam[controllerIndex] = team;
+    }
+    return d;
+}
+
+
 
 // Apply a sleek dark style for the HLAE overlay.
 static void ApplyHlaeDarkStyle()
@@ -220,6 +311,20 @@ static bool g_ShowOverlayConsole = false;
 static bool g_ShowCameraControl = false;
 static bool g_ShowGizmo = false;
 static bool g_ShowBackbufferWindow = false;
+// Viewport source: 0=Backbuffer (with UI), 1=BeforeUi (no UI)
+static int  g_ViewportSourceMode = 0;
+// ImGui per-draw opaque blend override for viewport image
+static ID3D11BlendState* g_ViewportOpaqueBlend = nullptr;
+static ID3D11DeviceContext* g_ImguiD3DContext = nullptr;
+static void ImGui_SetOpaqueBlendCallback(const ImDrawList*, const ImDrawCmd*)
+{
+#ifdef _WIN32
+    if (g_ImguiD3DContext && g_ViewportOpaqueBlend) {
+        float blendFactor[4] = {0,0,0,0};
+        g_ImguiD3DContext->OMSetBlendState(g_ViewportOpaqueBlend, blendFactor, 0xffffffff);
+    }
+#endif
+}
 static float g_PreviewLookScale = 0.01f; // baseline so 1.00x feels like mirv camera
 static float g_PreviewLookMultiplier = 1.0f; // user-tunable multiplier (via Settings)
 // Gizmo-on-preview helpers (updated each frame when preview window renders)
@@ -482,6 +587,59 @@ static void RebuildAttachmentCacheForSelected() {
 //DOF
 static bool g_ShowDofWindow = false;
 
+// Observing mode state
+static bool g_ObservingEnabled = false;
+static bool g_ShowObservingBindings = false;
+static std::map<int, int> g_ObservingHotkeyBindings; // Map from key (0-9) to controller index
+
+// Radar state for Observing tab
+static bool g_ShowRadar = false;
+// cs-hud radar integration settings
+static char g_RadarsJsonPath[1024] = "";             // e.g. path to cs-hud src/themes/fennec/radars.json
+static char g_RadarImagePath[1024] = "";              // e.g. .../img/radars/ingame/de_mirage.png
+// On-screen placement and size
+static float g_RadarUiPosX = 50.0f;
+static float g_RadarUiPosY = 50.0f;
+static float g_RadarUiSize = 300.0f; // width==height in pixels
+static char g_RadarMapName[128] = "de_mirage";        // default example
+static bool g_RadarAssetsLoaded = false;
+static Radar::Context g_RadarCtx;                     // holds cfg, texture SRV, smoothers
+static bool g_ShowHud = false;                        // draw native HUD in viewport
+static int  g_GsiPort = 31982;                        // must match CS2 cfg
+static GsiHttpServer g_GsiServer;
+// Built-in radar assets
+static bool g_RadarMapsLoaded = false;
+static std::unordered_map<std::string, Radar::RadarConfig> g_RadarAllConfigs;
+static std::vector<std::string> g_RadarMapList;
+
+// Observing cameras state
+static bool g_ShowObservingCameras = false;
+
+struct CameraItem {
+    std::string name;
+    std::string camPathFile;
+    std::string imagePath;
+};
+
+struct CameraProfile {
+    std::string name;
+    std::vector<CameraItem> cameras;
+};
+
+static std::vector<CameraProfile> g_CameraProfiles;
+static int g_SelectedProfileIndex = -1;
+static float g_CameraRectScale = 1.0f; // UI scale for camera rectangles
+// Track which camera was loaded via rectangle click to visualize progress
+static std::string g_ActiveCameraCampathPath;
+
+// Texture cache for camera images
+struct CameraTexture {
+    ID3D11ShaderResourceView* srv = nullptr;
+    int width = 0;
+    int height = 0;
+};
+static std::map<std::string, CameraTexture> g_CameraTextures;
+
 static float g_FarBlurry = 2000.0f;
 static float g_FarCrisp = 180.0f;
 static float g_NearBlurry = -100.0f;
@@ -526,6 +684,59 @@ static const char* kDofOnceTags[7] = {
     "overlay_dof_once_radius_scale",
     "overlay_dof_once_tilt"
 };
+
+// Build observing hotkey bindings based on current entities.
+// CT team (3) gets keys 1..5 in ascending controller index order.
+// T team (2) gets keys 6,7,8,9,0 in ascending controller index order.
+static void AutoPopulateObservingBindingsFromEntities()
+{
+#ifdef _WIN32
+    if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) return;
+
+    const int highest = GetHighestEntityIndex();
+    if (highest < 0) return;
+
+    std::vector<int> ctIdx;
+    std::vector<int> tIdx;
+    ctIdx.reserve(8);
+    tIdx.reserve(8);
+    std::unordered_set<int> seenCt;
+    std::unordered_set<int> seenT;
+
+    for (int idx = 0; idx <= highest; ++idx) {
+        if (auto* ent = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, idx))) {
+            if (!SafeIsPlayerPawn(ent)) continue;
+            if (SafeGetObserverMode(ent) != 0) continue; // skip observers
+            const int team = SafeGetTeam(ent);
+            if (!(team == 2 || team == 3)) continue;
+            const int ctrl = SafeGetPlayerControllerEntryIndex(ent);
+            if (ctrl < 0) continue;
+            if (team == 3) { if (seenCt.insert(ctrl).second) ctIdx.push_back(ctrl); }
+            else if (team == 2) { if (seenT.insert(ctrl).second) tIdx.push_back(ctrl); }
+        }
+    }
+
+    std::sort(ctIdx.begin(), ctIdx.end());
+    std::sort(tIdx.begin(),  tIdx.end());
+
+    // Clear existing assignments then assign new ones
+    g_ObservingHotkeyBindings.clear();
+
+    // CT: keys 1..5
+    for (int i = 0; i < (int)ctIdx.size() && i < 5; ++i) {
+        g_ObservingHotkeyBindings[1 + i] = ctIdx[i];
+    }
+    // T: keys 6,7,8,9,0
+    for (int i = 0; i < (int)tIdx.size() && i < 5; ++i) {
+        int key = (i < 4) ? (6 + i) : 0;
+        g_ObservingHotkeyBindings[key] = tIdx[i];
+    }
+
+    advancedfx::Message("Overlay: Auto-populated observing bindings (CT=%d, T=%d)\n", (int)ctIdx.size(), (int)tIdx.size());
+#else
+    (void)0;
+#endif
+}
 
 static void Dof_SyncTicksFromKeys()
 {
@@ -1176,6 +1387,171 @@ static void OverlayPaths_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, 
     out_buf->append("\n");
 }
 
+// ImGui ini handler for persisting camera profiles
+static void* CameraProfiles_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
+    // Each profile gets its own section: [HLAECameraProfiles][ProfileName]
+    // Create a new profile if needed
+    for (auto& profile : g_CameraProfiles) {
+        if (profile.name == name) {
+            return &profile;
+        }
+    }
+    // Create new profile
+    CameraProfile newProfile;
+    newProfile.name = name;
+    g_CameraProfiles.push_back(newProfile);
+    return &g_CameraProfiles.back();
+}
+
+static void CameraProfiles_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line) {
+    CameraProfile* profile = (CameraProfile*)entry;
+    const char* eq = strchr(line, '=');
+    if (!eq) return;
+
+    std::string key(line, eq - line);
+    std::string val(eq + 1);
+
+    // Parse camera entries: Camera_<idx>_Name=..., Camera_<idx>_Path=..., Camera_<idx>_Image=...
+    if (key.rfind("Camera_", 0) == 0) {
+        // Find separator between index and property
+        size_t sep = key.find('_', 7); // after "Camera_"
+        if (sep == std::string::npos) return;
+        // Parse index
+        int cameraIdx = 0;
+        try {
+            cameraIdx = std::stoi(key.substr(7, sep - 7));
+        } catch (...) { return; }
+        // Property name after separator
+        std::string property = key.substr(sep + 1);
+
+        // Ensure camera exists in vector
+        while ((int)profile->cameras.size() <= cameraIdx) {
+            profile->cameras.push_back(CameraItem());
+        }
+
+        if (property == "Name") {
+            profile->cameras[cameraIdx].name = val;
+        } else if (property == "Path") {
+            profile->cameras[cameraIdx].camPathFile = val;
+        } else if (property == "Image") {
+            profile->cameras[cameraIdx].imagePath = val;
+        }
+    }
+}
+
+static void CameraProfiles_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out_buf) {
+    if (g_CameraProfiles.empty()) return; // Don't write anything if no profiles
+
+    for (const auto& profile : g_CameraProfiles) {
+        out_buf->appendf("[%s][%s]\n", handler->TypeName, profile.name.c_str());
+        for (size_t i = 0; i < profile.cameras.size(); i++) {
+            const CameraItem& camera = profile.cameras[i];
+            out_buf->appendf("Camera_%d_Name=%s\n", (int)i, camera.name.c_str());
+            if (!camera.camPathFile.empty()) {
+                out_buf->appendf("Camera_%d_Path=%s\n", (int)i, camera.camPathFile.c_str());
+            }
+            if (!camera.imagePath.empty()) {
+                out_buf->appendf("Camera_%d_Image=%s\n", (int)i, camera.imagePath.c_str());
+            }
+        }
+        out_buf->append("\n");
+    }
+}
+
+// Helper function to load image from file using WIC and create D3D11 texture
+static bool LoadImageToTexture(ID3D11Device* device, const std::string& filePath, CameraTexture& outTexture) {
+    // Convert to wide string
+    std::wstring wFilePath(filePath.begin(), filePath.end());
+
+    // Initialize COM (may already be initialized, ignore error)
+    CoInitialize(nullptr);
+
+    IWICImagingFactory* factory = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (FAILED(hr)) return false;
+
+    IWICBitmapDecoder* decoder = nullptr;
+    hr = factory->CreateDecoderFromFilename(wFilePath.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder);
+    if (FAILED(hr)) {
+        factory->Release();
+        return false;
+    }
+
+    IWICBitmapFrameDecode* frame = nullptr;
+    hr = decoder->GetFrame(0, &frame);
+    if (FAILED(hr)) {
+        decoder->Release();
+        factory->Release();
+        return false;
+    }
+
+    IWICFormatConverter* converter = nullptr;
+    hr = factory->CreateFormatConverter(&converter);
+    if (FAILED(hr)) {
+        frame->Release();
+        decoder->Release();
+        factory->Release();
+        return false;
+    }
+
+    hr = converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+    if (FAILED(hr)) {
+        converter->Release();
+        frame->Release();
+        decoder->Release();
+        factory->Release();
+        return false;
+    }
+
+    UINT width, height;
+    converter->GetSize(&width, &height);
+
+    std::vector<BYTE> pixels(width * height * 4);
+    hr = converter->CopyPixels(nullptr, width * 4, (UINT)pixels.size(), pixels.data());
+
+    converter->Release();
+    frame->Release();
+    decoder->Release();
+    factory->Release();
+
+    if (FAILED(hr)) return false;
+
+    // Create D3D11 texture
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA initData = {};
+    initData.pSysMem = pixels.data();
+    initData.SysMemPitch = width * 4;
+
+    ID3D11Texture2D* texture = nullptr;
+    hr = device->CreateTexture2D(&desc, &initData, &texture);
+    if (FAILED(hr)) return false;
+
+    // Create shader resource view
+    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+    srvDesc.Format = desc.Format;
+    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.Texture2D.MipLevels = 1;
+
+    hr = device->CreateShaderResourceView(texture, &srvDesc, &outTexture.srv);
+    texture->Release();
+
+    if (FAILED(hr)) return false;
+
+    outTexture.width = (int)width;
+    outTexture.height = (int)height;
+
+    return true;
+}
+
 OverlayDx11::OverlayDx11(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* swapchain, HWND hwnd)
     : m_Device(device), m_Context(context), m_Swapchain(swapchain), m_Hwnd(hwnd) {}
 
@@ -1240,6 +1616,17 @@ bool OverlayDx11::Initialize() {
     if (!ImGui_ImplDX11_Init(m_Device, m_Context)) return false;
     advancedfx::Message("Overlay: renderer=DX11\n");
 
+    // Provide icon device + directory for HUD (resources/overlay)
+    {
+        Hud::SetIconDevice((void*)m_Device);
+        const wchar_t* hf = GetHlaeFolderW();
+        if (hf && *hf) {
+            // Icons live under resources/overlay/{icons,weapons}
+            std::wstring wdir = std::wstring(hf) + L"resources\\overlay";
+            Hud::SetIconsDirectoryW(wdir);
+        }
+    }
+
     // Register custom ImGui ini settings handler for last-used directories
     if (!ImGui::FindSettingsHandler("HLAEOverlayPaths")) {
         ImGuiSettingsHandler ini;
@@ -1252,6 +1639,22 @@ bool OverlayDx11::Initialize() {
         ImGuiIO& io2 = ImGui::GetIO();
         if (io2.IniFilename && io2.IniFilename[0]) {
             ImGui::LoadIniSettingsFromDisk(io2.IniFilename);
+        }
+    }
+
+    // Register custom ImGui ini settings handler for camera profiles
+    if (!ImGui::FindSettingsHandler("HLAECameraProfiles")) {
+        ImGuiSettingsHandler ini2;
+        ini2.TypeName = "HLAECameraProfiles";
+        ini2.TypeHash = ImHashStr(ini2.TypeName);
+        ini2.ReadOpenFn = CameraProfiles_ReadOpen;
+        ini2.ReadLineFn = CameraProfiles_ReadLine;
+        ini2.WriteAllFn = CameraProfiles_WriteAll;
+        ImGui::AddSettingsHandler(&ini2);
+        // Load persisted profiles now that the handler is registered
+        ImGuiIO& io3 = ImGui::GetIO();
+        if (io3.IniFilename && io3.IniFilename[0]) {
+            ImGui::LoadIniSettingsFromDisk(io3.IniFilename);
         }
     }
 
@@ -1287,6 +1690,16 @@ bool OverlayDx11::Initialize() {
                     g_dropFirstMouseAfterActivate = false;
                     return false; // pass through, don't feed ImGui this one
                 }
+                // If overlay is visible, force an arrow cursor on WM_SETCURSOR to avoid invisible game cursor
+                if (Overlay::Get().IsVisible() && msg == WM_SETCURSOR) {
+                    // Only force arrow when ImGui actually wants to capture the mouse
+                    // to avoid fighting overlay's own RMB-preview control (which hides cursor).
+                    if (ImGui::GetIO().WantCaptureMouse && !Overlay::Get().IsRmbPassthroughActive()) {
+                        SetCursor(LoadCursor(NULL, IDC_ARROW));
+                        return true; // handled
+                    }
+                }
+
                 // Feed ImGui first so it updates IO states
                 bool consumed = CallImGuiWndProcGuarded((HWND)hwnd, (UINT)msg, (WPARAM)wparam, (LPARAM)lparam);
 
@@ -1319,7 +1732,13 @@ bool OverlayDx11::Initialize() {
                 bool overlayVisible = Overlay::Get().IsVisible();
                 bool wantCaptureMouse = ImGui::GetIO().WantCaptureMouse;
                 bool passThrough = overlayVisible && s_rmbDown && !wantCaptureMouse;
+                static bool s_prevPassThrough = false;
                 Overlay::Get().SetRmbPassthroughActive(passThrough);
+                // If RMB passthrough just ended, make sure to release any cursor confinement
+                if (s_prevPassThrough && !passThrough) {
+                    ClipCursor(nullptr);
+                }
+                s_prevPassThrough = passThrough;
 
                 // While in RMB passthrough, allow holding 'R' to switch mouse horizontal motion to camera roll control.
                 static bool s_rollModeActive = false;
@@ -1414,8 +1833,10 @@ bool OverlayDx11::Initialize() {
                         case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
                         case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
                         case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+                        case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
                         case WM_MOUSEWHEEL:
                         case WM_MOUSEHWHEEL:
+                        case WM_INPUT: // block raw input from reaching the game while overlay active
                         case WM_KEYDOWN: case WM_KEYUP:
                         case WM_SYSKEYDOWN: case WM_SYSKEYUP:
                             consumed = true; break;
@@ -1446,6 +1867,13 @@ void OverlayDx11::Shutdown() {
     }
     m_Rtv.width = m_Rtv.height = 0;
     ReleaseBackbufferPreview();
+    // Release radar texture if loaded
+    if (g_RadarCtx.srv) { g_RadarCtx.srv->Release(); g_RadarCtx.srv = nullptr; }
+    g_RadarAssetsLoaded = false;
+
+    // Stop GSI server
+    g_GsiServer.Stop();
+
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     // Do not destroy ImGui context here, shared across overlays.
@@ -1477,6 +1905,179 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             );
         }
     }
+
+    if (g_ShowRadar) {
+        // Simple native radar using cs-hud mapping
+        float radarWidth = g_RadarUiSize;
+        float radarHeight = g_RadarUiSize;
+        // Clamp to screen bounds
+        ImVec2 ds = ImGui::GetIO().DisplaySize;
+        float px = g_RadarUiPosX; if (px < 0) px = 0; if (px > ds.x - radarWidth) px = ds.x - radarWidth;
+        float py = g_RadarUiPosY; if (py < 0) py = 0; if (py > ds.y - radarHeight) py = ds.y - radarHeight;
+        ImVec2 radarPos = ImVec2(px, py);
+
+        ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+
+        // If assets are loaded and we have a valid config, render it
+        if (g_RadarAssetsLoaded && (g_RadarCtx.cfg.scale != 0.0)) {
+            struct RadarPlayer { Radar::Entity ent; int team = 0; int slot = -1; };
+            std::vector<RadarPlayer> players;
+
+            // Populate from CS2 GSI via embedded HTTP server
+            {
+                auto opt = g_GsiServer.TryGetRadarPlayers();
+                if (opt.has_value()) {
+                    for (const auto &rp : *opt) {
+                        if (!rp.alive) continue; // mimic pawn presence behavior
+                        Radar::Entity e;
+                        e.id = rp.id;
+                        // Pre-smooth to keep label and marker in sync.
+                        {
+                            Radar::Vec3 pRaw { rp.pos[0], rp.pos[1], rp.pos[2] };
+                            auto &s = g_RadarCtx.smooth[e.id];
+                            s.push(pRaw);
+                            Radar::Vec3 pAvg = s.avg();
+                            e.pos = { pAvg.x, pAvg.y, pAvg.z };
+                            e.smooth = false; // already smoothed
+                        }
+                        e.fwd = { rp.fwd[0], rp.fwd[1] };
+                        // Team-based coloring (2=T, 3=CT)
+                        ImU32 col = IM_COL32(200, 200, 200, 255);
+                        if (rp.teamSide == 2) col = IM_COL32(255, 120, 80, 255);
+                        else if (rp.teamSide == 3) col = IM_COL32(90, 160, 255, 255);
+                        if (rp.hasBomb) col = IM_COL32(220, 50, 50, 255);
+                        e.color = col;
+                        players.push_back({ std::move(e), rp.teamSide, rp.observerSlot });
+                    }
+                }
+            }
+
+            // Draw radar background first (no entities, no border)
+            {
+                std::vector<Radar::Entity> none;
+                Radar::Render(drawList, radarPos, ImVec2(radarWidth, radarHeight), g_RadarCtx, none, 0.0f, false, true);
+            }
+
+            // Grenade overlays (smoke + inferno) between background and players
+            {
+                auto optg = g_GsiServer.TryGetRadarGrenades();
+                if (optg.has_value()) {
+                    // Constants from cs-hud (fennec theme): sizes are relative to 1024
+                    const float uvSmokeRadius = (28.8f / 1024.0f); // 57.6 diameter
+                    const float uvInfernoRadius = (7.0f / 1024.0f); // 14 diameter per flame
+                    auto colorFor = [](int side, bool smoke)->ImU32{
+                        if (smoke) {
+                            return side==3 ? IM_COL32(99,134,150,190) : (side==2 ? IM_COL32(119,115,78,190) : IM_COL32(110,110,110,180));
+                        } else {
+                            return side==3 ? IM_COL32(142,79,111,190) : (side==2 ? IM_COL32(193,68,2,190) : IM_COL32(160,80,20,190));
+                        }
+                    };
+                    for (const auto &g : *optg) {
+                        Radar::Vec2 uv = Radar::WorldToUV({ g.pos[0], g.pos[1], g.pos[2] }, g_RadarCtx.cfg);
+                        ImVec2 center = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+                        float r = (g.type == GsiHttpServer::RadarGrenade::Smoke ? uvSmokeRadius : uvInfernoRadius) * radarWidth;
+                        ImU32 col = colorFor(g.ownerSide, g.type == GsiHttpServer::RadarGrenade::Smoke);
+                        drawList->AddCircleFilled(center, r, col, 20);
+                    }
+                }
+            }
+
+            // Bomb marker (if dropped or planted and has position)
+            {
+                auto optb = g_GsiServer.TryGetRadarBomb();
+                if (optb.has_value()) {
+                    const auto &b = *optb;
+                    if (b.hasPosition && !b.state.empty() && _stricmp(b.state.c_str(), "carried") != 0) {
+                        Radar::Vec2 uv = Radar::WorldToUV({ b.pos[0], b.pos[1], b.pos[2] }, g_RadarCtx.cfg);
+                        ImVec2 center = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+                        float rpx = (0.012f * radarWidth); if (rpx < 4.0f) rpx = 4.0f; if (rpx > 18.0f) rpx = 18.0f;
+                        ImU32 col = IM_COL32(255, 255, 255, 230);
+                        if (!_stricmp(b.state.c_str(), "planted")) col = IM_COL32(255, 220, 50, 230);
+                        else if (!_stricmp(b.state.c_str(), "defusing")) col = IM_COL32(120, 200, 255, 230);
+                        else if (!_stricmp(b.state.c_str(), "defused")) col = IM_COL32(90, 210, 120, 230);
+                        else if (!_stricmp(b.state.c_str(), "exploded")) col = IM_COL32(255, 90, 30, 230);
+                        // diamond
+                        ImVec2 p0(center.x, center.y - rpx);
+                        ImVec2 p1(center.x + rpx, center.y);
+                        ImVec2 p2(center.x, center.y + rpx);
+                        ImVec2 p3(center.x - rpx, center.y);
+                        drawList->AddQuadFilled(p0, p1, p2, p3, col);
+                        drawList->AddQuad(p0, p1, p2, p3, IM_COL32(0,0,0,220), 1.5f);
+                    }
+                }
+            }
+
+            // Prepare entities for draw
+            std::vector<Radar::Entity> entities; entities.reserve(players.size());
+            for (auto &p : players) entities.emplace_back(std::move(p.ent));
+
+            // Scale markers with radar size (base = 300px => radius 7px)
+            float scale = radarWidth > 1.0f ? (radarWidth / 300.0f) : 1.0f;
+            if (scale < 0.25f) scale = 0.25f; if (scale > 5.0f) scale = 5.0f;
+            float markerRadius = 7.0f * scale;
+            // Draw only entities and border (background already drawn)
+            Radar::Render(drawList, radarPos, ImVec2(radarWidth, radarHeight), g_RadarCtx, entities, markerRadius, true, false);
+
+            // Focus ring for spectated player (above markers, below labels)
+            {
+                auto hopt = g_GsiServer.TryGetHudState();
+                if (hopt.has_value() && hopt->focusedPlayerId != -1) {
+                    int focusedId = hopt->focusedPlayerId;
+                    for (const auto &p : players) {
+                        if (p.ent.id != focusedId) continue;
+                        Radar::Vec2 uv = Radar::WorldToUV({ p.ent.pos.x, p.ent.pos.y, p.ent.pos.z }, g_RadarCtx.cfg);
+                        ImVec2 pt = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+                        float thick = (std::max)(1.5f, 1.5f * scale);
+                        drawList->AddCircle(pt, markerRadius + thick*0.75f, IM_COL32(255,255,255,255), 0, thick);
+                        break;
+                    }
+                }
+            }
+
+            // Draw labels centered on markers
+            auto slot_to_digit = [](int slot)->char{
+                if (slot < 0) return 0;
+                if (slot >= 0 && slot <= 8) return (char)('1' + slot);
+                if (slot == 9) return '0';
+                return 0;
+            };
+            for (const auto &p : players) {
+                char d = slot_to_digit(p.slot);
+                if (!d) continue;
+                char txt[2] = { d, '\0' };
+
+
+                // Position on radar
+                Radar::Vec2 uv = Radar::WorldToUV({ p.ent.pos.x, p.ent.pos.y, p.ent.pos.z }, g_RadarCtx.cfg);
+                ImVec2 pt = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+
+                // Scale label font size with radar size
+                ImFont* font = ImGui::GetFont();
+                if (!font) font = ImGui::GetIO().FontDefault;
+                float baseSize = ImGui::GetFontSize();
+                float fontSize = baseSize * scale;
+                if (fontSize < 8.0f) fontSize = 8.0f; if (fontSize > 60.0f) fontSize = 60.0f;
+
+                // Text size and centered position
+                ImVec2 ts = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, txt);
+                ImVec2 p0 = ImVec2(pt.x - ts.x * 0.5f, pt.y - ts.y * 0.5f);
+
+                // Outline + foreground for readability (outline size scales a bit too)
+                float o = std::roundf((std::max)(1.0f, scale));
+                drawList->AddText(font, fontSize, ImVec2(p0.x + o, p0.y + o), IM_COL32(0,0,0,220), txt);
+                drawList->AddText(font, fontSize, p0, IM_COL32(255,255,255,255), txt);
+            }
+        } else {
+            // Placeholder box + URL (legacy)
+            ImVec2 radarEnd = ImVec2(radarPos.x + radarWidth, radarPos.y + radarHeight);
+            drawList->AddRectFilled(radarPos, radarEnd, IM_COL32(50, 50, 50, 128));
+            drawList->AddRect(radarPos, radarEnd, IM_COL32(255, 255, 255, 255));
+            const char* text = "Radar not loaded";
+            ImVec2 textSize = ImGui::CalcTextSize(text);
+            drawList->AddText(ImVec2(radarPos.x + (radarWidth - textSize.x) / 2, radarPos.y + (radarHeight - textSize.y) / 2), IM_COL32(255, 255, 255, 255), text);
+        }
+    }
+
     UpdateBackbufferPreviewTexture();
     // Reset preview-rect tracking for this frame; will be set when preview window renders
     g_PreviewRectValid = false;
@@ -1846,6 +2447,140 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Sets sc_no_vis 1, removes culling when out of bounds.");
             }
+            ImGui::EndTabItem();
+        }
+        // Observing
+        if (ImGui::BeginTabItem("Observing")) {
+            ImGui::Checkbox("Enable Observing mode", &g_ObservingEnabled);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Enable spectating features and hotkey bindings.");
+            }
+
+            if (ImGui::Checkbox("Show Bindings", &g_ShowObservingBindings)) {
+                // Window toggle
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Open window to bind 0-9 hotkeys to players.");
+            }
+
+            if (ImGui::Checkbox("Show Cameras", &g_ShowObservingCameras)) {
+                // Window toggle
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Open window to manage campath profiles and cameras.");
+            }
+
+            ImGui::Separator();
+            ImGui::Checkbox("Show viewport HUD", &g_ShowHud);
+            ImGui::Checkbox("Show Radar", &g_ShowRadar);
+            if (g_ShowRadar) {
+                // Position and size controls
+                ImGui::TextUnformatted("Radar Placement");
+                ImGui::PushID("radar_placement");
+                ImGui::SliderFloat("Pos X", &g_RadarUiPosX, 0.0f, ImGui::GetIO().DisplaySize.x, "%.0f");
+                ImGui::SliderFloat("Pos Y", &g_RadarUiPosY, 0.0f, ImGui::GetIO().DisplaySize.y, "%.0f");
+                ImGui::SliderFloat("Size", &g_RadarUiSize, 100.0f, 900.0f, "%.0f px");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Reset##radar_ui")) { g_RadarUiPosX = 50.0f; g_RadarUiPosY = 50.0f; g_RadarUiSize = 300.0f; }
+                ImGui::PopID();
+            }
+            // Load map list from built-in radars.json if not yet loaded
+            if (!g_RadarMapsLoaded) {
+                const wchar_t* hf = GetHlaeFolderW();
+                if (hf && *hf) {
+                    std::wstring wJson = std::wstring(hf) + L"resources\\overlay\\radar\\radars.json";
+                    DWORD attr = GetFileAttributesW(wJson.c_str());
+                    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                        int need = WideCharToMultiByte(CP_UTF8, 0, wJson.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                        std::string jsonUtf8; if (need > 0) { jsonUtf8.resize((size_t)need - 1); WideCharToMultiByte(CP_UTF8, 0, wJson.c_str(), -1, &jsonUtf8[0], need, nullptr, nullptr);}            
+                        std::wstring wImgBase = std::wstring(hf) + L"resources\\overlay\\radar\\ingame";
+                        need = WideCharToMultiByte(CP_UTF8, 0, wImgBase.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                        std::string imgBase; if (need > 0) { imgBase.resize((size_t)need - 1); WideCharToMultiByte(CP_UTF8, 0, wImgBase.c_str(), -1, &imgBase[0], need, nullptr, nullptr);}            
+                        g_RadarAllConfigs.clear(); g_RadarMapList.clear();
+                        if (Radar::LoadRadarsJson(jsonUtf8, g_RadarAllConfigs, imgBase)) {
+                            for (const auto& kv : g_RadarAllConfigs) g_RadarMapList.push_back(kv.first);
+                            std::sort(g_RadarMapList.begin(), g_RadarMapList.end());
+                            g_RadarMapsLoaded = true;
+                        }
+                    }
+                }
+            }
+            // Map combo from built-in list
+            ImGui::SetNextItemWidth(240.0f);
+            if (ImGui::BeginCombo("Map", g_RadarMapName)) {
+                for (const auto& nm : g_RadarMapList) {
+                    bool selected = (_stricmp(nm.c_str(), g_RadarMapName) == 0);
+                    if (ImGui::Selectable(nm.c_str(), selected)) {
+                        strncpy_s(g_RadarMapName, nm.c_str(), _TRUNCATE);
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reload Maps")) { g_RadarMapsLoaded = false; }
+            
+            if (ImGui::SmallButton("Load Radar")) {
+                // Load config
+                bool okCfg = false;
+                auto it = g_RadarAllConfigs.find(g_RadarMapName);
+                if (it != g_RadarAllConfigs.end()) { g_RadarCtx.cfg = it->second; okCfg = true; }
+                else if (!g_RadarAllConfigs.empty()) { g_RadarCtx.cfg = g_RadarAllConfigs.begin()->second; strncpy_s(g_RadarMapName, g_RadarAllConfigs.begin()->first.c_str(), _TRUNCATE); okCfg = true; }
+            
+                if (!okCfg) { g_RadarCtx.cfg.pos_x = 0.0; g_RadarCtx.cfg.pos_y = 0.0; g_RadarCtx.cfg.scale = 1.0; }
+
+                // Load texture
+                if (g_RadarCtx.srv) { g_RadarCtx.srv->Release(); g_RadarCtx.srv = nullptr; }
+                g_RadarCtx.texW = g_RadarCtx.texH = 0;
+                bool texOk = false;
+                if (!g_RadarCtx.cfg.imagePath.empty()) {
+                    std::wstring wpath = Mk_Utf8ToWide(g_RadarCtx.cfg.imagePath);
+                    texOk = Radar::LoadTextureWIC(m_Device, wpath, &g_RadarCtx.srv, &g_RadarCtx.texW, &g_RadarCtx.texH);
+                }
+                if (!texOk) {
+                    const wchar_t* hf = GetHlaeFolderW();
+                    if (hf && *hf) {
+                        std::wstring base = std::wstring(hf) + L"resources\\overlay\\radar\\ingame\\";
+                        std::wstring wmap; wmap.assign(g_RadarMapName, g_RadarMapName + strlen(g_RadarMapName));
+                        std::wstring p1 = base + wmap + L".png";
+                        DWORD a1 = GetFileAttributesW(p1.c_str());
+                        if (a1 != INVALID_FILE_ATTRIBUTES && !(a1 & FILE_ATTRIBUTE_DIRECTORY)) {
+                            texOk = Radar::LoadTextureWIC(m_Device, p1, &g_RadarCtx.srv, &g_RadarCtx.texW, &g_RadarCtx.texH);
+                        } else {
+                            std::wstring p2 = base + wmap + L"_lower.png";
+                            DWORD a2 = GetFileAttributesW(p2.c_str());
+                            if (a2 != INVALID_FILE_ATTRIBUTES && !(a2 & FILE_ATTRIBUTE_DIRECTORY)) {
+                                texOk = Radar::LoadTextureWIC(m_Device, p2, &g_RadarCtx.srv, &g_RadarCtx.texW, &g_RadarCtx.texH);
+                            }
+                        }
+                    }
+                }
+                g_RadarAssetsLoaded = texOk;
+            }
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset Numbers")) {
+                // Clear persistent controller->digit mapping (useful at half-time)
+                g_RadarLabelByController.clear();
+                g_RadarLabelTeam.clear();
+                advancedfx::Message("Overlay: Reset radar number mapping (half-time)\n");
+            }
+
+            ImGui::Separator();
+
+            ImGui::Text("Game State Integration server:");
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::InputInt("Port", &g_GsiPort);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(g_GsiServer.IsRunning() ? "Restart" : "Start")) {
+                g_GsiServer.Stop(); g_GsiServer.Start(g_GsiPort);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Stop")) {
+                g_GsiServer.Stop();
+            }
+            ImGui::Text("GSI: %s", g_GsiServer.IsRunning() ? "listening" : "stopped");
+
             ImGui::EndTabItem();
         }
         // Settings
@@ -2314,6 +3049,569 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
     }
 
+    // Observing Bindings Window
+    if (g_ShowObservingBindings) {
+        ImGui::Begin("Observing Bindings", &g_ShowObservingBindings);
+
+        // Build player list - stored as static so it persists
+        static std::vector<std::pair<int, std::string>> playerList; // <index, name>
+
+        // Refresh button to update player list
+        if (ImGui::Button("Refresh Players")) {
+            playerList.clear();
+            if (g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                int highest = GetHighestEntityIndex();
+                for (int i = 0; i <= highest; i++) {
+                    if (auto* ent = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, i))) {
+                        if (ent->IsPlayerController()) {
+                            // Use same pattern as other code: try sanitized name first, then regular name
+                            const char* name = ent->GetSanitizedPlayerName();
+                            if (!name || !*name) {
+                                name = ent->GetPlayerName();
+                            }
+                            if (!name || !*name) {
+                                name = ent->GetDebugName();
+                            }
+
+                            // Fallback to generic name if still invalid
+                            if (name && *name) {
+                                playerList.push_back({i, std::string(name)});
+                            } else {
+                                char fallback[64];
+                                _snprintf_s(fallback, _TRUNCATE, "Player_%d", i);
+                                playerList.push_back({i, std::string(fallback)});
+                            }
+                        }
+                    }
+                }
+            }
+            advancedfx::Message("Overlay: Refreshed player list, found %d players\n", (int)playerList.size());
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Auto Assign")) {
+            AutoPopulateObservingBindingsFromEntities();
+        }
+        ImGui::SameLine();
+        ImGui::Text("(%d players)", (int)playerList.size());
+
+        ImGui::Separator();
+
+        // Show 10 rows, order 1..9 then 0
+        {
+            const int keyOrder[10] = {1,2,3,4,5,6,7,8,9,0};
+            for (int ko = 0; ko < 10; ++ko) {
+                int keyNum = keyOrder[ko];
+                ImGui::PushID(keyNum);
+
+            // Hotkey label
+            ImGui::Text("Key %d:", keyNum);
+            ImGui::SameLine();
+
+            // Get current binding for this key
+            int currentBinding = -1;
+            auto it = g_ObservingHotkeyBindings.find(keyNum);
+            if (it != g_ObservingHotkeyBindings.end()) {
+                currentBinding = it->second;
+            }
+
+            // Build label for combo - use C strings to avoid allocations
+            char comboLabel[256];
+            if (currentBinding >= 0) {
+                // Find player name
+                bool found = false;
+                for (const auto& p : playerList) {
+                    if (p.first == currentBinding) {
+                        _snprintf_s(comboLabel, _TRUNCATE, "%s (idx: %d)", p.second.c_str(), p.first);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    _snprintf_s(comboLabel, _TRUNCATE, "Controller %d", currentBinding);
+                }
+            } else {
+                strcpy_s(comboLabel, "<None>");
+            }
+
+            // Player combo
+            ImGui::SetNextItemWidth(200.0f);
+            if (ImGui::BeginCombo("##player", comboLabel)) {
+                // None option
+                if (ImGui::Selectable("<None>", currentBinding < 0)) {
+                    g_ObservingHotkeyBindings.erase(keyNum);
+                    advancedfx::Message("Overlay: Cleared binding for key %d\n", keyNum);
+                }
+
+                // Player options
+                for (const auto& player : playerList) {
+                    char label[256];
+                    _snprintf_s(label, _TRUNCATE, "%s (idx: %d)", player.second.c_str(), player.first);
+                    bool selected = (player.first == currentBinding);
+                    if (ImGui::Selectable(label, selected)) {
+                        g_ObservingHotkeyBindings[keyNum] = player.first;
+                        advancedfx::Message("Overlay: Bound key %d to controller index %d\n", keyNum, player.first);
+                    }
+                    if (selected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+                ImGui::PopID();
+            }
+        }
+
+        ImGui::End();
+    }
+
+    // Observing Cameras Window
+    if (g_ShowObservingCameras) {
+        ImGui::Begin("Observing Cameras", &g_ShowObservingCameras);
+
+        // Modal dialogs for input
+        static bool showAddProfileModal = false;
+        static bool showAddCameraModal = false;
+        static char profileNameInput[256] = {0};
+        static char cameraNameInput[256] = {0};
+
+        // Header with buttons
+        if (ImGui::Button("Add Profile")) {
+            profileNameInput[0] = '\0';
+            showAddProfileModal = true;
+            ImGui::OpenPopup("Add Profile##modal");
+        }
+
+        ImGui::SameLine();
+
+        ImGui::BeginDisabled(g_SelectedProfileIndex < 0 || g_SelectedProfileIndex >= (int)g_CameraProfiles.size());
+        if (ImGui::Button("Add Camera")) {
+            cameraNameInput[0] = '\0';
+            showAddCameraModal = true;
+            ImGui::OpenPopup("Add Camera##modal");
+        }
+        ImGui::EndDisabled();
+
+        ImGui::SameLine();
+
+        // Profile dropdown
+        ImGui::SetNextItemWidth(200.0f);
+        std::string currentProfileLabel = "<No Profile>";
+        if (g_SelectedProfileIndex >= 0 && g_SelectedProfileIndex < (int)g_CameraProfiles.size()) {
+            currentProfileLabel = g_CameraProfiles[g_SelectedProfileIndex].name;
+        }
+
+        if (ImGui::BeginCombo("Profile", currentProfileLabel.c_str())) {
+            for (int i = 0; i < (int)g_CameraProfiles.size(); i++) {
+                bool selected = (i == g_SelectedProfileIndex);
+                if (ImGui::Selectable(g_CameraProfiles[i].name.c_str(), selected)) {
+                    g_SelectedProfileIndex = i;
+                }
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        // Remove Profile button
+        ImGui::SameLine();
+        if (ImGui::Button("Remove Profile")) {
+            if (g_SelectedProfileIndex >= 0 && g_SelectedProfileIndex < (int)g_CameraProfiles.size()) {
+                // Release any cached textures used by this profile
+                const auto &prof = g_CameraProfiles[g_SelectedProfileIndex];
+                for (const auto &cam : prof.cameras) {
+                    if (!cam.imagePath.empty()) {
+                        auto it = g_CameraTextures.find(cam.imagePath);
+                        if (it != g_CameraTextures.end()) {
+                            if (it->second.srv) it->second.srv->Release();
+                            g_CameraTextures.erase(it);
+                        }
+                    }
+                }
+                advancedfx::Message("Overlay: Removed camera profile '%s'\n", g_CameraProfiles[g_SelectedProfileIndex].name.c_str());
+                g_CameraProfiles.erase(g_CameraProfiles.begin() + g_SelectedProfileIndex);
+                if (g_SelectedProfileIndex >= (int)g_CameraProfiles.size()) g_SelectedProfileIndex = (int)g_CameraProfiles.size() - 1;
+                ImGui::MarkIniSettingsDirty();
+            }
+        }
+
+        // Scale slider
+        ImGui::SameLine();
+        ImGui::TextUnformatted("Scale");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::SliderFloat("##cam_rect_scale", &g_CameraRectScale, 0.5f, 3.0f, "%.2fx");
+
+        // Save button
+        ImGui::SameLine();
+        if (ImGui::Button("Save")) {
+            ImGui::MarkIniSettingsDirty();
+            ImGuiIO& io_s = ImGui::GetIO();
+            if (io_s.IniFilename && io_s.IniFilename[0]) {
+                ImGui::SaveIniSettingsToDisk(io_s.IniFilename);
+                advancedfx::Message("Overlay: Saved camera profiles to '%s'\n", io_s.IniFilename);
+            }
+        }
+
+        // Add Profile Modal
+        if (ImGui::BeginPopupModal("Add Profile##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Enter profile name:");
+            ImGui::SetNextItemWidth(300.0f);
+            ImGui::InputText("##profile_name", profileNameInput, sizeof(profileNameInput));
+
+            ImGui::Separator();
+
+            if (ImGui::Button("Create", ImVec2(120, 0))) {
+                if (profileNameInput[0] != '\0') {
+                    CameraProfile newProfile;
+                    newProfile.name = profileNameInput;
+                    g_CameraProfiles.push_back(newProfile);
+                    g_SelectedProfileIndex = (int)g_CameraProfiles.size() - 1;
+                    advancedfx::Message("Overlay: Created camera profile '%s'\n", profileNameInput);
+                    ImGui::MarkIniSettingsDirty();
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::EndPopup();
+        }
+
+        // Add Camera Modal
+        if (ImGui::BeginPopupModal("Add Camera##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Enter camera name:");
+            ImGui::SetNextItemWidth(300.0f);
+            ImGui::InputText("##camera_name", cameraNameInput, sizeof(cameraNameInput));
+
+            ImGui::Separator();
+
+            if (ImGui::Button("Create", ImVec2(120, 0))) {
+                if (cameraNameInput[0] != '\0' && g_SelectedProfileIndex >= 0 && g_SelectedProfileIndex < (int)g_CameraProfiles.size()) {
+                    CameraItem newCamera;
+                    newCamera.name = cameraNameInput;
+                    g_CameraProfiles[g_SelectedProfileIndex].cameras.push_back(newCamera);
+                    advancedfx::Message("Overlay: Added camera '%s' to profile '%s'\n", cameraNameInput, g_CameraProfiles[g_SelectedProfileIndex].name.c_str());
+                    ImGui::MarkIniSettingsDirty();
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::EndPopup();
+        }
+
+        ImGui::Separator();
+
+        // Display cameras for selected profile
+        if (g_SelectedProfileIndex >= 0 && g_SelectedProfileIndex < (int)g_CameraProfiles.size()) {
+            CameraProfile& profile = g_CameraProfiles[g_SelectedProfileIndex];
+
+            // Static file browsers for each camera (using map keyed by camera index)
+            static std::map<size_t, ImGui::FileBrowser> cameraFileBrowsers;
+            static std::map<size_t, ImGui::FileBrowser> imageFileBrowsers;
+            // Track drag state across items to suppress click-to-play when reordering
+            static bool s_CameraDragActive = false;
+            // Track press position/index to decide click vs drag on release
+            static int   s_CameraPressedIndex = -1;
+            static ImVec2 s_CameraPressPos = ImVec2(0,0);
+
+            // Load any images that haven't been loaded yet
+            for (const auto& camera : profile.cameras) {
+                if (!camera.imagePath.empty() && g_CameraTextures.find(camera.imagePath) == g_CameraTextures.end()) {
+                    CameraTexture tex;
+                    if (LoadImageToTexture(m_Device, camera.imagePath, tex)) {
+                        g_CameraTextures[camera.imagePath] = tex;
+                    }
+                }
+            }
+
+            // Grid layout parameters
+            ImVec2 gridOrigin = ImGui::GetCursorScreenPos();
+            ImGuiStyle& st_cam = ImGui::GetStyle();
+            float spacingX = st_cam.ItemSpacing.x;
+            float spacingY = st_cam.ItemSpacing.y;
+            // Base button size scaled
+            ImVec2 baseButton(160.0f, 90.0f);
+            ImVec2 buttonSize(baseButton.x * g_CameraRectScale, baseButton.y * g_CameraRectScale);
+            float contentW = ImGui::GetContentRegionAvail().x;
+            int columns = (int)floor((contentW + spacingX) / (buttonSize.x + spacingX));
+            if (columns < 1) columns = 1;
+
+            for (size_t camIdx = 0; camIdx < profile.cameras.size(); camIdx++) {
+                CameraItem& camera = profile.cameras[camIdx];
+                ImGui::PushID((int)camIdx);
+
+                // Determine grid position
+                int col = (int)(camIdx % (size_t)columns);
+                int row = (int)(camIdx / (size_t)columns);
+                ImVec2 itemMin = ImVec2(
+                    gridOrigin.x + col * (buttonSize.x + spacingX),
+                    gridOrigin.y + row * (buttonSize.y + spacingY)
+                );
+                ImVec2 itemMax = ImVec2(itemMin.x + buttonSize.x, itemMin.y + buttonSize.y);
+                ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+                // Draw background and border
+                drawList->AddRectFilled(itemMin, itemMax, IM_COL32(60, 60, 60, 255));
+                drawList->AddRect(itemMin, itemMax, IM_COL32(100, 100, 100, 255));
+
+                // Draw image if available
+                if (!camera.imagePath.empty()) {
+                    auto texIt = g_CameraTextures.find(camera.imagePath);
+                    if (texIt != g_CameraTextures.end() && texIt->second.srv) {
+                        // Calculate scaled size to fit within button
+                        float scaleX = buttonSize.x / texIt->second.width;
+                        float scaleY = buttonSize.y / texIt->second.height;
+                        float scale = (scaleX < scaleY) ? scaleX : scaleY;
+                        ImVec2 imgSize(texIt->second.width * scale, texIt->second.height * scale);
+                        ImVec2 imgPos(itemMin.x + (buttonSize.x - imgSize.x) * 0.5f,
+                                     itemMin.y + (buttonSize.y - imgSize.y) * 0.5f);
+                        drawList->AddImage((ImTextureID)texIt->second.srv, imgPos,
+                                         ImVec2(imgPos.x + imgSize.x, imgPos.y + imgSize.y));
+                    }
+                }
+
+                // Draw camera name (truncate if too long) and scale with rectangle
+                float pad = 4.0f * g_CameraRectScale;
+                ImVec2 textPos = ImVec2(itemMin.x + pad, itemMin.y + pad);
+                char truncatedName[64];
+                _snprintf_s(truncatedName, _TRUNCATE, "%.20s", camera.name.c_str());
+
+                ImFont* nameFont = ImGui::GetFont();
+                if (!nameFont) nameFont = ImGui::GetIO().FontDefault;
+                float baseNameSize = ImGui::GetFontSize();
+                float nameSize = baseNameSize * g_CameraRectScale;
+                if (nameSize < 8.0f) nameSize = 8.0f; if (nameSize > 48.0f) nameSize = 48.0f;
+                float o = std::roundf((std::max)(1.0f, g_CameraRectScale));
+                // Shadow + foreground
+                drawList->AddText(nameFont, nameSize, ImVec2(textPos.x + o, textPos.y + o), IM_COL32(0, 0, 0, 200), truncatedName);
+                drawList->AddText(nameFont, nameSize, textPos, IM_COL32(255, 255, 255, 255), truncatedName);
+
+                // Draw campath file path (show just filename, not full path)
+                const char* pathText;
+                char fileNameOnly[64];
+                if (camera.camPathFile.empty()) {
+                    pathText = "<No file>";
+                } else {
+                    size_t lastSlash = camera.camPathFile.find_last_of("/\\");
+                    if (lastSlash != std::string::npos) {
+                        _snprintf_s(fileNameOnly, _TRUNCATE, "%.18s", camera.camPathFile.c_str() + lastSlash + 1);
+                    } else {
+                        _snprintf_s(fileNameOnly, _TRUNCATE, "%.18s", camera.camPathFile.c_str());
+                    }
+                    pathText = fileNameOnly;
+                }
+                ImVec2 pathPos = ImVec2(itemMin.x + pad, itemMin.y + 24.0f * g_CameraRectScale);
+                drawList->AddText(ImVec2(pathPos.x + 1, pathPos.y + 1), IM_COL32(0, 0, 0, 200), pathText);
+                drawList->AddText(pathPos, IM_COL32(200, 200, 200, 255), pathText);
+
+                // Now draw buttons on top (using absolute positioning)
+                // Track if any button was clicked
+                bool anyButtonClicked = false;
+
+                // Remove button (top right)
+                ImGui::SetCursorScreenPos(ImVec2(itemMax.x - 60, itemMin.y + 2.0f * g_CameraRectScale));
+                if (ImGui::SmallButton("Remove")) {
+                    profile.cameras.erase(profile.cameras.begin() + camIdx);
+                    advancedfx::Message("Overlay: Removed camera '%s'\n", camera.name.c_str());
+                    ImGui::MarkIniSettingsDirty();
+                    anyButtonClicked = true;
+                    ImGui::PopID();
+                    break;
+                }
+                anyButtonClicked |= ImGui::IsItemHovered();
+
+                // Browse button (below Remove)
+                ImGui::SetCursorScreenPos(ImVec2(itemMax.x - 60, itemMin.y + 20.0f * g_CameraRectScale));
+                if (ImGui::SmallButton("Browse")) {
+                    if (cameraFileBrowsers.find(camIdx) == cameraFileBrowsers.end()) {
+                        cameraFileBrowsers[camIdx] = ImGui::FileBrowser(
+                            ImGuiFileBrowserFlags_CloseOnEsc |
+                            ImGuiFileBrowserFlags_EditPathString
+                        );
+                        cameraFileBrowsers[camIdx].SetTitle("Select Campath File");
+                    }
+                    if (!g_OverlayPaths.campathDir.empty())
+                        cameraFileBrowsers[camIdx].SetDirectory(g_OverlayPaths.campathDir);
+                    cameraFileBrowsers[camIdx].Open();
+                    anyButtonClicked = true;
+                }
+                anyButtonClicked |= ImGui::IsItemHovered();
+
+                // Image button (below Browse)
+                ImGui::SetCursorScreenPos(ImVec2(itemMax.x - 60, itemMin.y + 38.0f * g_CameraRectScale));
+                if (ImGui::SmallButton("Image")) {
+                    if (imageFileBrowsers.find(camIdx) == imageFileBrowsers.end()) {
+                        imageFileBrowsers[camIdx] = ImGui::FileBrowser(
+                            ImGuiFileBrowserFlags_CloseOnEsc |
+                            ImGuiFileBrowserFlags_EditPathString
+                        );
+                        imageFileBrowsers[camIdx].SetTitle("Select Image File");
+                        imageFileBrowsers[camIdx].SetTypeFilters({".png", ".jpg", ".jpeg", ".bmp"});
+                    }
+                    if (!g_OverlayPaths.campathDir.empty())
+                        imageFileBrowsers[camIdx].SetDirectory(g_OverlayPaths.campathDir);
+                    imageFileBrowsers[camIdx].Open();
+                    anyButtonClicked = true;
+                }
+                anyButtonClicked |= ImGui::IsItemHovered();
+
+                // Draw invisible button for rectangle area; will be used for click and drag-drop
+                ImGui::SetCursorScreenPos(itemMin);
+                ImGui::InvisibleButton(("##cam_rect_" + std::to_string(camIdx)).c_str(), buttonSize);
+                bool didReorderHere = false;
+                // Remember press origin to differentiate click vs drag later
+                if (ImGui::IsItemActivated()) {
+                    s_CameraPressedIndex = (int)camIdx;
+                    s_CameraPressPos = ImGui::GetMousePos();
+                }
+
+                // Begin drag source for reordering cameras within the current profile
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoHoldToOpenOthers)) {
+                    s_CameraDragActive = true;
+                    int srcIndex = (int)camIdx;
+                    ImGui::SetDragDropPayload("HLAE_OBS_CAM_REORDER", &srcIndex, sizeof(srcIndex));
+                    // Simple drag preview
+                    ImGui::Text("Move %s", camera.name.c_str());
+                    ImGui::EndDragDropSource();
+                }
+                // Accept drop target on the whole rectangle
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HLAE_OBS_CAM_REORDER")) {
+                        if (payload && payload->Data && payload->DataSize == sizeof(int)) {
+                            int src = *(const int*)payload->Data;
+                            int dst = (int)camIdx;
+                            if (src >= 0 && src < (int)profile.cameras.size() && dst >= 0 && dst < (int)profile.cameras.size() && src != dst) {
+                                // Move item src -> dst, preserving relative order of others
+                                CameraItem moved = std::move(profile.cameras[src]);
+                                profile.cameras.erase(profile.cameras.begin() + src);
+                                // Insert semantics:
+                                // - dragging to an earlier index: insert before target (dst)
+                                // - dragging to a later index:  insert after target (original dst),
+                                //   which after erase is accomplished by inserting at index 'dst'.
+                                int insertIdx = dst; // works for both directions as explained above
+                                if (insertIdx < 0) insertIdx = 0;
+                                if (insertIdx > (int)profile.cameras.size()) insertIdx = (int)profile.cameras.size();
+                                profile.cameras.insert(profile.cameras.begin() + insertIdx, std::move(moved));
+                                // Clear per-index file browser caches since indices changed
+                                cameraFileBrowsers.clear();
+                                imageFileBrowsers.clear();
+                                ImGui::MarkIniSettingsDirty();
+                                advancedfx::Message("Overlay: Reordered camera to index %d\n", dst);
+                                // Avoid using stale indices in this frame
+                                didReorderHere = true;
+                            }
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+                if (didReorderHere) { ImGui::PopID(); continue; }
+
+                // On release: treat as click only if the cursor hasn't moved (no drag)
+                if (ImGui::IsItemDeactivated() && !s_CameraDragActive && s_CameraPressedIndex == (int)camIdx && !anyButtonClicked && !camera.camPathFile.empty()) {
+                    ImVec2 cur = ImGui::GetMousePos();
+                    float dx = cur.x - s_CameraPressPos.x;
+                    float dy = cur.y - s_CameraPressPos.y;
+                    float dist2 = dx*dx + dy*dy;
+                    const float clickThreshold = ImGui::GetIO().MouseDragThreshold; // pixels
+                    if (dist2 <= clickThreshold * clickThreshold) {
+                    std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_campath select all; mirv_campath edit start";
+                    Afx_ExecClientCmd(cmd.c_str());
+                    advancedfx::Message("Overlay: Loading campath '%s' from camera '%s'\n", camera.camPathFile.c_str(), camera.name.c_str());
+                    g_ActiveCameraCampathPath = camera.camPathFile;
+                    }
+                }
+
+                // Handle file browsers
+                if (cameraFileBrowsers.find(camIdx) != cameraFileBrowsers.end()) {
+                    cameraFileBrowsers[camIdx].Display();
+                if (cameraFileBrowsers[camIdx].HasSelected()) {
+                    camera.camPathFile = cameraFileBrowsers[camIdx].GetSelected().string();
+                    cameraFileBrowsers[camIdx].ClearSelected();
+                    advancedfx::Message("Overlay: Set campath file for '%s' to '%s'\n", camera.name.c_str(), camera.camPathFile.c_str());
+                    try { g_OverlayPaths.campathDir = std::filesystem::path(camera.camPathFile).parent_path().string(); } catch(...) {}
+                    ImGui::MarkIniSettingsDirty();
+                }
+            }
+
+                if (imageFileBrowsers.find(camIdx) != imageFileBrowsers.end()) {
+                    imageFileBrowsers[camIdx].Display();
+                    if (imageFileBrowsers[camIdx].HasSelected()) {
+                        std::string newImagePath = imageFileBrowsers[camIdx].GetSelected().string();
+
+                        // Release old texture if changing image
+                        if (!camera.imagePath.empty() && camera.imagePath != newImagePath) {
+                            auto texIt = g_CameraTextures.find(camera.imagePath);
+                            if (texIt != g_CameraTextures.end() && texIt->second.srv) {
+                                texIt->second.srv->Release();
+                                g_CameraTextures.erase(texIt);
+                            }
+                        }
+
+                        camera.imagePath = newImagePath;
+
+                        // Load texture if not already cached
+                        if (g_CameraTextures.find(newImagePath) == g_CameraTextures.end()) {
+                            CameraTexture tex;
+                            if (LoadImageToTexture(m_Device, newImagePath, tex)) {
+                                g_CameraTextures[newImagePath] = tex;
+                                advancedfx::Message("Overlay: Loaded image '%s' for camera '%s' (%dx%d)\n",
+                                    newImagePath.c_str(), camera.name.c_str(), tex.width, tex.height);
+                            } else {
+                                advancedfx::Warning("Overlay: Failed to load image '%s'\n", newImagePath.c_str());
+                            }
+                        }
+
+                        try { g_OverlayPaths.campathDir = std::filesystem::path(newImagePath).parent_path().string(); } catch(...) {}
+                        imageFileBrowsers[camIdx].ClearSelected();
+                        ImGui::MarkIniSettingsDirty();
+                    }
+                }
+
+                // Draw progress indicator if this camera is the active one
+                if (!camera.camPathFile.empty() && !g_ActiveCameraCampathPath.empty() && 0 == _stricmp(camera.camPathFile.c_str(), g_ActiveCameraCampathPath.c_str())) {
+                    size_t cpCount = g_CamPath.GetSize();
+                    if (cpCount >= 2) {
+                        double tMin = g_CamPath.GetLowerBound();
+                        double tMax = g_CamPath.GetUpperBound();
+                        double denom = tMax - tMin;
+                        if (denom > 1e-9) {
+                            double tCur = g_MirvTime.curtime_get() - g_CamPath.GetOffset();
+                            float prog = (float)((tCur - tMin) / denom);
+                            if (prog < 0.0f) prog = 0.0f; else if (prog > 1.0f) prog = 1.0f;
+                            float thickness = 3.0f * g_CameraRectScale;
+                            float y = itemMax.y - thickness * 0.5f - 1.0f;
+                            ImVec2 p0(itemMin.x, y);
+                            ImVec2 p1(itemMin.x + buttonSize.x * prog, y);
+                            drawList->AddLine(p0, p1, IM_COL32(220, 64, 64, 255), thickness);
+                        }
+                    }
+                }
+
+                ImGui::PopID();
+            }
+
+            // Advance cursor below grid to keep layout consistent
+            int rows = (int)((profile.cameras.size() + (size_t)columns - 1) / (size_t)columns);
+            float totalHeight = rows * buttonSize.y + (rows > 0 ? (rows - 1) * spacingY : 0.0f);
+            ImGui::SetCursorScreenPos(ImVec2(gridOrigin.x, gridOrigin.y + totalHeight));
+            ImGui::Dummy(ImVec2(0, 0));
+            // Reset drag/click tracking when mouse is released
+            if (!ImGui::IsMouseDown(0)) { s_CameraDragActive = false; s_CameraPressedIndex = -1; }
+        } else {
+            ImGui::TextDisabled("No profile selected. Create or select a profile to add cameras.");
+        }
+
+        ImGui::End();
+    }
+
     if (g_ShowMultikillWindow) {
         ImGui::Begin("Event Browser", &g_ShowMultikillWindow, ImGuiWindowFlags_NoCollapse);
         // One-time default parser path: HLAE folder + DemoParser.exe if available
@@ -2567,8 +3865,15 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         if (viewportVisible) {
             UpdateViewportPlayerCache();
 
+            // Viewport source selection
+            {
+                const char* srcNames[] = { "Backbuffer", "BeforeUi" };
+                ImGui::SetNextItemWidth(120.0f);
+                ImGui::Combo("Source", &g_ViewportSourceMode, srcNames, (int)(sizeof(srcNames)/sizeof(srcNames[0])));
+            }
+
             if (!m_BackbufferPreview.srv || m_BackbufferPreview.width == 0 || m_BackbufferPreview.height == 0) {
-                ImGui::TextDisabled("Waiting for swapchain backbuffer...");
+                ImGui::TextDisabled("Waiting for viewport source...");
             } else {
                 const bool msaa = m_BackbufferPreview.isMsaa;
 
@@ -2582,14 +3887,52 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 const float sy = avail.y / srcH;
                 const float fit = sx < sy ? sx : sy;
                 ImVec2 previewSize(srcW * fit, srcH * fit);
-                ImGui::Image((ImTextureID)m_BackbufferPreview.srv, previewSize);
-                {
-                    ImVec2 imgMin = ImGui::GetItemRectMin();
-                    ImVec2 imgMax = ImGui::GetItemRectMax();
-                    g_PreviewRectValid = true;
-                    g_PreviewRectMin = imgMin;
-                    g_PreviewRectSize = ImVec2(imgMax.x - imgMin.x, imgMax.y - imgMin.y);
-                    g_PreviewDrawList = ImGui::GetWindowDrawList();
+                // Reserve layout space and capture item rect
+                ImVec2 pMin = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton("##viewport_image", previewSize);
+                ImVec2 imgMin = ImGui::GetItemRectMin();
+                ImVec2 imgMax = ImGui::GetItemRectMax();
+                // Draw with opaque blend override to avoid alpha-related dropouts
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                if (dl) {
+                    dl->AddCallback(ImGui_SetOpaqueBlendCallback, nullptr);
+                    dl->AddImage((ImTextureID)m_BackbufferPreview.srv, imgMin, imgMax);
+                    dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
+                }
+                g_PreviewRectValid = true;
+                g_PreviewRectMin = imgMin;
+                g_PreviewRectSize = ImVec2(imgMax.x - imgMin.x, imgMax.y - imgMin.y);
+                g_PreviewDrawList = ImGui::GetWindowDrawList();
+
+                // Draw native HUD inside the viewport image
+                if (g_ShowHud && g_PreviewRectValid && g_PreviewDrawList) {
+                    Hud::Viewport vp{ g_PreviewRectMin, g_PreviewRectSize };
+                    auto opt = g_GsiServer.TryGetHudState();
+                    if (opt.has_value()) {
+                        Hud::RenderAll(g_PreviewDrawList, vp, *opt);
+                    } else {
+                        // Fallback/demo data if no websocket
+                        Hud::State st{};
+                        st.leftTeam.name = "TERRORISTS";
+                        st.leftTeam.side = 2;
+                        st.leftTeam.score = 0;
+                        st.leftTeam.timeoutsLeft = 0;
+                        st.leftTeam.color = IM_COL32(219,170,98,255);
+                        st.rightTeam.name = "COUNTER-TERRORISTS";
+                        st.rightTeam.side = 3;
+                        st.rightTeam.score = 0;
+                        st.rightTeam.timeoutsLeft = 0;
+                        st.rightTeam.color = IM_COL32(125,168,198,255);
+                        for (int i=0;i<5;i++) {
+                            Hud::Player p{}; p.id = 100+i; p.name = std::string("T Player ")+char('A'+i); p.observerSlot = i+1; p.teamSide=2; p.health=100-(i*7); p.armor = (i*20)%100; p.kills=i; p.deaths=i/2; p.money=800+i*400; p.isAlive = (i!=4); st.leftPlayers.push_back(p);
+                        }
+                        for (int i=0;i<5;i++) {
+                            Hud::Player p{}; p.id = 200+i; p.name = std::string("CT Player ")+char('A'+i); p.observerSlot = i+6; p.teamSide=3; p.health=100-(i*9); p.armor = (i*25)%100; p.kills=i; p.deaths=i/3; p.money=900+i*350; p.isAlive = (i!=0); st.rightPlayers.push_back(p);
+                        }
+                        st.leftPlayers[1].isFocused = true; st.focusedPlayerId = st.leftPlayers[1].id;
+                        st.round.number = 5; st.round.phase = "Please start GSI server"; st.round.timeLeft = 73.0f;
+                        Hud::RenderAll(g_PreviewDrawList, vp, st);
+                    }
                 }
 
                 const ImGuiHoveredFlags hoverFlags = ImGuiHoveredFlags_AllowWhenBlockedByActiveItem | ImGuiHoveredFlags_AllowWhenOverlapped;
@@ -4063,6 +5406,28 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 pMirv->SetCameraControlMode(!camEnabled);
             }
         }
+
+        // Observing mode hotkeys (0-9)
+        if (g_ObservingEnabled) {
+            // Map ImGuiKey to numeric value 0-9
+            static const ImGuiKey numKeys[10] = {
+                ImGuiKey_0, ImGuiKey_1, ImGuiKey_2, ImGuiKey_3, ImGuiKey_4,
+                ImGuiKey_5, ImGuiKey_6, ImGuiKey_7, ImGuiKey_8, ImGuiKey_9
+            };
+
+            for (int i = 0; i <= 9; i++) {
+                if (ImGui::IsKeyPressed(numKeys[i], false)) {
+                    auto it = g_ObservingHotkeyBindings.find(i);
+                    if (it != g_ObservingHotkeyBindings.end()) {
+                        int controllerIndex = it->second;
+                        char cmd[128];
+                        _snprintf_s(cmd, _TRUNCATE, "mirv_campath enabled 0; spec_mode 2; spec_player %d", controllerIndex);
+                        Afx_ExecClientCmd(cmd);
+                        advancedfx::Message("Overlay: Executing %s\n", cmd);
+                    }
+                }
+            }
+        }
     }
 
     // Tiny panel to pick operation/mode
@@ -4253,11 +5618,11 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (changed) s_dragChanged = true;
         }
 
-        // Commit on release (only if it changed)
-        if (wasUsing && !usingNow && (s_dragChanged || s_hasModelOverride)) {
+        // Commit while dragging and on release
+        if ((usingNow && changed) || (wasUsing && !usingNow && (s_dragChanged || s_hasModelOverride))) {
             float t[3], r_dummy[3], s_dummy[3];
-            // Use the last live model (override) if available
-            const float* finalModel = s_hasModelOverride ? s_modelOverride : model;
+            // Use the live model matrix that was just updated by Manipulate().
+            const float* finalModel = model;
             ImGuizmo::DecomposeMatrixToComponents(finalModel, t, r_dummy, s_dummy);
             // Translation back to Source2 space (X=fwd,Y=left,Z=up)
             double sx = (double)t[2];
@@ -4368,8 +5733,10 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             }
 
             g_LastCampathCtx.value = newVal;
-            s_hasModelOverride = false;
-            s_dragChanged = false;
+            if (!usingNow) {
+                s_hasModelOverride = false;
+                s_dragChanged = false;
+            }
         }
         wasUsing = usingNow;
     }
@@ -4387,6 +5754,20 @@ void OverlayDx11::Render() {
 
     // Update backbuffer size cache
     UpdateBackbufferSize();
+
+    // Prepare opaque blend state for viewport image callbacks
+    g_ImguiD3DContext = m_Context;
+    if (!g_ViewportOpaqueBlend && m_Device) {
+        D3D11_BLEND_DESC bd = {};
+        bd.AlphaToCoverageEnable = FALSE;
+        bd.IndependentBlendEnable = FALSE;
+        bd.RenderTarget[0].BlendEnable = FALSE; // disable blending -> opaque
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        ID3D11BlendState* bs = nullptr;
+        if (SUCCEEDED(m_Device->CreateBlendState(&bd, &bs))) {
+            g_ViewportOpaqueBlend = bs;
+        }
+    }
 
     // Recreate ImGui device objects once after a resize/device-loss
     if (m_ImGuiNeedRecreate) {
@@ -4488,8 +5869,33 @@ void OverlayDx11::UpdateBackbufferPreviewTexture() {
         return;
     }
 
+    // Choose viewport source based on UI selection
     ID3D11Texture2D* backbuffer = nullptr;
-    HRESULT hr = m_Swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backbuffer);
+    HRESULT hr = E_FAIL;
+    bool got = false;
+    switch (g_ViewportSourceMode) {
+    case 0: // Backbuffer (with UI)
+        got = false; // handled below via swapchain
+        break;
+    case 1: // BeforeUi
+        got = RenderSystemDX11_GetBeforeUiTexture(&backbuffer);
+        break;
+    default:
+        got = false;
+        break;
+    }
+
+    // Explicit-mode fallback behavior:
+    if (!got) {
+        if (g_ViewportSourceMode == 0) {
+            hr = m_Swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backbuffer);
+        } else {
+            ReleaseBackbufferPreview();
+            return; // no source available for BeforeUi
+        }
+    } else {
+        hr = S_OK;
+    }
     if (FAILED(hr) || !backbuffer) {
         ReleaseBackbufferPreview();
         return;
@@ -4498,56 +5904,107 @@ void OverlayDx11::UpdateBackbufferPreviewTexture() {
     D3D11_TEXTURE2D_DESC srcDesc = {};
     backbuffer->GetDesc(&srcDesc);
     bool srcMsaa = srcDesc.SampleDesc.Count > 1;
-
-    bool needsRecreate = !m_BackbufferPreview.texture
-        || m_BackbufferPreview.width != srcDesc.Width
-        || m_BackbufferPreview.height != srcDesc.Height
-        || m_BackbufferPreview.format != srcDesc.Format
-        || m_BackbufferPreview.isMsaa != srcMsaa;
-
-    if (needsRecreate) {
-        ReleaseBackbufferPreview();
-
-        D3D11_TEXTURE2D_DESC copyDesc = srcDesc;
-        copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        copyDesc.CPUAccessFlags = 0;
-        copyDesc.MipLevels = 1;
-        copyDesc.MiscFlags = 0;
-        copyDesc.SampleDesc.Count = 1;
-        copyDesc.SampleDesc.Quality = 0;
-        copyDesc.Usage = D3D11_USAGE_DEFAULT;
-        copyDesc.ArraySize = 1;
-
-        hr = m_Device->CreateTexture2D(&copyDesc, nullptr, &m_BackbufferPreview.texture);
-        if (FAILED(hr) || !m_BackbufferPreview.texture) {
-            backbuffer->Release();
-            ReleaseBackbufferPreview();
-            return;
+    auto ChooseTypedSrvFormat = [](DXGI_FORMAT f) -> DXGI_FORMAT {
+        switch (f) {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:   return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:   return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8X8_TYPELESS:   return DXGI_FORMAT_B8G8R8X8_UNORM;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:return DXGI_FORMAT_R10G10B10A2_UNORM;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:return DXGI_FORMAT_R16G16B16A16_FLOAT; // HDR color buffers are commonly FP16
+        default: return f;
         }
+    };
 
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format = copyDesc.Format;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MostDetailedMip = 0;
-        srvDesc.Texture2D.MipLevels = 1;
-        hr = m_Device->CreateShaderResourceView(m_BackbufferPreview.texture, &srvDesc, &m_BackbufferPreview.srv);
-        if (FAILED(hr) || !m_BackbufferPreview.srv) {
-            backbuffer->Release();
+    // Fast-path: if source already has SRV bind and is single-sample, create SRV directly and skip extra copy
+    // Exception: For explicit Backbuffer mode, always go through copy path to avoid driver/backbuffer quirks.
+    bool srcHasSrvBind = (srcDesc.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0;
+    if (g_ViewportSourceMode == 0) srcHasSrvBind = false;
+    bool usedDirectSrv = false;
+    if (srcHasSrvBind && !srcMsaa) {
+        // Recreate SRV if size/format changed or if we previously used a copy
+        bool srvNeedsRecreate = !m_BackbufferPreview.srv
+            || m_BackbufferPreview.width != srcDesc.Width
+            || m_BackbufferPreview.height != srcDesc.Height
+            || m_BackbufferPreview.format != srcDesc.Format
+            || m_BackbufferPreview.texture != nullptr; // switching from copy-texture path to direct SRV
+
+        if (srvNeedsRecreate) {
+            // Release previous
             ReleaseBackbufferPreview();
-            return;
+            // Create SRV directly on source
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+            srvDesc.Format = ChooseTypedSrvFormat(srcDesc.Format);
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MostDetailedMip = 0;
+            srvDesc.Texture2D.MipLevels = 1;
+            hr = m_Device->CreateShaderResourceView(backbuffer, &srvDesc, &m_BackbufferPreview.srv);
+            if (FAILED(hr) || !m_BackbufferPreview.srv) {
+                // Fall back to copy path below
+            } else {
+                m_BackbufferPreview.width = srcDesc.Width;
+                m_BackbufferPreview.height = srcDesc.Height;
+                m_BackbufferPreview.format = srcDesc.Format;
+                m_BackbufferPreview.isMsaa = false;
+                usedDirectSrv = true;
+            }
+        } else {
+            // SRV is compatible already; reuse
+            usedDirectSrv = true;
         }
-
-        m_BackbufferPreview.width = copyDesc.Width;
-        m_BackbufferPreview.height = copyDesc.Height;
-        m_BackbufferPreview.format = srcDesc.Format;
-        m_BackbufferPreview.isMsaa = srcMsaa;
     }
 
-    if (m_BackbufferPreview.texture) {
-        if (srcMsaa) {
-            m_Context->ResolveSubresource(m_BackbufferPreview.texture, 0, backbuffer, 0, srcDesc.Format);
-        } else {
-            m_Context->CopyResource(m_BackbufferPreview.texture, backbuffer);
+    if (!usedDirectSrv) {
+        bool needsRecreate = !m_BackbufferPreview.texture
+            || m_BackbufferPreview.width != srcDesc.Width
+            || m_BackbufferPreview.height != srcDesc.Height
+            || m_BackbufferPreview.format != srcDesc.Format
+            || m_BackbufferPreview.isMsaa != srcMsaa;
+
+        if (needsRecreate) {
+            ReleaseBackbufferPreview();
+
+            D3D11_TEXTURE2D_DESC copyDesc = srcDesc;
+            copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            copyDesc.CPUAccessFlags = 0;
+            copyDesc.MipLevels = 1;
+            copyDesc.MiscFlags = 0;
+            copyDesc.SampleDesc.Count = 1;
+            copyDesc.SampleDesc.Quality = 0;
+            copyDesc.Usage = D3D11_USAGE_DEFAULT;
+            copyDesc.ArraySize = 1;
+
+            hr = m_Device->CreateTexture2D(&copyDesc, nullptr, &m_BackbufferPreview.texture);
+            if (FAILED(hr) || !m_BackbufferPreview.texture) {
+                backbuffer->Release();
+                ReleaseBackbufferPreview();
+                return;
+            }
+
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+            srvDesc.Format = ChooseTypedSrvFormat(copyDesc.Format);
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MostDetailedMip = 0;
+            srvDesc.Texture2D.MipLevels = 1;
+            hr = m_Device->CreateShaderResourceView(m_BackbufferPreview.texture, &srvDesc, &m_BackbufferPreview.srv);
+            if (FAILED(hr) || !m_BackbufferPreview.srv) {
+                backbuffer->Release();
+                ReleaseBackbufferPreview();
+                return;
+            }
+
+            m_BackbufferPreview.width = copyDesc.Width;
+            m_BackbufferPreview.height = copyDesc.Height;
+            m_BackbufferPreview.format = srcDesc.Format;
+            m_BackbufferPreview.isMsaa = srcMsaa;
+        }
+
+        if (m_BackbufferPreview.texture) {
+            if (srcMsaa) {
+                DXGI_FORMAT typed = ChooseTypedSrvFormat(srcDesc.Format);
+                m_Context->ResolveSubresource(m_BackbufferPreview.texture, 0, backbuffer, 0, typed);
+            } else {
+                m_Context->CopyResource(m_BackbufferPreview.texture, backbuffer);
+            }
         }
     }
 

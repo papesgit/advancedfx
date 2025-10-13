@@ -36,3 +36,11 @@ void Hook_RenderSystemDX11(void * hModule);
 void Hook_SceneSystem(void * hModule);
 
 void RenderSystemDX11_SupplyProjectionMatrix(const SOURCESDK::VMatrix & projectionMatrix);
+
+// Returns an AddRef'd pointer to the best-guess color buffer to preview this frame.
+// Prefer the last bound main render target; fall back to the swapchain backbuffer.
+// Caller must Release the returned texture when done. Returns false if none available.
+struct ID3D11Texture2D; // fwd decl to avoid including d3d11.h here
+bool RenderSystemDX11_GetPreviewSourceTexture(ID3D11Texture2D** outTexture);
+// Explicit variants used by the overlay viewport:
+bool RenderSystemDX11_GetBeforeUiTexture(ID3D11Texture2D** outTexture);

@@ -466,17 +466,32 @@ LONG_PTR WINAPI new_SetWindowLongPtrW(
 }
 
 BOOL WINAPI new_GetCursorPos(
-	__out LPPOINT lpPoint
+    __out LPPOINT lpPoint
 )
 {
-	BOOL result = GetCursorPos(lpPoint);
+    static POINT s_lockPos = {0,0};
+    static bool s_haveLockPos = false;
+
+    BOOL result = GetCursorPos(lpPoint);
 
 //	if (AfxHookSource::Gui::OnGetCursorPos(lpPoint))
 //		return TRUE;
 
-	g_MirvInputEx.m_MirvInput->Supply_GetCursorPos(lpPoint);
+    // While overlay is visible and not in RMB passthrough, freeze reported cursor pos
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+            if (!s_haveLockPos) { s_lockPos = *lpPoint; s_haveLockPos = true; }
+            *lpPoint = s_lockPos;
+            return TRUE;
+        } else {
+            s_haveLockPos = false;
+        }
+    }
 
-	return result;
+    g_MirvInputEx.m_MirvInput->Supply_GetCursorPos(lpPoint);
+
+    return result;
 }
 
 BOOL WINAPI new_SetCursorPos(
@@ -486,6 +501,15 @@ BOOL WINAPI new_SetCursorPos(
 {
 //	if (AfxHookSource::Gui::OnSetCursorPos(X, Y))
 //		return TRUE;
+
+	// If the overlay is visible and not in RMB passthrough, do not allow the game
+	// to forcibly re-center the cursor. Pretend success to callers.
+	{
+		auto &overlay = advancedfx::overlay::Overlay::Get();
+		if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+			return TRUE;
+		}
+	}
 
 	BOOL result = SetCursorPos(X, Y);
 	if(result) g_MirvInputEx.m_MirvInput->Supply_SetCursorPos(X, Y);
@@ -499,7 +523,16 @@ HCURSOR WINAPI new_SetCursor(__in_opt HCURSOR hCursor)
 //	if (AfxHookSource::Gui::OnSetCursor(hCursor, result))
 //		return result;
 
-	return SetCursor(hCursor);
+    // While overlay visible (and not in RMB passthrough), force visible arrow cursor
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+            while (ShowCursor(TRUE) < 0) { /* ensure shown */ }
+            return SetCursor(LoadCursor(NULL, IDC_ARROW));
+        }
+    }
+
+    return SetCursor(hCursor);
 }
 
 HWND WINAPI new_SetCapture(__in HWND hWnd)
@@ -509,7 +542,14 @@ HWND WINAPI new_SetCapture(__in HWND hWnd)
 //	if (AfxHookSource::Gui::OnSetCapture(hWnd, result))
 //		return result;
 
-	return SetCapture(hWnd);
+    // Prevent mouse capture while overlay is visible (unless RMB passthrough)
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive())
+            return GetCapture();
+    }
+
+    return SetCapture(hWnd);
 }
 
 BOOL WINAPI new_ReleaseCapture()
@@ -518,6 +558,56 @@ BOOL WINAPI new_ReleaseCapture()
 //		return TRUE;
 
 	return ReleaseCapture();
+}
+
+
+// Hook ClipCursor to prevent cursor confinement while overlay is visible
+// Forward declare import hook instances so we can call the original function
+extern CAfxImportFuncHook<BOOL(WINAPI*)(LPRECT)> g_Import_SDL3_USER32_ClipCursor;
+extern CAfxImportFuncHook<BOOL(WINAPI*)(LPRECT)> g_Import_inputsystem_USER32_ClipCursor;
+
+BOOL WINAPI new_ClipCursor(_In_opt_ LPRECT lpRect)
+{
+    auto &overlay = advancedfx::overlay::Overlay::Get();
+    if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+        // Ensure unclipped when overlay is active
+        auto fp = g_Import_SDL3_USER32_ClipCursor.GetTrueFuncValue();
+        if (!fp) fp = g_Import_inputsystem_USER32_ClipCursor.GetTrueFuncValue();
+        if (fp) {
+            fp(nullptr);
+            return TRUE;
+        }
+        return TRUE;
+    }
+
+    auto fp = g_Import_SDL3_USER32_ClipCursor.GetTrueFuncValue();
+    if (!fp) fp = g_Import_inputsystem_USER32_ClipCursor.GetTrueFuncValue();
+    if (fp) return fp(lpRect);
+    return ClipCursor(lpRect);
+}
+
+// Also neutralize GetAsyncKeyState for mouse buttons while overlay is visible
+extern CAfxImportFuncHook<SHORT(WINAPI*)(int)> g_Import_SDL3_USER32_GetAsyncKeyState;
+extern CAfxImportFuncHook<SHORT(WINAPI*)(int)> g_Import_inputsystem_USER32_GetAsyncKeyState;
+
+SHORT WINAPI new_GetAsyncKeyState(int vKey)
+{
+    auto &overlay = advancedfx::overlay::Overlay::Get();
+    if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+        switch (vKey) {
+        case VK_LBUTTON:
+        case VK_RBUTTON:
+        case VK_MBUTTON:
+        case VK_XBUTTON1:
+        case VK_XBUTTON2:
+            return 0;
+        default: break;
+        }
+    }
+    auto fp = g_Import_SDL3_USER32_GetAsyncKeyState.GetTrueFuncValue();
+    if (!fp) fp = g_Import_inputsystem_USER32_GetAsyncKeyState.GetTrueFuncValue();
+    if (fp) return fp(vKey);
+    return GetAsyncKeyState(vKey);
 }
 
 
@@ -1736,35 +1826,40 @@ void  new_CS2_Client_FrameStageNotify(void* This, SOURCESDK::CS2::ClientFrameSta
 		}
 	}*/
 
-	// Work around demoui cursor sheningans:
+	// Work around demoui cursor shenanigans:
 	// - Always manually fetch cursor pos.
 	// - Make room to move the cursor.
 	// - Hide cursor (can do this way because SDL3 never hides it, uses invisible one instead).
 	static bool bCursorHidden = false;
-	if(g_MirvInputEx.m_MirvInput->IsActive()) {
-		HWND hWnd = GetActiveWindow();
-		if(NULL != hWnd) {
-			if(!bCursorHidden) ShowCursor(FALSE);
-			else {
-				POINT point;
-				if(GetCursorPos(&point)) {
-					new_GetCursorPos(&point);
+	{
+		auto &overlay = advancedfx::overlay::Overlay::Get();
+		const bool overlayBlocks = overlay.IsVisible() && !overlay.IsRmbPassthroughActive();
+
+		if(g_MirvInputEx.m_MirvInput->IsActive() && !overlayBlocks) {
+			HWND hWnd = GetActiveWindow();
+			if(NULL != hWnd) {
+				if(!bCursorHidden) ShowCursor(FALSE);
+				else {
+					POINT point;
+					if(GetCursorPos(&point)) {
+						new_GetCursorPos(&point);
+					}
+				}
+				RECT rect;
+				if(GetClientRect(hWnd, &rect)) {
+					POINT pt {(rect.left+rect.right)/2,(rect.top+rect.bottom)/2};
+					if(ClientToScreen(hWnd,&pt)) {
+						new_SetCursorPos(pt.x, pt.y);
+					}
 				}
 			}
-			RECT rect;
-			if(GetClientRect(hWnd, &rect)) {
-				POINT pt {(rect.left+rect.right)/2,(rect.top+rect.bottom)/2};
-				if(ClientToScreen(hWnd,&pt)) {
-					new_SetCursorPos(pt.x, pt.y);
-				}
-			}
+			bCursorHidden = true;
 		}
-		bCursorHidden = true;
+		else if(bCursorHidden) {
+			bCursorHidden = false;
+			ShowCursor(TRUE);
+		}
 	}
-	else if(bCursorHidden) {
-		bCursorHidden = false;
-		ShowCursor(TRUE);
-	}	
 
 	switch(curStage) {
 	case SOURCESDK::CS2::FRAME_RENDER_PASS:
@@ -2100,6 +2195,8 @@ CAfxImportFuncHook<HWND(WINAPI*)(HWND)> g_Import_SDL3_USER32_SetCapture("SetCapt
 CAfxImportFuncHook<BOOL(WINAPI*)()> g_Import_SDL3_USER32_ReleaseCapture("ReleaseCapture", &new_ReleaseCapture);
 CAfxImportFuncHook<BOOL(WINAPI*)(LPPOINT)> g_Import_SDL3_USER32_GetCursorPos("GetCursorPos", &new_GetCursorPos);
 CAfxImportFuncHook<BOOL(WINAPI*)(int, int)> g_Import_SDL3_USER32_SetCursorPos("SetCursorPos", &new_SetCursorPos);
+CAfxImportFuncHook<BOOL(WINAPI*)(LPRECT)> g_Import_SDL3_USER32_ClipCursor("ClipCursor", &new_ClipCursor);
+CAfxImportFuncHook<SHORT(WINAPI*)(int)> g_Import_SDL3_USER32_GetAsyncKeyState("GetAsyncKeyState", &new_GetAsyncKeyState);
 
 
 UINT
@@ -2111,6 +2208,33 @@ New_GetRawInputBuffer(
 
 CAfxImportFuncHook<UINT(WINAPI*)(_Out_writes_bytes_opt_(*pcbSize) PRAWINPUT, _Inout_ PUINT, _In_ UINT cbSizeHeader)> g_Import_SDL3_USER32_GetRawInputBuffer("GetRawInputBuffer", &New_GetRawInputBuffer);
 
+// Sanitize helper: zero out mouse/keyboard data so the game sees no movement/clicks
+static void Afx_SanitizeRawInputs(PRAWINPUT pData, UINT count)
+{
+    if (!pData || count == 0) return;
+    BYTE* ptr = (BYTE*)pData;
+    for (UINT i = 0; i < count; ++i) {
+        RAWINPUT* ri = (RAWINPUT*)ptr;
+        if (!ri || ri->header.dwSize == 0) break;
+        if (ri->header.dwType == RIM_TYPEMOUSE) {
+            ri->data.mouse.lLastX = 0;
+            ri->data.mouse.lLastY = 0;
+            ri->data.mouse.ulButtons = 0;
+            ri->data.mouse.usButtonFlags = 0;
+            ri->data.mouse.usButtonData = 0;
+            ri->data.mouse.ulRawButtons = 0;
+        } else if (ri->header.dwType == RIM_TYPEKEYBOARD) {
+            ri->data.keyboard.MakeCode = 0;
+            ri->data.keyboard.Flags = 0;
+            ri->data.keyboard.VKey = 0;
+            ri->data.keyboard.Message = 0;
+        } else if (ri->header.dwType == RIM_TYPEHID) {
+            ri->data.hid.dwCount = 0;
+        }
+        ptr += ri->header.dwSize;
+    }
+}
+
 UINT
 WINAPI
 New_GetRawInputBuffer(
@@ -2118,6 +2242,16 @@ New_GetRawInputBuffer(
     _Inout_ PUINT pcbSize,
     _In_ UINT cbSizeHeader) {
 	UINT result = g_Import_SDL3_USER32_GetRawInputBuffer.GetTrueFuncValue()(pData,pcbSize,cbSizeHeader);
+
+    // Block raw input to the game when overlay is visible and not in RMB passthrough
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+            if (result > 0 && pData && pcbSize && *pcbSize >= sizeof(RAWINPUTHEADER)) {
+                Afx_SanitizeRawInputs(pData, result);
+            }
+        }
+    }
 
 	result = g_MirvInputEx.m_MirvInput->Supply_RawInputBuffer(result, pData,pcbSize,cbSizeHeader);
 
@@ -2144,6 +2278,16 @@ UINT WINAPI New_GetRawInputData(
 
 	UINT result = g_Import_SDL3_USER32_GetRawInputData.GetTrueFuncValue()(hRawInput,uiCommand,pData,pcbSize,cbSizeHeader);
 
+    // Sanitize single RAWINPUT payload if overlay is visible
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+            if (uiCommand == RID_INPUT && pData && result >= sizeof(RAWINPUTHEADER)) {
+                Afx_SanitizeRawInputs((PRAWINPUT)pData, 1);
+            }
+        }
+    }
+
 	result = g_MirvInputEx.m_MirvInput->Supply_RawInputData(result, hRawInput, uiCommand,pData,pcbSize,cbSizeHeader);
 
 	return result;
@@ -2158,6 +2302,8 @@ CAfxImportDllHook g_Import_SDL3_USER32("USER32.dll", CAfxImportDllHooks({
 	&g_Import_SDL3_USER32_ReleaseCapture,
 	&g_Import_SDL3_USER32_GetCursorPos,
 	&g_Import_SDL3_USER32_SetCursorPos,
+	&g_Import_SDL3_USER32_ClipCursor,
+	&g_Import_SDL3_USER32_GetAsyncKeyState,
 	&g_Import_SDL3_USER32_GetRawInputData,
 	&g_Import_SDL3_USER32_GetRawInputBuffer }));
 
@@ -2171,6 +2317,8 @@ CAfxImportFuncHook<HWND(WINAPI*)(HWND)> g_Import_inputsystem_USER32_SetCapture("
 CAfxImportFuncHook<BOOL(WINAPI*)()> g_Import_inputsystem_USER32_ReleaseCapture("ReleaseCapture", &new_ReleaseCapture);
 CAfxImportFuncHook<BOOL(WINAPI*)(LPPOINT)> g_Import_inputsystem_USER32_GetCursorPos("GetCursorPos", &new_GetCursorPos);
 CAfxImportFuncHook<BOOL(WINAPI*)(int, int)> g_Import_inputsystem_USER32_SetCursorPos("SetCursorPos", &new_SetCursorPos);
+CAfxImportFuncHook<BOOL(WINAPI*)(LPRECT)> g_Import_inputsystem_USER32_ClipCursor("ClipCursor", &new_ClipCursor);
+CAfxImportFuncHook<SHORT(WINAPI*)(int)> g_Import_inputsystem_USER32_GetAsyncKeyState("GetAsyncKeyState", &new_GetAsyncKeyState);
 
 CAfxImportDllHook g_Import_inputsystem_USER32("USER32.dll", CAfxImportDllHooks({
 	&g_Import_inputsystem_USER32_GetWindowLongW,
@@ -2179,7 +2327,9 @@ CAfxImportDllHook g_Import_inputsystem_USER32("USER32.dll", CAfxImportDllHooks({
 	&g_Import_inputsystem_USER32_SetCapture,
 	&g_Import_inputsystem_USER32_ReleaseCapture,
 	&g_Import_inputsystem_USER32_GetCursorPos,
-	&g_Import_inputsystem_USER32_SetCursorPos }));
+	&g_Import_inputsystem_USER32_SetCursorPos,
+	&g_Import_inputsystem_USER32_ClipCursor,
+	&g_Import_inputsystem_USER32_GetAsyncKeyState }));
 
 CAfxImportsHook g_Import_inputsystem(CAfxImportsHooks({
 	&g_Import_inputsystem_USER32 }));

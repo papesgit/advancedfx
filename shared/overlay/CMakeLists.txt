@@ -45,6 +45,16 @@ set(HLAE_OVERLAY_SOURCES
     OverlayVk.h
     InputRouter.h
     InputRouter.cpp
+    Hud.h
+    Hud.cpp
+    GsiHttpServer.h
+    GsiHttpServer.cpp
+
+    radar/Radar.h
+    radar/Radar.cpp
+
+    third_party/nanosvg/nanosvg.h
+    third_party/nanosvg/nanosvgrast.h
 
     third_party/imgui/imgui.h
     ${HLAE_IMGUI_CORE_SOURCES}
@@ -96,6 +106,8 @@ if (CMAKE_SIZEOF_VOID_P EQUAL 4)
         ${CMAKE_SOURCE_DIR}/deps/release/prop/AfxHookSource
     )
 endif()
+
+target_compile_definitions(${PROJECT_NAME} PUBLIC HUD_USE_NANOSVG)
 
 # If FreeType is enabled, add include, define, find/link the library.
 if (HLAE_OVERLAY_WITH_FREETYPE)
@@ -156,3 +168,10 @@ endif()
 if (CMAKE_SIZEOF_VOID_P EQUAL 4)
     target_compile_definitions(${PROJECT_NAME} PUBLIC OVERLAY_TOGGLE_VK=0x77 OVERLAY_TOGGLE_ALT_VK=0)
 endif()
+
+# Install built-in radar assets alongside other resources so runtime can pick them automatically.
+install(FILES assets/radar/radars.json DESTINATION "bin/resources/overlay/radar")
+install(FILES assets/gamestate_integration_drweissbrot_hud.cfg DESTINATION "bin/resources")
+install(DIRECTORY assets/radar/ingame DESTINATION "bin/resources/overlay/radar")
+install(DIRECTORY assets/icons DESTINATION "bin/resources/overlay")
+install(DIRECTORY assets/weapons DESTINATION "bin/resources/overlay")

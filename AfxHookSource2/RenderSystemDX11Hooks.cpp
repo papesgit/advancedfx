@@ -1129,6 +1129,82 @@ bool g_bDetectedSmoke = false;
 ID3D11DepthStencilView* g_pSmokeDepthStencilView = nullptr;
 
 extern void ErrorBox(char const * messageText);
+// Forward declarations for globals defined below
+extern ID3D11RenderTargetView * g_pCurrentRenderTargetView;
+extern IDXGISwapChain * g_pSwapChain;
+
+// Latest color buffer seen at the "BeforeUi" stage (per-frame, AddRef'd while valid)
+static ID3D11Texture2D* g_BeforeUiLatest = nullptr;   // raw pointer to current RT at BeforeUi time
+static ID3D11Texture2D* g_BeforeUiCopy   = nullptr;   // single-sample copy captured at BeforeUi time
+static D3D11_TEXTURE2D_DESC g_BeforeUiCopyDesc = {};
+
+// Provide a preview source texture for the overlay viewport.
+// Prefer the last bound main render target view; fall back to the swapchain's backbuffer.
+// Returns an AddRef'd ID3D11Texture2D* through outTex if available.
+bool RenderSystemDX11_GetPreviewSourceTexture(ID3D11Texture2D** outTex)
+{
+    if (!outTex) return false;
+    *outTex = nullptr;
+
+    // 0) If we captured a BeforeUi texture this frame, prefer the copy (stable), else raw latest.
+    if (g_BeforeUiCopy) {
+        g_BeforeUiCopy->AddRef();
+        *outTex = g_BeforeUiCopy;
+        return true;
+    }
+    if (g_BeforeUiLatest) {
+        g_BeforeUiLatest->AddRef();
+        *outTex = g_BeforeUiLatest;
+        return true;
+    }
+
+    // 1) Prefer the last bound color RT if it's likely LDR (stable during effects like flashbangs).
+    if (g_pCurrentRenderTargetView) {
+        D3D11_RENDER_TARGET_VIEW_DESC vdesc = {};
+        g_pCurrentRenderTargetView->GetDesc(&vdesc);
+        auto fmt = vdesc.Format;
+        auto isLikelyLdr =
+            fmt == DXGI_FORMAT_R8G8B8A8_UNORM || fmt == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+            fmt == DXGI_FORMAT_B8G8R8A8_UNORM || fmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+            fmt == DXGI_FORMAT_B8G8R8X8_UNORM || fmt == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB ||
+            fmt == DXGI_FORMAT_R10G10B10A2_UNORM;
+        if (isLikelyLdr) {
+            ID3D11Resource* res = nullptr;
+            g_pCurrentRenderTargetView->GetResource(&res);
+            if (res) {
+                ID3D11Texture2D* tex = nullptr;
+                if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&tex)) && tex) {
+                    *outTex = tex; // AddRef'd by QI
+                    res->Release();
+                    return true;
+                }
+                res->Release();
+            }
+        }
+    }
+
+    // 2) Fallback to current swapchain backbuffer (post-tonemap), good for menus and simple scenes.
+    if (g_pSwapChain) {
+        ID3D11Texture2D* back = nullptr;
+        if (SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&back)) && back) {
+            *outTex = back; // AddRef'd by GetBuffer
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool RenderSystemDX11_GetBeforeUiTexture(ID3D11Texture2D** outTex)
+{
+    if (!outTex) return false; *outTex = nullptr;
+    // Prefer the copy (stable content), fallback to raw latest RT
+    if (g_BeforeUiCopy) { g_BeforeUiCopy->AddRef(); *outTex = g_BeforeUiCopy; return true; }
+    if (g_BeforeUiLatest) { g_BeforeUiLatest->AddRef(); *outTex = g_BeforeUiLatest; return true; }
+    return false;
+}
+
+// (Removed debug getters: LDR RT, AfterUi, PrePresent)
 
 /*
 enum class ViewPass_e {
@@ -1542,37 +1618,92 @@ public:
                 if (pRenderTargetViews[0]) pRenderTargetViews[0]->Release();
             }
 
-            if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
+            // Always capture current color RT at this stage for overlay preview; also dispatch queues.
             {
-                if(!pRenderPassCommands->BeforeUi.Empty() || !pRenderPassCommands->BeforeUi2.Empty()) {
+                ID3D11RenderTargetView* pRenderTargetViews[1] = { nullptr };
+                g_pImmediateContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
 
-                    ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
-                    g_pImmediateContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
+                if (pRenderTargetViews[0]) {
+                    ID3D11Resource* pRenderTargetViewResource = nullptr;
+                    pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
+                    if (pRenderTargetViewResource) {
+                        ID3D11Texture2D* pTexture = nullptr;
+                        if (SUCCEEDED(pRenderTargetViewResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&pTexture)) && pTexture) {
+                            // Update global preview texture
+                            if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
+                            g_BeforeUiLatest = pTexture; // keep one ref until Present end
 
-                    
-                    if (pRenderTargetViews[0]) {
-                        if(!pRenderPassCommands->BeforeUi.Empty()) {
-                            ID3D11Resource* pRenderTargetViewResource = nullptr;
-                            pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
-                            if(pRenderTargetViewResource) {
-                                ID3D11Texture2D * pTexture = nullptr;
-                                if(SUCCEEDED(pRenderTargetViewResource->QueryInterface(__uuidof(ID3D11Texture2D),(void**)&pTexture))){
-                                    if(pTexture) {
-                                        pRenderPassCommands->OnBeforeUi(pTexture);               
-                                        pTexture->Release();
+                            // Ensure/refresh a single-sample copy so later readers can sample stable content
+                            D3D11_TEXTURE2D_DESC srcDesc = {};
+                            pTexture->GetDesc(&srcDesc);
+                            bool srcMsaa = srcDesc.SampleDesc.Count > 1;
+                            // Destination desc: same as src but single-sample, bind none (only as copy source)
+                            D3D11_TEXTURE2D_DESC dstDesc = srcDesc;
+                            dstDesc.SampleDesc.Count = 1;
+                            dstDesc.SampleDesc.Quality = 0;
+                            dstDesc.BindFlags = 0;
+                            dstDesc.MiscFlags = 0;
+                            dstDesc.MipLevels = 1;
+                            dstDesc.ArraySize = 1;
+                            dstDesc.Usage = D3D11_USAGE_DEFAULT;
+
+                            bool needRecreate = (g_BeforeUiCopy == nullptr)
+                                || g_BeforeUiCopyDesc.Width  != dstDesc.Width
+                                || g_BeforeUiCopyDesc.Height != dstDesc.Height
+                                || g_BeforeUiCopyDesc.Format != dstDesc.Format
+                                || g_BeforeUiCopyDesc.SampleDesc.Count != dstDesc.SampleDesc.Count
+                                || g_BeforeUiCopyDesc.SampleDesc.Quality != dstDesc.SampleDesc.Quality;
+                            if (needRecreate) {
+                                if (g_BeforeUiCopy) { g_BeforeUiCopy->Release(); g_BeforeUiCopy = nullptr; }
+                                ID3D11Device* dev = g_pDevice;
+                                if (!dev && g_pImmediateContext) g_pImmediateContext->GetDevice(&dev);
+                                if (dev) {
+                                    if (SUCCEEDED(dev->CreateTexture2D(&dstDesc, nullptr, &g_BeforeUiCopy)) && g_BeforeUiCopy) {
+                                        g_BeforeUiCopyDesc = dstDesc;
                                     }
+                                    if (!g_pDevice && dev) dev->Release();
                                 }
-                                pRenderTargetViewResource->Release();
                             }
-                        }
-                        if(!pRenderPassCommands->BeforeUi2.Empty()) {
-                            pRenderPassCommands->OnBeforeUi2(pRenderTargetViews[0]); 
-                        }
+                            if (g_BeforeUiCopy) {
+                                // Resolve MSAA or copy
+                                auto ChooseTyped = [](DXGI_FORMAT f)->DXGI_FORMAT {
+                                    switch (f) {
+                                    case DXGI_FORMAT_R8G8B8A8_TYPELESS:    return DXGI_FORMAT_R8G8B8A8_UNORM;
+                                    case DXGI_FORMAT_B8G8R8A8_TYPELESS:    return DXGI_FORMAT_B8G8R8A8_UNORM;
+                                    case DXGI_FORMAT_B8G8R8X8_TYPELESS:    return DXGI_FORMAT_B8G8R8X8_UNORM;
+                                    case DXGI_FORMAT_R10G10B10A2_TYPELESS: return DXGI_FORMAT_R10G10B10A2_UNORM;
+                                    case DXGI_FORMAT_R16G16B16A16_TYPELESS:return DXGI_FORMAT_R16G16B16A16_FLOAT;
+                                    default: return f;
+                                    }
+                                };
+                                if (srcMsaa) {
+                                    DXGI_FORMAT typed = ChooseTyped(srcDesc.Format);
+                                    g_pImmediateContext->ResolveSubresource(g_BeforeUiCopy, 0, pTexture, 0, typed);
+                                } else {
+                                    g_pImmediateContext->CopyResource(g_BeforeUiCopy, pTexture);
+                                }
+                            }
 
-                        pRenderTargetViews[0]->Release();
+                            if (auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands()) {
+                                if (!pRenderPassCommands->BeforeUi.Empty()) {
+                                    pRenderPassCommands->OnBeforeUi(pTexture);
+                                }
+                                if (!pRenderPassCommands->BeforeUi2.Empty()) {
+                                    pRenderPassCommands->OnBeforeUi2(pRenderTargetViews[0]);
+                                }
+                            }
+                            // Do not release pTexture here; global holds it.
+                        }
+                        else {
+                            if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
+                        }
+                        pRenderTargetViewResource->Release();
                     }
+
+                    // No queue call needs ownership of RTV; release it.
+                    pRenderTargetViews[0]->Release();
                 }
-            }            
+            }
         }
         g_bDetectSmoke = false;
         g_bDetectSmoke2 = false;
@@ -1582,6 +1713,7 @@ public:
     }
 private:
 };
+
 
 /*
 typedef void (STDMETHODCALLTYPE * PSSetShaderResources_t)(ID3D11DeviceContext* This,
@@ -1938,6 +2070,11 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
 
     g_iDraw = 0;
 
+    // Release per-frame preview texture captured at BeforeUi.
+    if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
+    if (g_BeforeUiCopy)   { g_BeforeUiCopy->Release();   g_BeforeUiCopy   = nullptr; ZeroMemory(&g_BeforeUiCopyDesc, sizeof(g_BeforeUiCopyDesc)); }
+    // AfterUi/PrePresent cleanup removed
+
     return result;
 }
 
@@ -1962,6 +2099,11 @@ HRESULT STDMETHODCALLTYPE New_ResizeBuffers( void * This,
     g_OverlayResizePending.store(true, std::memory_order_relaxed);
     g_OverlayResizeRetry.store(0, std::memory_order_relaxed);
     g_OverlayQuarantineFrames.store(30, std::memory_order_relaxed);
+
+    // Drop any cached preview texture that references old backbuffers/RTs
+    if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
+    if (g_BeforeUiCopy)   { g_BeforeUiCopy->Release();   g_BeforeUiCopy   = nullptr; ZeroMemory(&g_BeforeUiCopyDesc, sizeof(g_BeforeUiCopyDesc)); }
+    // AfterUi/PrePresent cleanup removed
 
     return g_OldResizeBuffers(This, BufferCount, Width, Height, NewFormat, SwapChainFlags);
 }

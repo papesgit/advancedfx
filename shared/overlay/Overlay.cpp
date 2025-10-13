@@ -42,6 +42,12 @@ void Overlay::SetVisible(bool v) {
         m_RmbPassthrough = false;
         m_RmbPassthroughRequest = false;
     }
+#ifdef _WIN32
+    // Proactively release any OS cursor confinement when overlay becomes visible
+    if (m_Visible) {
+        ClipCursor(nullptr);
+    }
+#endif
 }
 
 void Overlay::RequestRmbPassthroughThisFrame() {
