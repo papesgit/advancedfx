@@ -2117,35 +2117,37 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 }
             }
 
-            // Reassign labels per team (1-5 for CT, 6-9+0 for T) based on observer_slot order
-            // This ensures filtered players don't leave gaps in the numbering
+            // Assign labels to match HUD sidebar ordering (1-5 left, 6-9,0 right)
+            // This keeps labels stable and matching the visual HUD layout
             std::unordered_map<int, char> reassignedLabels; // entity id -> label digit
             {
-                std::vector<int> ctPlayers, tPlayers;
-                for (const auto &p : players) {
-                    if (p.team == 3) ctPlayers.push_back(p.ent.id);
-                    else if (p.team == 2) tPlayers.push_back(p.ent.id);
-                }
-                // Sort by original observer_slot to maintain order
-                auto sortBySlot = [&](int idA, int idB) {
-                    int slotA = -1, slotB = -1;
-                    for (const auto &p : players) {
-                        if (p.ent.id == idA) slotA = p.slot;
-                        if (p.ent.id == idB) slotB = p.slot;
-                    }
-                    return slotA < slotB;
-                };
-                std::sort(ctPlayers.begin(), ctPlayers.end(), sortBySlot);
-                std::sort(tPlayers.begin(), tPlayers.end(), sortBySlot);
+                auto hopt = g_GsiServer.TryGetHudState();
+                if (hopt.has_value()) {
+                    const auto& hudState = *hopt;
+                    // Left sidebar gets 1-5, right sidebar gets 6-9,0
+                    const char rightDigits[5] = {'6','7','8','9','0'};
 
-                // Assign CT labels: 1-5
-                for (size_t i = 0; i < ctPlayers.size() && i < 5; ++i) {
-                    reassignedLabels[ctPlayers[i]] = (char)('1' + i);
-                }
-                // Assign T labels: 6-9, 0
-                const char tDigits[5] = {'6','7','8','9','0'};
-                for (size_t i = 0; i < tPlayers.size() && i < 5; ++i) {
-                    reassignedLabels[tPlayers[i]] = tDigits[i];
+                    // Assign labels based on position in HUD lists (uses observerSlot as stable key)
+                    for (size_t i = 0; i < hudState.leftPlayers.size() && i < 5; ++i) {
+                        const auto& hp = hudState.leftPlayers[i];
+                        if (hp.observerSlot >= 0) {
+                            char digit = Radar_GetOrAssignDigitForController(hp.observerSlot, hp.teamSide);
+                            // Override to ensure correct order (1-5 for left in HUD order)
+                            digit = (char)('1' + i);
+                            g_RadarLabelByController[hp.observerSlot] = digit;
+                            g_RadarLabelTeam[hp.observerSlot] = hp.teamSide;
+                            reassignedLabels[hp.id] = digit;
+                        }
+                    }
+                    for (size_t i = 0; i < hudState.rightPlayers.size() && i < 5; ++i) {
+                        const auto& hp = hudState.rightPlayers[i];
+                        if (hp.observerSlot >= 0) {
+                            char digit = rightDigits[i];
+                            g_RadarLabelByController[hp.observerSlot] = digit;
+                            g_RadarLabelTeam[hp.observerSlot] = hp.teamSide;
+                            reassignedLabels[hp.id] = digit;
+                        }
+                    }
                 }
             }
 
