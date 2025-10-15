@@ -23,6 +23,12 @@ public:
 
     bool IsRunning() const { return running_.load(); }
 
+    // Set comma-separated list of player names to filter out (e.g., coaches)
+    void SetFilteredPlayers(const std::string& filter) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        filtered_players_ = filter;
+    }
+
     std::optional<Hud::State> TryGetHudState();
 
     // Minimal radar snapshot derived from last merged GSI (thread-safe).
@@ -51,6 +57,9 @@ public:
     };
     std::optional<RadarBomb> TryGetRadarBomb();
 
+    // Get current map name from GSI data (e.g., "de_mirage")
+    std::optional<std::string> TryGetMapName();
+
 private:
     void ThreadMain(int port);
     using SocketHandle = uintptr_t; // avoid winsock headers in this header
@@ -73,4 +82,7 @@ private:
     std::vector<RadarPlayer>   radar_players_;
     std::vector<RadarGrenade>  radar_grenades_;
     RadarBomb                  radar_bomb_;
+
+    // Comma-separated list of player names to filter out
+    std::string filtered_players_;
 };

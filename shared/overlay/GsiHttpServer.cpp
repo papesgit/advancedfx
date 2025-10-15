@@ -61,6 +61,32 @@ static bool ParseVec3Csv(const std::string& s, float out[3]) {
     return true;
 }
 
+// Helper to check if a player name should be filtered out based on comma-separated filter list
+static bool IsPlayerFiltered(const std::string& playerName, const std::string& filterList) {
+    if (filterList.empty() || playerName.empty()) return false;
+
+    size_t start = 0;
+    for (;;) {
+        size_t comma = filterList.find(',', start);
+        std::string filterName = filterList.substr(start, comma == std::string::npos ? std::string::npos : (comma - start));
+        // Trim spaces
+        size_t b = filterName.find_first_not_of(" \t");
+        size_t e = filterName.find_last_not_of(" \t");
+        if (b != std::string::npos) {
+            filterName = filterName.substr(b, e - b + 1);
+            // Case-insensitive comparison
+            if (filterName.length() == playerName.length() &&
+                std::equal(filterName.begin(), filterName.end(), playerName.begin(),
+                          [](char a, char b) { return std::tolower((unsigned char)a) == std::tolower((unsigned char)b); })) {
+                return true; // Player is filtered
+            }
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return false;
+}
+
 std::optional<std::vector<GsiHttpServer::RadarPlayer>> GsiHttpServer::TryGetRadarPlayers() {
     std::lock_guard<std::mutex> lk(mtx_);
     return radar_players_;
@@ -76,12 +102,24 @@ std::optional<GsiHttpServer::RadarBomb> GsiHttpServer::TryGetRadarBomb() {
     return radar_bomb_;
 }
 
+std::optional<std::string> GsiHttpServer::TryGetMapName() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!gsi_.is_object() || !gsi_.contains("map")) return std::nullopt;
+    const json& map = gsi_["map"];
+    if (map.contains("name") && map["name"].is_string()) {
+        return map["name"].get<std::string>();
+    }
+    return std::nullopt;
+}
+
 void GsiHttpServer::RebuildRadarSnapshotFromGsi() {
-    // Snapshot gsi_ under lock
+    // Snapshot gsi_ and filter under lock
     json gsi;
+    std::string filterList;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         gsi = gsi_;
+        filterList = filtered_players_;
     }
 
     std::vector<RadarPlayer> outPlayers;
@@ -97,6 +135,11 @@ void GsiHttpServer::RebuildRadarSnapshotFromGsi() {
                 const std::string steam = it.key();
                 const json& pl = it.value();
                 if (!pl.is_object()) continue;
+
+                // Check if player should be filtered
+                std::string playerName;
+                if (pl.contains("name") && pl["name"].is_string()) playerName = pl["name"].get<std::string>();
+                if (IsPlayerFiltered(playerName, filterList)) continue; // Skip filtered players
 
                 RadarPlayer rp{};
                 rp.id = (int)std::hash<std::string>{}(steam);
@@ -379,11 +422,13 @@ static std::string TeamFallbackName(int side) {
 
 void GsiHttpServer::RebuildHudStateFromGsi() {
     Hud::State st{};
-    // Snapshot gsi_ under lock
+    // Snapshot gsi_ and filter under lock
     json gsi;
+    std::string filterList;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         gsi = gsi_;
+        filterList = filtered_players_;
     }
     if (!gsi.is_object() || !gsi.contains("map")) { std::lock_guard<std::mutex> lk(mtx_); hud_ = st; return; }
 
@@ -415,6 +460,10 @@ void GsiHttpServer::RebuildHudStateFromGsi() {
             Hud::Player p{};
             p.id = (int)std::hash<std::string>{}(steam);
             if (pl.contains("name")) p.name = pl["name"].get<std::string>();
+
+            // Check if player should be filtered
+            if (IsPlayerFiltered(p.name, filterList)) continue; // Skip filtered players
+
             std::string teamStr = pl.contains("team") ? pl["team"].get<std::string>() : "";
             p.teamSide = (teamStr == "CT") ? 3 : 2;
             if (pl.contains("observer_slot")) p.observerSlot = pl["observer_slot"].get<int>();

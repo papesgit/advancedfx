@@ -646,6 +646,7 @@ static Radar::Context g_RadarCtx;                     // holds cfg, texture SRV,
 static bool g_ShowHud = false;                        // draw native HUD in viewport
 static int  g_GsiPort = 31983;                        // must match CS2 cfg
 static GsiHttpServer g_GsiServer;
+static char g_FilteredPlayers[512] = "";              // comma-separated player names to filter out (e.g., coaches)
 // Built-in radar assets
 static bool g_RadarMapsLoaded = false;
 static std::unordered_map<std::string, Radar::RadarConfig> g_RadarAllConfigs;
@@ -1942,6 +1943,53 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     }
 
     if (g_ShowRadar) {
+        // Auto-load radar map from GSI data
+        {
+            auto mapOpt = g_GsiServer.TryGetMapName();
+            if (mapOpt.has_value()) {
+                const std::string& gsiMapName = *mapOpt;
+                // Check if map has changed
+                if (_stricmp(gsiMapName.c_str(), g_RadarMapName) != 0) {
+                    strncpy_s(g_RadarMapName, gsiMapName.c_str(), _TRUNCATE);
+
+                    // Load config for new map
+                    bool okCfg = false;
+                    auto it = g_RadarAllConfigs.find(g_RadarMapName);
+                    if (it != g_RadarAllConfigs.end()) { g_RadarCtx.cfg = it->second; okCfg = true; }
+
+                    if (!okCfg) { g_RadarCtx.cfg.pos_x = 0.0; g_RadarCtx.cfg.pos_y = 0.0; g_RadarCtx.cfg.scale = 1.0; }
+
+                    // Load texture
+                    if (g_RadarCtx.srv) { g_RadarCtx.srv->Release(); g_RadarCtx.srv = nullptr; }
+                    g_RadarCtx.texW = g_RadarCtx.texH = 0;
+                    bool texOk = false;
+                    if (!g_RadarCtx.cfg.imagePath.empty()) {
+                        std::wstring wpath = Mk_Utf8ToWide(g_RadarCtx.cfg.imagePath);
+                        texOk = Radar::LoadTextureWIC(m_Device, wpath, &g_RadarCtx.srv, &g_RadarCtx.texW, &g_RadarCtx.texH);
+                    }
+                    if (!texOk) {
+                        const wchar_t* hf = GetHlaeFolderW();
+                        if (hf && *hf) {
+                            std::wstring base = std::wstring(hf) + L"resources\\overlay\\radar\\ingame\\";
+                            std::wstring wmap; wmap.assign(g_RadarMapName, g_RadarMapName + strlen(g_RadarMapName));
+                            std::wstring p1 = base + wmap + L".png";
+                            DWORD a1 = GetFileAttributesW(p1.c_str());
+                            if (a1 != INVALID_FILE_ATTRIBUTES && !(a1 & FILE_ATTRIBUTE_DIRECTORY)) {
+                                texOk = Radar::LoadTextureWIC(m_Device, p1, &g_RadarCtx.srv, &g_RadarCtx.texW, &g_RadarCtx.texH);
+                            } else {
+                                std::wstring p2 = base + wmap + L"_lower.png";
+                                DWORD a2 = GetFileAttributesW(p2.c_str());
+                                if (a2 != INVALID_FILE_ATTRIBUTES && !(a2 & FILE_ATTRIBUTE_DIRECTORY)) {
+                                    texOk = Radar::LoadTextureWIC(m_Device, p2, &g_RadarCtx.srv, &g_RadarCtx.texW, &g_RadarCtx.texH);
+                                }
+                            }
+                        }
+                    }
+                    g_RadarAssetsLoaded = texOk;
+                }
+            }
+        }
+
         // Simple native radar using cs-hud mapping
         float radarWidth = g_RadarUiSize;
         float radarHeight = g_RadarUiSize;
@@ -2069,15 +2117,43 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 }
             }
 
+            // Reassign labels per team (1-5 for CT, 6-9+0 for T) based on observer_slot order
+            // This ensures filtered players don't leave gaps in the numbering
+            std::unordered_map<int, char> reassignedLabels; // entity id -> label digit
+            {
+                std::vector<int> ctPlayers, tPlayers;
+                for (const auto &p : players) {
+                    if (p.team == 3) ctPlayers.push_back(p.ent.id);
+                    else if (p.team == 2) tPlayers.push_back(p.ent.id);
+                }
+                // Sort by original observer_slot to maintain order
+                auto sortBySlot = [&](int idA, int idB) {
+                    int slotA = -1, slotB = -1;
+                    for (const auto &p : players) {
+                        if (p.ent.id == idA) slotA = p.slot;
+                        if (p.ent.id == idB) slotB = p.slot;
+                    }
+                    return slotA < slotB;
+                };
+                std::sort(ctPlayers.begin(), ctPlayers.end(), sortBySlot);
+                std::sort(tPlayers.begin(), tPlayers.end(), sortBySlot);
+
+                // Assign CT labels: 1-5
+                for (size_t i = 0; i < ctPlayers.size() && i < 5; ++i) {
+                    reassignedLabels[ctPlayers[i]] = (char)('1' + i);
+                }
+                // Assign T labels: 6-9, 0
+                const char tDigits[5] = {'6','7','8','9','0'};
+                for (size_t i = 0; i < tPlayers.size() && i < 5; ++i) {
+                    reassignedLabels[tPlayers[i]] = tDigits[i];
+                }
+            }
+
             // Draw labels centered on markers
-            auto slot_to_digit = [](int slot)->char{
-                if (slot < 0) return 0;
-                if (slot >= 0 && slot <= 8) return (char)('1' + slot);
-                if (slot == 9) return '0';
-                return 0;
-            };
             for (const auto &p : players) {
-                char d = slot_to_digit(p.slot);
+                auto it = reassignedLabels.find(p.ent.id);
+                if (it == reassignedLabels.end()) continue;
+                char d = it->second;
                 if (!d) continue;
                 char txt[2] = { d, '\0' };
 
@@ -2540,59 +2616,10 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     }
                 }
             }
-            // Map combo from built-in list
-            ImGui::SetNextItemWidth(240.0f);
-            if (ImGui::BeginCombo("Map", g_RadarMapName)) {
-                for (const auto& nm : g_RadarMapList) {
-                    bool selected = (_stricmp(nm.c_str(), g_RadarMapName) == 0);
-                    if (ImGui::Selectable(nm.c_str(), selected)) {
-                        strncpy_s(g_RadarMapName, nm.c_str(), _TRUNCATE);
-                    }
-                    if (selected) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
+            // Map is now loaded automatically from GSI data
+            ImGui::TextUnformatted("Map:");
             ImGui::SameLine();
-            if (ImGui::SmallButton("Reload Maps")) { g_RadarMapsLoaded = false; }
-            
-            if (ImGui::SmallButton("Load Radar")) {
-                // Load config
-                bool okCfg = false;
-                auto it = g_RadarAllConfigs.find(g_RadarMapName);
-                if (it != g_RadarAllConfigs.end()) { g_RadarCtx.cfg = it->second; okCfg = true; }
-                else if (!g_RadarAllConfigs.empty()) { g_RadarCtx.cfg = g_RadarAllConfigs.begin()->second; strncpy_s(g_RadarMapName, g_RadarAllConfigs.begin()->first.c_str(), _TRUNCATE); okCfg = true; }
-            
-                if (!okCfg) { g_RadarCtx.cfg.pos_x = 0.0; g_RadarCtx.cfg.pos_y = 0.0; g_RadarCtx.cfg.scale = 1.0; }
-
-                // Load texture
-                if (g_RadarCtx.srv) { g_RadarCtx.srv->Release(); g_RadarCtx.srv = nullptr; }
-                g_RadarCtx.texW = g_RadarCtx.texH = 0;
-                bool texOk = false;
-                if (!g_RadarCtx.cfg.imagePath.empty()) {
-                    std::wstring wpath = Mk_Utf8ToWide(g_RadarCtx.cfg.imagePath);
-                    texOk = Radar::LoadTextureWIC(m_Device, wpath, &g_RadarCtx.srv, &g_RadarCtx.texW, &g_RadarCtx.texH);
-                }
-                if (!texOk) {
-                    const wchar_t* hf = GetHlaeFolderW();
-                    if (hf && *hf) {
-                        std::wstring base = std::wstring(hf) + L"resources\\overlay\\radar\\ingame\\";
-                        std::wstring wmap; wmap.assign(g_RadarMapName, g_RadarMapName + strlen(g_RadarMapName));
-                        std::wstring p1 = base + wmap + L".png";
-                        DWORD a1 = GetFileAttributesW(p1.c_str());
-                        if (a1 != INVALID_FILE_ATTRIBUTES && !(a1 & FILE_ATTRIBUTE_DIRECTORY)) {
-                            texOk = Radar::LoadTextureWIC(m_Device, p1, &g_RadarCtx.srv, &g_RadarCtx.texW, &g_RadarCtx.texH);
-                        } else {
-                            std::wstring p2 = base + wmap + L"_lower.png";
-                            DWORD a2 = GetFileAttributesW(p2.c_str());
-                            if (a2 != INVALID_FILE_ATTRIBUTES && !(a2 & FILE_ATTRIBUTE_DIRECTORY)) {
-                                texOk = Radar::LoadTextureWIC(m_Device, p2, &g_RadarCtx.srv, &g_RadarCtx.texW, &g_RadarCtx.texH);
-                            }
-                        }
-                    }
-                }
-                g_RadarAssetsLoaded = texOk;
-            }
-
+            ImGui::TextDisabled("%s", g_RadarMapName[0] ? g_RadarMapName : "(waiting for GSI...)");
             ImGui::SameLine();
             if (ImGui::SmallButton("Reset Numbers")) {
                 // Clear persistent controller->digit mapping (useful at half-time)
@@ -2615,6 +2642,17 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 g_GsiServer.Stop();
             }
             ImGui::Text("GSI: %s", g_GsiServer.IsRunning() ? "listening" : "stopped");
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Coach filter:");
+            ImGui::SetNextItemWidth(300.0f);
+            if (ImGui::InputText("##FilteredPlayers", g_FilteredPlayers, sizeof(g_FilteredPlayers))) {
+                // Input changed - update the filter in GSI server
+                g_GsiServer.SetFilteredPlayers(std::string(g_FilteredPlayers));
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Comma-separated player names to hide from HUD/radar (e.g., \"Coach1, Coach2\")");
+            }
 
             ImGui::EndTabItem();
         }
@@ -3896,13 +3934,6 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         if (viewportVisible) {
             UpdateViewportPlayerCache();
 
-            // Viewport source selection
-            {
-                const char* srcNames[] = { "Backbuffer", "BeforeUi" };
-                ImGui::SetNextItemWidth(120.0f);
-                ImGui::Combo("Source", &g_ViewportSourceMode, srcNames, (int)(sizeof(srcNames)/sizeof(srcNames[0])));
-            }
-
             if (!m_BackbufferPreview.srv || m_BackbufferPreview.width == 0 || m_BackbufferPreview.height == 0) {
                 ImGui::TextDisabled("Waiting for viewport source...");
             } else {
@@ -3920,7 +3951,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 ImVec2 previewSize(srcW * fit, srcH * fit);
                 // Reserve layout space and capture item rect
                 ImVec2 pMin = ImGui::GetCursorScreenPos();
-                ImGui::InvisibleButton("##viewport_image", previewSize);
+                // Allow items to overlap this button so controls can be placed on top
+                ImGui::InvisibleButton("##viewport_image", previewSize, ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_AllowOverlap);
                 ImVec2 imgMin = ImGui::GetItemRectMin();
                 ImVec2 imgMax = ImGui::GetItemRectMax();
                 // Draw with opaque blend override to avoid alpha-related dropouts
@@ -4109,6 +4141,14 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             const float availableHeight = (std::max)(0.0f, contentMax.y - contentMin.y);
             const float maxChildHeight = (std::max)(0.0f, availableHeight - toggleHeight - spacingY);
             const bool hasPlayers = !g_ViewportPlayerCache.empty();
+
+            // Viewport source selection - positioned at top-left of viewport
+            {
+                ImGui::SetCursorPos(ImVec2(contentMin.x + spacingY, contentMin.y + spacingY));
+                const char* srcNames[] = { "Backbuffer", "BeforeUi" };
+                ImGui::SetNextItemWidth(120.0f);
+                ImGui::Combo("Source", &g_ViewportSourceMode, srcNames, (int)(sizeof(srcNames)/sizeof(srcNames[0])));
+            }
 
             if (g_ViewportPlayersMenuOpen) {
                 const float spacing_y = ImGui::GetStyle().ItemSpacing.y;
