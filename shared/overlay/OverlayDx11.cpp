@@ -1588,6 +1588,196 @@ static bool LoadImageToTexture(ID3D11Device* device, const std::string& filePath
     return true;
 }
 
+// Helper function to save a D3D11 texture to PNG file using WIC
+static bool SaveTextureToFile(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* texture, const std::wstring& filePath) {
+    if (!device || !context || !texture) return false;
+
+    // Get texture description
+    D3D11_TEXTURE2D_DESC desc;
+    texture->GetDesc(&desc);
+
+    // Create staging texture for CPU readback
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags = 0;
+    stagingDesc.SampleDesc.Count = 1;
+    stagingDesc.SampleDesc.Quality = 0;
+
+    ID3D11Texture2D* stagingTexture = nullptr;
+    HRESULT hr = device->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
+    if (FAILED(hr) || !stagingTexture) return false;
+
+    // Copy texture to staging
+    if (desc.SampleDesc.Count > 1) {
+        // MSAA texture - need to resolve first
+        context->ResolveSubresource(stagingTexture, 0, texture, 0, desc.Format);
+    } else {
+        context->CopyResource(stagingTexture, texture);
+    }
+
+    // Map staging texture
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    hr = context->Map(stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) {
+        stagingTexture->Release();
+        return false;
+    }
+
+    // Initialize WIC
+    CoInitialize(nullptr);
+    IWICImagingFactory* factory = nullptr;
+    hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (FAILED(hr)) {
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    // Create stream
+    IWICStream* stream = nullptr;
+    hr = factory->CreateStream(&stream);
+    if (FAILED(hr)) {
+        factory->Release();
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    hr = stream->InitializeFromFilename(filePath.c_str(), GENERIC_WRITE);
+    if (FAILED(hr)) {
+        stream->Release();
+        factory->Release();
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    // Create PNG encoder
+    IWICBitmapEncoder* encoder = nullptr;
+    hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+    if (FAILED(hr)) {
+        stream->Release();
+        factory->Release();
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
+    if (FAILED(hr)) {
+        encoder->Release();
+        stream->Release();
+        factory->Release();
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    // Create frame
+    IWICBitmapFrameEncode* frame = nullptr;
+    hr = encoder->CreateNewFrame(&frame, nullptr);
+    if (FAILED(hr)) {
+        encoder->Release();
+        stream->Release();
+        factory->Release();
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    hr = frame->Initialize(nullptr);
+    if (FAILED(hr)) {
+        frame->Release();
+        encoder->Release();
+        stream->Release();
+        factory->Release();
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    hr = frame->SetSize(desc.Width, desc.Height);
+    if (FAILED(hr)) {
+        frame->Release();
+        encoder->Release();
+        stream->Release();
+        factory->Release();
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+    hr = frame->SetPixelFormat(&format);
+    if (FAILED(hr)) {
+        frame->Release();
+        encoder->Release();
+        stream->Release();
+        factory->Release();
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    // Need to swap R and B channels (BGRA -> RGBA) for correct colors in PNG
+    // Create a temporary buffer with swapped channels
+    std::vector<BYTE> rgbaData(desc.Height * mapped.RowPitch);
+    BYTE* src = (BYTE*)mapped.pData;
+    BYTE* dst = rgbaData.data();
+
+    for (UINT y = 0; y < desc.Height; y++) {
+        BYTE* rowSrc = src + y * mapped.RowPitch;
+        BYTE* rowDst = dst + y * mapped.RowPitch;
+
+        for (UINT x = 0; x < desc.Width; x++) {
+            UINT pixelOffset = x * 4;
+            // Swap B and R (BGRA -> RGBA)
+            rowDst[pixelOffset + 0] = rowSrc[pixelOffset + 2]; // R
+            rowDst[pixelOffset + 1] = rowSrc[pixelOffset + 1]; // G
+            rowDst[pixelOffset + 2] = rowSrc[pixelOffset + 0]; // B
+            rowDst[pixelOffset + 3] = rowSrc[pixelOffset + 3]; // A
+        }
+    }
+
+    // Write pixels with swapped channels
+    hr = frame->WritePixels(desc.Height, mapped.RowPitch, desc.Height * mapped.RowPitch, rgbaData.data());
+    if (FAILED(hr)) {
+        frame->Release();
+        encoder->Release();
+        stream->Release();
+        factory->Release();
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    // Commit
+    hr = frame->Commit();
+    if (FAILED(hr)) {
+        frame->Release();
+        encoder->Release();
+        stream->Release();
+        factory->Release();
+        context->Unmap(stagingTexture, 0);
+        stagingTexture->Release();
+        return false;
+    }
+
+    hr = encoder->Commit();
+
+    // Cleanup
+    frame->Release();
+    encoder->Release();
+    stream->Release();
+    factory->Release();
+    context->Unmap(stagingTexture, 0);
+    stagingTexture->Release();
+
+    return SUCCEEDED(hr);
+}
+
 OverlayDx11::OverlayDx11(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* swapchain, HWND hwnd)
     : m_Device(device), m_Context(context), m_Swapchain(swapchain), m_Hwnd(hwnd) {}
 
@@ -3530,6 +3720,59 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     if (!g_OverlayPaths.campathDir.empty())
                         imageFileBrowsers[camIdx].SetDirectory(g_OverlayPaths.campathDir);
                     imageFileBrowsers[camIdx].Open();
+                    anyButtonClicked = true;
+                }
+                anyButtonClicked |= ImGui::IsItemHovered();
+
+                // Screen button (below Image) - captures backbuffer and saves it
+                ImGui::SetCursorScreenPos(ImVec2(itemMax.x - 60, itemMin.y + 56.0f * g_CameraRectScale));
+                if (ImGui::SmallButton("Screen")) {
+                    // Capture backbuffer and save it with the campath filename
+                    if (m_BackbufferPreview.texture && !camera.camPathFile.empty()) {
+                        // Extract filename from campath file (without extension)
+                        std::filesystem::path campathPath(camera.camPathFile);
+                        std::string basename = campathPath.stem().string();
+
+                        // Build output path: campathDir + basename + ".png"
+                        std::filesystem::path outputDir = g_OverlayPaths.campathDir.empty()
+                            ? campathPath.parent_path()
+                            : std::filesystem::path(g_OverlayPaths.campathDir);
+                        std::filesystem::path outputPath = outputDir / (basename + ".png");
+                        std::wstring wOutputPath = outputPath.wstring();
+
+                        // Save texture to file
+                        if (SaveTextureToFile(m_Device, m_Context, m_BackbufferPreview.texture, wOutputPath)) {
+                            // Release old texture if camera had a different image
+                            if (!camera.imagePath.empty() && camera.imagePath != outputPath.string()) {
+                                auto texIt = g_CameraTextures.find(camera.imagePath);
+                                if (texIt != g_CameraTextures.end() && texIt->second.srv) {
+                                    texIt->second.srv->Release();
+                                    g_CameraTextures.erase(texIt);
+                                }
+                            }
+
+                            // Assign the image to the camera
+                            camera.imagePath = outputPath.string();
+
+                            // Load the image as texture for preview
+                            CameraTexture tex;
+                            if (LoadImageToTexture(m_Device, camera.imagePath, tex)) {
+                                g_CameraTextures[camera.imagePath] = tex;
+                                advancedfx::Message("Overlay: Captured screen and assigned to camera '%s': %s\n",
+                                    camera.name.c_str(), camera.imagePath.c_str());
+                            } else {
+                                advancedfx::Warning("Overlay: Captured screen but failed to load as texture: %s\n",
+                                    camera.imagePath.c_str());
+                            }
+                            ImGui::MarkIniSettingsDirty();
+                        } else {
+                            advancedfx::Warning("Overlay: Failed to save screenshot to %s\n", outputPath.string().c_str());
+                        }
+                    } else if (!m_BackbufferPreview.texture) {
+                        advancedfx::Warning("Overlay: No backbuffer available. Please open the Viewport window first.\n");
+                    } else {
+                        advancedfx::Warning("Overlay: Camera has no campath file assigned. Please assign a campath file first.\n");
+                    }
                     anyButtonClicked = true;
                 }
                 anyButtonClicked |= ImGui::IsItemHovered();

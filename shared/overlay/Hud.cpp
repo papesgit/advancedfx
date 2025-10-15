@@ -192,7 +192,7 @@ void RenderTopBar(ImDrawList* dl, const Viewport& vp, const State& st) {
     DrawOutlinedText(dl, ImVec2(c0.x + (c1.x - c0.x - csz.x) * 0.5f, c0.y), IM_COL32(255,255,255,255), cbuf);
 }
 
-static void RenderPlayerRow(ImDrawList* dl, ImVec2 pos, ImVec2 size, const Player& p, bool alignRight, ImU32 /*teamColorUnused*/) {
+static void RenderPlayerRow(ImDrawList* dl, ImVec2 pos, ImVec2 size, const Player& p, bool alignRight, ImU32 teamColor, char labelDigit = 0) {
     // Background tile
     ImU32 bg;
     if (p.isAlive) {
@@ -210,8 +210,36 @@ static void RenderPlayerRow(ImDrawList* dl, ImVec2 pos, ImVec2 size, const Playe
     dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bg, 4.0f);
     dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(255,255,255,40), 4.0f);
 
+    // Number label circle at outer edge (half outside, half inside)
+    float circleRadius = 12.0f;
+    float circlePadding = 8.0f; // extra padding for text after circle
+    if (labelDigit != 0) {
+        ImVec2 circleCenter;
+        if (alignRight) {
+            // Right sidebar: circle on right edge
+            circleCenter = ImVec2(pos.x + size.x, pos.y + size.y * 0.5f);
+        } else {
+            // Left sidebar: circle on left edge
+            circleCenter = ImVec2(pos.x, pos.y + size.y * 0.5f);
+        }
+
+        // Draw team-colored circle with outline
+        dl->AddCircleFilled(circleCenter, circleRadius, teamColor, 24);
+        dl->AddCircle(circleCenter, circleRadius, IM_COL32(255,255,255,180), 24, 2.0f);
+
+        // Draw number label centered in circle
+        char labelText[2] = { labelDigit, '\0' };
+        ImVec2 textSize = ImGui::CalcTextSize(labelText);
+        ImVec2 textPos = ImVec2(circleCenter.x - textSize.x * 0.5f, circleCenter.y - textSize.y * 0.5f);
+        DrawOutlinedText(dl, textPos, IM_COL32(255,255,255,255), labelText, 1.0f);
+    }
+
     // Health bar
     float pad = 6.0f;
+    // Add extra padding if we have a label circle
+    float textPadLeft = pad + (labelDigit != 0 && !alignRight ? circleRadius + circlePadding : 0);
+    float textPadRight = pad + (labelDigit != 0 && alignRight ? circleRadius + circlePadding : 0);
+
     float hbH = 6.0f;
     float hbW = size.x - pad*2;
     ImVec2 hb0 = ImVec2(pos.x + pad, pos.y + size.y - pad - hbH);
@@ -224,8 +252,8 @@ static void RenderPlayerRow(ImDrawList* dl, ImVec2 pos, ImVec2 size, const Playe
     char nbuf[256]; snprintf(nbuf, sizeof(nbuf), "%s  $%d", p.name.c_str(), p.money);
     ImVec2 nsz = ImGui::CalcTextSize(nbuf);
     ImVec2 namePos;
-    if (alignRight) namePos = ImVec2(pos.x + size.x - pad - nsz.x, pos.y + pad);
-    else            namePos = ImVec2(pos.x + pad, pos.y + pad);
+    if (alignRight) namePos = ImVec2(pos.x + size.x - textPadRight - nsz.x, pos.y + pad);
+    else            namePos = ImVec2(pos.x + textPadLeft, pos.y + pad);
     DrawOutlinedText(dl, namePos, IM_COL32(255,255,255,255), nbuf);
 
     // Active weapon icon near the name (if available)
@@ -249,8 +277,8 @@ static void RenderPlayerRow(ImDrawList* dl, ImVec2 pos, ImVec2 size, const Playe
     // K/D and armor
     char kdbuf[64]; snprintf(kdbuf, sizeof(kdbuf), "%d/%d  %dAR", p.kills, p.deaths, p.armor);
     ImVec2 kdsz = ImGui::CalcTextSize(kdbuf);
-    if (alignRight) DrawOutlinedText(dl, ImVec2(pos.x + size.x - pad - kdsz.x, pos.y + pad + nsz.y + 2), IM_COL32(200,200,200,220), kdbuf);
-    else            DrawOutlinedText(dl, ImVec2(pos.x + pad, pos.y + pad + nsz.y + 2), IM_COL32(200,200,200,220), kdbuf);
+    if (alignRight) DrawOutlinedText(dl, ImVec2(pos.x + size.x - textPadRight - kdsz.x, pos.y + pad + nsz.y + 2), IM_COL32(200,200,200,220), kdbuf);
+    else            DrawOutlinedText(dl, ImVec2(pos.x + textPadLeft, pos.y + pad + nsz.y + 2), IM_COL32(200,200,200,220), kdbuf);
 
     // Status icons (C4/defuser/helmet)
     float iconSize = 14.0f * 1.3f; // 30% bigger
@@ -270,12 +298,12 @@ static void RenderPlayerRow(ImDrawList* dl, ImVec2 pos, ImVec2 size, const Playe
     };
 
     if (alignRight) {
-        float x = pos.x + pad;
+        float x = pos.x + textPadRight;
         if (p.hasBomb) { x += drawIconOrTextW("weapons/c4", "C4", ImVec2(x, iconY)) + 4.0f; }
         if (p.hasDefuser && p.teamSide==3) { x += drawIconOrTextW("weapons/defuser", "DEF", ImVec2(x, iconY)) + 4.0f; }
         if (p.hasHelmet) { x += drawIconOrTextW("icons/armor-helmet", "H", ImVec2(x, iconY)) + 4.0f; }
     } else {
-        float x = pos.x + size.x - pad;
+        float x = pos.x + size.x - textPadLeft;
         auto drawRight = [&](const char* ik, const char* tf){
             IconTex t = GetIcon(ik);
             float w = iconSize;
@@ -358,9 +386,14 @@ void RenderSidebars(ImDrawList* dl, const Viewport& vp, const State& st) {
         DrawOutlinedText(dl, ImVec2(h0.x + 8, h0.y + 6), st.leftTeam.color, st.leftTeam.name.c_str());
         y = h1.y + 6.0f;
     }
+    // Left sidebar: labels 1-5
+    const char leftDigits[5] = {'1', '2', '3', '4', '5'};
+    size_t leftIdx = 0;
     for (const auto& p : st.leftPlayers) {
-        RenderPlayerRow(dl, ImVec2(vp.min.x + 16.0f, y), ImVec2(barW, rowH), p, false, st.leftTeam.color);
+        char labelDigit = (leftIdx < 5) ? leftDigits[leftIdx] : 0;
+        RenderPlayerRow(dl, ImVec2(vp.min.x + 16.0f, y), ImVec2(barW, rowH), p, false, st.leftTeam.color, labelDigit);
         y += rowH + gap;
+        ++leftIdx;
     }
 
     // Right
@@ -375,9 +408,14 @@ void RenderSidebars(ImDrawList* dl, const Viewport& vp, const State& st) {
         DrawOutlinedText(dl, ImVec2(h1.x - 8 - ts.x, h0.y + 6), st.rightTeam.color, st.rightTeam.name.c_str());
         yR = h1.y + 6.0f;
     }
+    // Right sidebar: labels 6-9, 0
+    const char rightDigits[5] = {'6', '7', '8', '9', '0'};
+    size_t rightIdx = 0;
     for (const auto& p : st.rightPlayers) {
-        RenderPlayerRow(dl, ImVec2(rightX, yR), ImVec2(barW, rowH), p, true, st.rightTeam.color);
+        char labelDigit = (rightIdx < 5) ? rightDigits[rightIdx] : 0;
+        RenderPlayerRow(dl, ImVec2(rightX, yR), ImVec2(barW, rowH), p, true, st.rightTeam.color, labelDigit);
         yR += rowH + gap;
+        ++rightIdx;
     }
 }
 
