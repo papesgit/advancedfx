@@ -44,6 +44,7 @@
 #include "../shared/MirvInput.h"
 #include "../shared/MirvSkip.h"
 #include "../shared/overlay/AttachCameraState.h"
+#include "../shared/overlay/CameraOverride.h"
 #include "../shared/AfxMath.h"
 
 #include "../deps/release/Detours/src/detours.h"
@@ -1076,9 +1077,33 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
         }
     }
 
+    // Generic camera override (for overlay features like bird camera)
+    bool didCameraOverride = false;
+    {
+        advancedfx::overlay::CameraOverrideState camOverride;
+        advancedfx::overlay::CameraOverride_GetState(camOverride);
+        if (camOverride.enabled && !g_MirvInputEx.m_MirvInput->GetCameraControlMode()) {
+            Tx = camOverride.pos[0];
+            Ty = camOverride.pos[1];
+            Tz = camOverride.pos[2];
+            Rx = camOverride.ang[0];
+            Ry = camOverride.ang[1];
+            Rz = camOverride.ang[2];
+            originOrAnglesOverriden = true;
+            didCameraOverride = true;
+        } else if (camOverride.enabled) {
+            static bool s_loggedOnce = false;
+            if (!s_loggedOnce) {
+                advancedfx::Message("main.cpp CSetupView: CameraOverride enabled but blocked by CameraControlMode=%d\n",
+                          g_MirvInputEx.m_MirvInput->GetCameraControlMode() ? 1 : 0);
+                s_loggedOnce = true;
+            }
+        }
+    }
+
     if(MirvFovOverride(Fov)) originOrAnglesOverriden = true;
 
-	if(!didAttachOverride) {
+	if(!didAttachOverride && !didCameraOverride) {
 		if(g_MirvInputEx.m_MirvInput->Override(g_MirvInputEx.LastFrameTime, Tx,Ty,Tz,Rx,Ry,Rz,Fov)) originOrAnglesOverriden = true;
 	}
 

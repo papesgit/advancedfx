@@ -18,6 +18,8 @@
 #include "../AfxConsole.h"
 #include "../AfxMath.h"
 #include "AttachCameraState.h"
+#include "BirdCamera.h"
+#include "CameraOverride.h"
 #ifdef IMGUI_ENABLE_FREETYPE
 #include "third_party/imgui/misc/freetype/imgui_freetype.h"
 #endif
@@ -48,6 +50,7 @@
 #include <float.h>
 #include <vector>
 #include <string>
+#include <sstream>
 #include <string.h>
 #include <algorithm>
 #include <filesystem>
@@ -355,6 +358,7 @@ static bool g_ShowGizmo = false;
 static bool g_ShowBackbufferWindow = false;
 // Viewport source: 0=Backbuffer (with UI), 1=BeforeUi (no UI)
 static int  g_ViewportSourceMode = 0;
+static bool g_ViewportEnableRmbControl = true;  // Enable RMB camera control in viewport by default
 // ImGui per-draw opaque blend override for viewport image
 static ID3D11BlendState* g_ViewportOpaqueBlend = nullptr;
 static ID3D11DeviceContext* g_ImguiD3DContext = nullptr;
@@ -647,6 +651,11 @@ static bool g_ShowHud = false;                        // draw native HUD in view
 static int  g_GsiPort = 31983;                        // must match CS2 cfg
 static GsiHttpServer g_GsiServer;
 static char g_FilteredPlayers[512] = "";              // comma-separated player names to filter out (e.g., coaches)
+// Bird camera context menu
+static bool g_BirdContextMenuOpen = false;
+static int g_BirdContextTargetObserverSlot = -1;
+static int g_BirdContextTargetPlayerId = -1;
+static std::vector<Hud::PlayerRowRect> g_HudPlayerRects;
 // Built-in radar assets
 static bool g_RadarMapsLoaded = false;
 static std::unordered_map<std::string, Radar::RadarConfig> g_RadarAllConfigs;
@@ -666,11 +675,32 @@ struct CameraProfile {
     std::vector<CameraItem> cameras;
 };
 
+enum class GroupPlayMode {
+    Random = 0,
+    Sequentially = 1,
+    FromStart = 2
+};
+
+struct CameraGroup {
+    std::string name;
+    std::string profileName;
+    std::vector<int> cameraIndices; // Indices into the current profile's camera list
+    GroupPlayMode playMode = GroupPlayMode::Random;
+    int sequentialIndex = 0; // Current index for Sequential/FromStart modes
+};
+
 static std::vector<CameraProfile> g_CameraProfiles;
 static int g_SelectedProfileIndex = -1;
 static float g_CameraRectScale = 1.0f; // UI scale for camera rectangles
 // Track which camera was loaded via rectangle click to visualize progress
 static std::string g_ActiveCameraCampathPath;
+
+// Camera groups (per profile)
+static std::vector<CameraGroup> g_CameraGroups;
+static bool g_ShowGroupsSidebar = false;
+static int g_SelectedGroupForView = -1; // -1 = none selected
+static bool g_ShowGroupViewWindow = false;
+static std::string g_LastPlayedGroupOrCamera; // Track last played to reset FromStart mode
 
 // Texture cache for camera images
 struct CameraTexture {
@@ -776,6 +806,61 @@ static void AutoPopulateObservingBindingsFromEntities()
 #else
     (void)0;
 #endif
+}
+
+// Get controller index for focused player by comparing HUD player name to entity names
+static int GetFocusedPlayerControllerIndex() {
+    // Get HUD state to find focused player name
+    auto hudOpt = g_GsiServer.TryGetHudState();
+    if (!hudOpt.has_value()) {
+        return -1;
+    }
+
+    // Find the focused player
+    const Hud::Player* focusedPlayer = nullptr;
+    for (const auto& p : hudOpt->leftPlayers) {
+        if (p.isFocused) {
+            focusedPlayer = &p;
+            break;
+        }
+    }
+    if (!focusedPlayer) {
+        for (const auto& p : hudOpt->rightPlayers) {
+            if (p.isFocused) {
+                focusedPlayer = &p;
+                break;
+            }
+        }
+    }
+
+    if (!focusedPlayer) {
+        return -1;
+    }
+
+    // Get the focused player's name
+    std::string focusedName = focusedPlayer->name;
+    if (focusedName.empty()) {
+        return -1;
+    }
+
+    // Search through entities to find matching controller by name
+    if (g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+        int highest = GetHighestEntityIndex();
+        for (int i = 0; i <= highest; i++) {
+            if (auto* ent = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, i))) {
+                if (SafeIsPlayerController(ent)) {
+                    const char* name = SafeGetSanitizedPlayerName(ent);
+                    if (!name || !*name) name = SafeGetPlayerName(ent);
+
+                    if (name && focusedName == name) {
+                        return i; // Found matching controller
+                    }
+                }
+            }
+        }
+    }
+
+    return -1;
 }
 
 static void Dof_SyncTicksFromKeys()
@@ -1494,6 +1579,91 @@ static void CameraProfiles_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler
     }
 }
 
+// Camera Groups Settings Handlers
+static void* CameraGroups_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
+    // Expect "Profile||Group" as composite key; support legacy "Group" only
+    std::string composite(name ? name : "");
+    std::string prof, grp;
+
+    size_t delim = composite.find("||");
+    if (delim != std::string::npos) {
+        prof = composite.substr(0, delim);
+        grp  = composite.substr(delim + 2);
+    } else {
+        // Legacy: no profile in key
+        grp = composite;
+        prof.clear();
+    }
+
+    // Find existing (profile, group)
+    for (auto& g : g_CameraGroups) {
+        if (g.name == grp && g.profileName == prof)
+            return &g;
+    }
+
+    // Create new group
+    CameraGroup newGroup;
+    newGroup.name = grp;
+    newGroup.profileName = prof; // may be empty for legacy
+    g_CameraGroups.push_back(newGroup);
+    return &g_CameraGroups.back();
+}
+
+
+static void CameraGroups_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line) {
+    CameraGroup* group = (CameraGroup*)entry;
+    const char* eq = strchr(line, '=');
+    if (!eq) return;
+
+    std::string key(line, eq - line);
+    std::string val(eq + 1);
+
+    if (key == "Profile") {
+        group->profileName = val;                 // NEW
+    } else if (key == "Name") {
+        group->name = val;                        // NEW (allows rename in file)
+    } else if (key == "PlayMode") {
+        try { int mode = std::stoi(val); if (mode >= 0 && mode <= 2) group->playMode = (GroupPlayMode)mode; } catch (...) {}
+    } else if (key == "SequentialIndex") {
+        try { group->sequentialIndex = std::stoi(val); } catch (...) {}
+    } else if (key == "CameraIndices") {
+        group->cameraIndices.clear();
+        std::stringstream ss(val);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            try { group->cameraIndices.push_back(std::stoi(item)); } catch (...) {}
+        }
+    }
+}
+
+
+static void CameraGroups_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out_buf) {
+    if (g_CameraGroups.empty()) return;
+
+    for (const auto& group : g_CameraGroups) {
+        // Composite key keeps sections unique across profiles
+        std::string composite = group.profileName + "||" + group.name; // profile||group
+        out_buf->appendf("[%s][%s]\n", handler->TypeName, composite.c_str());
+
+        // Also write explicit fields for clarity/forward-compat
+        out_buf->appendf("Profile=%s\n", group.profileName.c_str());
+        out_buf->appendf("Name=%s\n", group.name.c_str());
+        out_buf->appendf("PlayMode=%d\n", (int)group.playMode);
+        out_buf->appendf("SequentialIndex=%d\n", group.sequentialIndex);
+
+        if (!group.cameraIndices.empty()) {
+            out_buf->append("CameraIndices=");
+            for (size_t i = 0; i < group.cameraIndices.size(); i++) {
+                out_buf->appendf("%d", group.cameraIndices[i]);
+                if (i + 1 < group.cameraIndices.size()) out_buf->append(",");
+            }
+            out_buf->append("\n");
+        }
+        out_buf->append("\n");
+    }
+}
+
+
 // Helper function to load image from file using WIC and create D3D11 texture
 static bool LoadImageToTexture(ID3D11Device* device, const std::string& filePath, CameraTexture& outTexture) {
     // Convert to wide string
@@ -1884,6 +2054,22 @@ bool OverlayDx11::Initialize() {
         }
     }
 
+    // Register Camera Groups settings handler
+    if (!ImGui::FindSettingsHandler("HLAECameraGroups")) {
+        ImGuiSettingsHandler ini3;
+        ini3.TypeName = "HLAECameraGroups";
+        ini3.TypeHash = ImHashStr(ini3.TypeName);
+        ini3.ReadOpenFn = CameraGroups_ReadOpen;
+        ini3.ReadLineFn = CameraGroups_ReadLine;
+        ini3.WriteAllFn = CameraGroups_WriteAll;
+        ImGui::AddSettingsHandler(&ini3);
+        // Load persisted groups now that the handler is registered
+        ImGuiIO& io4 = ImGui::GetIO();
+        if (io4.IniFilename && io4.IniFilename[0]) {
+            ImGui::LoadIniSettingsFromDisk(io4.IniFilename);
+        }
+    }
+
     // Route Win32 messages to ImGui when visible
     if (!Overlay::Get().GetInputRouter()) {
         auto router = std::make_unique<InputRouter>();
@@ -2122,6 +2308,102 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     {
+        // Query entity data for bird camera if active
+        if (advancedfx::overlay::BirdCamera_IsActive()) {
+            int fromIdx = 0;
+            int toIdx = 0;
+            advancedfx::overlay::BirdCamera_GetControllerIndices(fromIdx, toIdx);
+
+            // Query target A (from player)
+            {
+                float pos[3] = {0, 0, 0};
+                float ang[3] = {0, 0, 0};
+                bool valid = false;
+
+                if (g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                    CEntityInstance* controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, fromIdx);
+                    if (controller && controller->IsPlayerController()) {
+                        auto pawnHandle = controller->GetPlayerPawnHandle();
+                        if (pawnHandle.IsValid()) {
+                            int pawnIdx = pawnHandle.GetEntryIndex();
+                            CEntityInstance* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIdx);
+                            if (pawn && pawn->IsPlayerPawn()) {
+                                pawn->GetRenderEyeOrigin(pos);
+                                pawn->GetRenderEyeAngles(ang);
+                                // Don't add height here - BirdCamera will add it based on phase
+                                valid = true;
+                            } else {
+                                advancedfx::Message("BirdCamera: Target A - pawn not found or not player pawn (fromIdx=%d, pawnIdx=%d)\n",
+                                          fromIdx, pawnIdx);
+                            }
+                        } else {
+                            advancedfx::Message("BirdCamera: Target A - pawn handle invalid (fromIdx=%d)\n", fromIdx);
+                        }
+                    } else {
+                        advancedfx::Message("BirdCamera: Target A - controller not found or not player controller (fromIdx=%d)\n", fromIdx);
+                    }
+                } else {
+                    advancedfx::Message("BirdCamera: Target A - entity system not available\n");
+                }
+                advancedfx::overlay::BirdCamera_SetTargetA(pos, ang, valid);
+            }
+
+            // Query target B (to player)
+            {
+                float pos[3] = {0, 0, 0};
+                float ang[3] = {0, 0, 0};
+                bool valid = false;
+
+                if (g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                    CEntityInstance* controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, toIdx);
+                    if (controller && controller->IsPlayerController()) {
+                        auto pawnHandle = controller->GetPlayerPawnHandle();
+                        if (pawnHandle.IsValid()) {
+                            int pawnIdx = pawnHandle.GetEntryIndex();
+                            CEntityInstance* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIdx);
+                            if (pawn && pawn->IsPlayerPawn()) {
+                                pawn->GetRenderEyeOrigin(pos);
+                                pawn->GetRenderEyeAngles(ang);
+                                // For descend phase: normal eye position
+                                valid = true;
+                            }
+                        }
+                    }
+                }
+                advancedfx::overlay::BirdCamera_SetTargetB(pos, ang, valid);
+            }
+        }
+
+        // Update bird camera transitions
+        advancedfx::overlay::BirdCamera_Update(io.DeltaTime, (float)g_MirvTime.curtime_get());
+
+        // Check if bird camera needs spec command executed
+        int specTargetIdx = advancedfx::overlay::BirdCamera_GetPendingSpecTarget();
+        if (specTargetIdx >= 0) {
+            // Get player name for spec command
+            if (g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                CEntityInstance* controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, specTargetIdx);
+                if (controller && SafeIsPlayerController(controller)) {
+                    const char* name = SafeGetSanitizedPlayerName(controller);
+                    if (!name || !*name) name = SafeGetPlayerName(controller);
+
+                    if (name && *name) {
+                        char cmd[512];
+                        // Quote name if it contains spaces
+                        bool hasSpace = strchr(name, ' ') != nullptr;
+                        Afx_ExecClientCmd("spec_mode 5");
+                        if (hasSpace) {
+                            _snprintf_s(cmd, _TRUNCATE, "spec_player \"%s\"", name);
+                        } else {
+                            _snprintf_s(cmd, _TRUNCATE, "spec_player %s", name);
+                        }
+                        Afx_ExecClientCmd(cmd);
+                        advancedfx::Message("BirdCamera: Executing spec_player %s (idx=%d)\n", name, specTargetIdx);
+                    }
+                }
+            }
+        }
+
         if (g_DimGameWhileViewport && g_ShowBackbufferWindow) {
             ImVec2 ds = ImGui::GetIO().DisplaySize;
             const int a = (int)(g_DimOpacity * 255.0f + 0.5f);
@@ -3574,6 +3856,21 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         if (g_SelectedProfileIndex >= 0 && g_SelectedProfileIndex < (int)g_CameraProfiles.size()) {
             CameraProfile& profile = g_CameraProfiles[g_SelectedProfileIndex];
 
+            // Toggle button for groups sidebar (vertical button at edge)
+            ImVec2 contentRegion = ImGui::GetContentRegionAvail();
+            ImVec2 cursorPos = ImGui::GetCursorPos();
+
+            // Draw vertical toggle button at right edge
+            ImGui::PushStyleColor(ImGuiCol_Button, g_ShowGroupsSidebar ? ImVec4(0.3f, 0.5f, 0.8f, 1.0f) : ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
+            ImGui::SetCursorPos(ImVec2(cursorPos.x + contentRegion.x - 20.0f, cursorPos.y));
+            if (ImGui::Button("G\nR\nO\nU\nP\nS", ImVec2(20.0f, 120.0f))) {
+                g_ShowGroupsSidebar = !g_ShowGroupsSidebar;
+            }
+            ImGui::PopStyleColor();
+
+            // Restore cursor for main content
+            ImGui::SetCursorPos(cursorPos);
+
             // Static file browsers for each camera (using map keyed by camera index)
             static std::map<size_t, ImGui::FileBrowser> cameraFileBrowsers;
             static std::map<size_t, ImGui::FileBrowser> imageFileBrowsers;
@@ -3593,14 +3890,190 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 }
             }
 
+            // Groups Sidebar
+            ImVec2 baseButton(160.0f, 90.0f);
+            ImVec2 buttonSize(baseButton.x * g_CameraRectScale, baseButton.y * g_CameraRectScale);
+            float sidebarWidth = g_ShowGroupsSidebar ? (buttonSize.x + 20.0f) : 0.0f;
+
+            if (g_ShowGroupsSidebar) {
+                ImGui::BeginChild("GroupsSidebar", ImVec2(sidebarWidth, 0), true);
+
+                if (ImGui::Button("Add Group", ImVec2(-1, 0))) {
+                    ImGui::OpenPopup("Add Group##modal");
+                }
+
+                // Add Group Modal
+                static char groupNameInput[256] = {0};
+                if (ImGui::BeginPopupModal("Add Group##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::Text("Enter group name:");
+                    ImGui::SetNextItemWidth(200.0f);
+                    ImGui::InputText("##group_name", groupNameInput, sizeof(groupNameInput));
+                    ImGui::Separator();
+
+                    if (ImGui::Button("Create", ImVec2(90, 0))) {
+                        if (groupNameInput[0] != '\0' && g_SelectedProfileIndex >= 0 && g_SelectedProfileIndex < (int)g_CameraProfiles.size()) {
+                            CameraGroup newGroup;
+                            newGroup.name = groupNameInput;
+                            newGroup.profileName = g_CameraProfiles[g_SelectedProfileIndex].name;
+                            g_CameraGroups.push_back(newGroup);
+                            advancedfx::Message("Overlay: Created camera group '%s' for profile '%s'\n", groupNameInput, newGroup.profileName.c_str());
+                            ImGui::MarkIniSettingsDirty();
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel", ImVec2(90, 0))) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+
+                ImGui::Separator();
+
+                // Display groups
+                for (size_t grpIdx = 0; grpIdx < g_CameraGroups.size(); grpIdx++) {
+                    CameraGroup& group = g_CameraGroups[grpIdx];
+                    if (group.profileName != profile.name) continue;
+                    ImGui::PushID((int)grpIdx);
+
+                    // Group rectangle background
+                    ImVec2 rectMin = ImGui::GetCursorScreenPos();
+                    ImVec2 rectMax = ImVec2(rectMin.x + buttonSize.x, rectMin.y + buttonSize.y);
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+                    // Draw background
+                    dl->AddRectFilled(rectMin, rectMax, IM_COL32(60, 60, 80, 255));
+                    dl->AddRect(rectMin, rectMax, IM_COL32(100, 100, 150, 255));
+
+                    // Group name
+                    ImVec2 textPos = ImVec2(rectMin.x + 5, rectMin.y + 5);
+                    dl->AddText(textPos, IM_COL32(255, 255, 255, 255), group.name.c_str());
+
+                    // Camera count
+                    char countBuf[32];
+                    _snprintf_s(countBuf, _TRUNCATE, "%d cameras", (int)group.cameraIndices.size());
+                    ImVec2 countPos = ImVec2(rectMin.x + 5, rectMin.y + 25);
+                    dl->AddText(countPos, IM_COL32(180, 180, 180, 255), countBuf);
+
+                    const char* modeLabels[] = {"Rnd", "Seq", "Fst"};
+
+                    // Buttons (Delete, View, Mode)
+                    float btnY = rectMax.y - 25.0f;
+                    ImVec2 btnSize(buttonSize.x / 3.0f - 4.0f, 20.0f);
+
+                    // Delete button
+                    ImGui::SetCursorScreenPos(ImVec2(rectMin.x + 2, btnY));
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+                    if (ImGui::Button("Del", btnSize)) {
+                        g_CameraGroups.erase(g_CameraGroups.begin() + grpIdx);
+                        ImGui::MarkIniSettingsDirty();
+                        ImGui::PopStyleColor();
+                        ImGui::PopID();
+                        break; // Exit loop after deletion
+                    }
+                    ImGui::PopStyleColor();
+
+                    // View button
+                    ImGui::SetCursorScreenPos(ImVec2(rectMin.x + buttonSize.x / 3.0f + 1, btnY));
+                    if (ImGui::Button("View", btnSize)) {
+                        g_SelectedGroupForView = (int)grpIdx;
+                        g_ShowGroupViewWindow = true;
+                    }
+
+                    // Mode toggle button
+                    ImGui::SetCursorScreenPos(ImVec2(rectMin.x + 2 * buttonSize.x / 3.0f + 2, btnY));
+                    if (ImGui::Button(modeLabels[(int)group.playMode], btnSize)) {
+                        group.playMode = (GroupPlayMode)(((int)group.playMode + 1) % 3);
+                        ImGui::MarkIniSettingsDirty();
+                    }
+
+                    // Invisible button for clicking (also drag-drop target for adding cameras)
+                    ImGui::SetCursorScreenPos(rectMin);
+                    ImGui::InvisibleButton("##grouprect", ImVec2(buttonSize.x, buttonSize.y));
+
+                    // Drag-drop target to add cameras to this group
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HLAE_OBS_CAM_REORDER")) {
+                            int droppedCamIdx = *(const int*)payload->Data;
+                            // Check if not already in group
+                            bool alreadyInGroup = false;
+                            for (int idx : group.cameraIndices) {
+                                if (idx == droppedCamIdx) {
+                                    alreadyInGroup = true;
+                                    break;
+                                }
+                            }
+                            if (!alreadyInGroup && droppedCamIdx >= 0 && droppedCamIdx < (int)profile.cameras.size()) {
+                                group.cameraIndices.push_back(droppedCamIdx);
+                                advancedfx::Message("Overlay: Added camera '%s' to group '%s'\n",
+                                                  profile.cameras[droppedCamIdx].name.c_str(), group.name.c_str());
+                                ImGui::MarkIniSettingsDirty();
+                            } else if (alreadyInGroup) {
+                                advancedfx::Message("Overlay: Camera already in group '%s'\n", group.name.c_str());
+                            }
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
+
+                    if (ImGui::IsItemClicked()) {
+                        // Play camera based on play mode
+                        int camIdx = -1;
+
+                        if (group.playMode == GroupPlayMode::Random) {
+                            if (!group.cameraIndices.empty()) {
+                                camIdx = group.cameraIndices[rand() % group.cameraIndices.size()];
+                            }
+                        } else if (group.playMode == GroupPlayMode::Sequentially) {
+                            if (!group.cameraIndices.empty()) {
+                                camIdx = group.cameraIndices[group.sequentialIndex % group.cameraIndices.size()];
+                                group.sequentialIndex = (group.sequentialIndex + 1) % (int)group.cameraIndices.size();
+                            }
+                        } else if (group.playMode == GroupPlayMode::FromStart) {
+                            // Reset if different group/camera was played
+                            std::string thisGroup = "group_" + std::to_string(grpIdx);
+                            if (g_LastPlayedGroupOrCamera != thisGroup) {
+                                group.sequentialIndex = 0;
+                            }
+                            if (!group.cameraIndices.empty()) {
+                                camIdx = group.cameraIndices[group.sequentialIndex % group.cameraIndices.size()];
+                                group.sequentialIndex = (group.sequentialIndex + 1) % (int)group.cameraIndices.size();
+                            }
+                            g_LastPlayedGroupOrCamera = thisGroup;
+                        }
+
+                        // Load the camera if valid
+                        if (camIdx >= 0 && camIdx < (int)profile.cameras.size()) {
+                            const CameraItem& camera = profile.cameras[camIdx];
+                            if (!camera.camPathFile.empty()) {
+                                std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_campath select all; mirv_campath edit start";
+                                Afx_ExecClientCmd(cmd.c_str());
+                                advancedfx::Message("Overlay: [Group '%s'] Loading camera '%s' (%s mode, idx=%d)\n",
+                                                  group.name.c_str(), camera.name.c_str(),
+                                                  modeLabels[(int)group.playMode], camIdx);
+                                g_ActiveCameraCampathPath = camera.camPathFile;
+                            } else {
+                                advancedfx::Message("Overlay: [Group '%s'] Camera at index %d has no campath file\n",
+                                                  group.name.c_str(), camIdx);
+                            }
+                        }
+                    }
+
+                    // Add spacing before next group
+                    ImGui::SetCursorScreenPos(ImVec2(rectMin.x, rectMax.y + 5));
+                    ImGui::Dummy(ImVec2(0, 0));
+
+                    ImGui::PopID();
+                }
+
+                ImGui::EndChild();
+                ImGui::SameLine();
+            }
+
             // Grid layout parameters
             ImVec2 gridOrigin = ImGui::GetCursorScreenPos();
             ImGuiStyle& st_cam = ImGui::GetStyle();
             float spacingX = st_cam.ItemSpacing.x;
             float spacingY = st_cam.ItemSpacing.y;
-            // Base button size scaled
-            ImVec2 baseButton(160.0f, 90.0f);
-            ImVec2 buttonSize(baseButton.x * g_CameraRectScale, baseButton.y * g_CameraRectScale);
             float contentW = ImGui::GetContentRegionAvail().x;
             int columns = (int)floor((contentW + spacingX) / (buttonSize.x + spacingX));
             if (columns < 1) columns = 1;
@@ -3791,6 +4264,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoHoldToOpenOthers)) {
                     s_CameraDragActive = true;
                     int srcIndex = (int)camIdx;
+                    // Single payload for both reordering and adding to groups
                     ImGui::SetDragDropPayload("HLAE_OBS_CAM_REORDER", &srcIndex, sizeof(srcIndex));
                     // Simple drag preview
                     ImGui::Text("Move %s", camera.name.c_str());
@@ -3814,6 +4288,27 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                                 if (insertIdx < 0) insertIdx = 0;
                                 if (insertIdx > (int)profile.cameras.size()) insertIdx = (int)profile.cameras.size();
                                 profile.cameras.insert(profile.cameras.begin() + insertIdx, std::move(moved));
+
+                                // Update all group indices to reflect the reordering
+                                for (auto& group : g_CameraGroups) {
+                                    if (group.profileName != g_CameraProfiles[g_SelectedProfileIndex].name) continue;
+                                    for (int& idx : group.cameraIndices) {
+                                        // The camera at 'src' is now at 'insertIdx'
+                                        if (idx == src) {
+                                            idx = insertIdx;
+                                        }
+                                        // Indices between src and insertIdx shift by one
+                                        else if (src < insertIdx && idx > src && idx <= insertIdx) {
+                                            // Moving forward: indices in between shift left
+                                            idx--;
+                                        }
+                                        else if (src > insertIdx && idx >= insertIdx && idx < src) {
+                                            // Moving backward: indices in between shift right
+                                            idx++;
+                                        }
+                                    }
+                                }
+
                                 // Clear per-index file browser caches since indices changed
                                 cameraFileBrowsers.clear();
                                 imageFileBrowsers.clear();
@@ -3922,6 +4417,212 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         } else {
             ImGui::TextDisabled("No profile selected. Create or select a profile to add cameras.");
         }
+
+        ImGui::End();
+    }
+
+    // Group View Window
+    if (g_ShowGroupViewWindow && g_SelectedGroupForView >= 0 && g_SelectedGroupForView < (int)g_CameraGroups.size() &&
+        g_SelectedProfileIndex >= 0 && g_SelectedProfileIndex < (int)g_CameraProfiles.size()) {
+
+        ImGui::Begin("Group View", &g_ShowGroupViewWindow);
+        CameraGroup& group = g_CameraGroups[g_SelectedGroupForView];
+        CameraProfile& profile = g_CameraProfiles[g_SelectedProfileIndex];
+
+        if (group.profileName != profile.name) {
+            // Selected group no longer matches current profile; hide window
+            g_ShowGroupViewWindow = false;
+            ImGui::End();
+            return;
+        }
+        ImGui::Text("Group: %s", group.name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%d cameras)", (int)group.cameraIndices.size());
+
+        ImGui::Separator();
+
+        // Display cameras in group (inside a child window that can accept drops)
+        ImVec2 baseButton(160.0f, 90.0f);
+        ImVec2 buttonSize(baseButton.x * g_CameraRectScale, baseButton.y * g_CameraRectScale);
+
+        ImGui::BeginChild("GroupViewContent", ImVec2(0, 0), true);
+
+        // Make the entire child window a drag-drop target
+        if (ImGui::BeginDragDropTarget()) {
+            // Accept the same payload used for camera reordering
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HLAE_OBS_CAM_REORDER")) {
+                int droppedCamIdx = *(const int*)payload->Data;
+                // Check if not already in group
+                bool alreadyInGroup = false;
+                for (int idx : group.cameraIndices) {
+                    if (idx == droppedCamIdx) {
+                        alreadyInGroup = true;
+                        break;
+                    }
+                }
+                if (!alreadyInGroup && droppedCamIdx >= 0 && droppedCamIdx < (int)profile.cameras.size()) {
+                    group.cameraIndices.push_back(droppedCamIdx);
+                    advancedfx::Message("Overlay: Added camera '%s' to group '%s'\n",
+                                      profile.cameras[droppedCamIdx].name.c_str(), group.name.c_str());
+                    ImGui::MarkIniSettingsDirty();
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+
+        ImGuiStyle& st = ImGui::GetStyle();
+        float spacingX = st.ItemSpacing.x;
+        float spacingY = st.ItemSpacing.y;
+        float contentW = ImGui::GetContentRegionAvail().x;
+        int columns = (int)floor((contentW + spacingX) / (buttonSize.x + spacingX));
+        if (columns < 1) columns = 1;
+
+        ImVec2 gridOrigin = ImGui::GetCursorScreenPos();
+        static int s_GroupCameraDragSource = -1;
+        static int s_GroupCameraDragTarget = -1;
+
+        // Track drag state for click vs drag detection
+        static bool s_GroupDragActive = false;
+        static int s_GroupPressedIndex = -1;
+        static ImVec2 s_GroupPressPos = ImVec2(0, 0);
+
+        for (size_t i = 0; i < group.cameraIndices.size(); i++) {
+            int camIdx = group.cameraIndices[i];
+            if (camIdx < 0 || camIdx >= (int)profile.cameras.size()) continue;
+
+            CameraItem& camera = profile.cameras[camIdx];
+            ImGui::PushID((int)i);
+
+            // Grid position
+            int col = (int)(i % (size_t)columns);
+            int row = (int)(i / (size_t)columns);
+            ImVec2 itemMin = ImVec2(
+                gridOrigin.x + col * (buttonSize.x + spacingX),
+                gridOrigin.y + row * (buttonSize.y + spacingY)
+            );
+            ImVec2 itemMax = ImVec2(itemMin.x + buttonSize.x, itemMin.y + buttonSize.y);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Background
+            dl->AddRectFilled(itemMin, itemMax, IM_COL32(60, 60, 60, 255));
+            dl->AddRect(itemMin, itemMax, IM_COL32(100, 100, 100, 255));
+
+            // Image preview if available
+            if (!camera.imagePath.empty()) {
+                auto texIt = g_CameraTextures.find(camera.imagePath);
+                if (texIt != g_CameraTextures.end() && texIt->second.srv) {
+                    // Calculate scaled size to fit within button
+                    float scaleX = buttonSize.x / texIt->second.width;
+                    float scaleY = buttonSize.y / texIt->second.height;
+                    float scale = (scaleX < scaleY) ? scaleX : scaleY;
+                    ImVec2 imgSize(texIt->second.width * scale, texIt->second.height * scale);
+                    ImVec2 imgPos(itemMin.x + (buttonSize.x - imgSize.x) * 0.5f,
+                                    itemMin.y + (buttonSize.y - imgSize.y) * 0.5f);
+                    dl->AddImage((ImTextureID)texIt->second.srv, imgPos,
+                                        ImVec2(imgPos.x + imgSize.x, imgPos.y + imgSize.y));
+                }
+            }
+            // Unique IDs for this tile
+            char id_buf[64];
+            _snprintf_s(id_buf, _TRUNCATE, "##groupcam_%zu", i);
+
+            // Remove button (unique)
+            char rm_buf[64];
+            _snprintf_s(rm_buf, _TRUNCATE, "Remove##%zu", i);
+            // Camera name
+            float o = std::roundf((std::max)(1.0f, g_CameraRectScale));
+            ImVec2 textPos = ImVec2(itemMin.x + 5, itemMin.y + 5);
+            dl->AddText(ImVec2(textPos.x + o, textPos.y + o), IM_COL32(0, 0, 0, 200), camera.name.c_str());
+            dl->AddText(textPos, IM_COL32(255, 255, 255, 255), camera.name.c_str());
+            // Remove button
+            float btnY = itemMax.y - 22.0f;
+            ImGui::SetCursorScreenPos(ImVec2(itemMin.x + 2, btnY));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+            bool removeClicked = ImGui::Button(rm_buf, ImVec2(buttonSize.x - 4, 20));
+            ImGui::PopStyleColor();
+
+            if (removeClicked) {
+                group.cameraIndices.erase(group.cameraIndices.begin() + i);
+                ImGui::MarkIniSettingsDirty();
+                ImGui::PopID();
+                break;
+            }
+
+            // Invisible button for interaction
+            ImGui::SetCursorScreenPos(itemMin);
+            ImGui::InvisibleButton(id_buf, buttonSize);
+
+            bool didReorderHere = false;
+
+            // Remember press origin to differentiate click vs drag
+            if (ImGui::IsItemActivated()) {
+                s_GroupPressedIndex = (int)i;
+                s_GroupPressPos = ImGui::GetMousePos();
+            }
+
+            // Drag source for reordering within group
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoHoldToOpenOthers)) {
+                s_GroupDragActive = true;
+                int srcIndex = (int)i;
+                ImGui::SetDragDropPayload("GROUP_CAMERA_REORDER", &srcIndex, sizeof(int));
+                ImGui::Text("%s", camera.name.c_str());
+                ImGui::EndDragDropSource();
+            }
+
+            // Drag target for reordering
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("GROUP_CAMERA_REORDER")) {
+                    int src = *(const int*)payload->Data;
+                    int dst = (int)i;
+                    if (src >= 0 && src < (int)group.cameraIndices.size() && dst >= 0 && dst < (int)group.cameraIndices.size() && src != dst) {
+                        // Move item src -> dst using same logic as main window
+                        int movedCamIdx = group.cameraIndices[src];
+                        group.cameraIndices.erase(group.cameraIndices.begin() + src);
+                        // Insert at dst (works for both directions after erase)
+                        int insertIdx = dst;
+                        if (insertIdx < 0) insertIdx = 0;
+                        if (insertIdx > (int)group.cameraIndices.size()) insertIdx = (int)group.cameraIndices.size();
+                        group.cameraIndices.insert(group.cameraIndices.begin() + insertIdx, movedCamIdx);
+                        ImGui::MarkIniSettingsDirty();
+                        didReorderHere = true;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            if (didReorderHere) { ImGui::PopID(); continue; }
+
+            // On release: treat as click only if cursor hasn't moved (no drag)
+            if (ImGui::IsItemDeactivated() && !s_GroupDragActive && s_GroupPressedIndex == (int)i && !removeClicked && !camera.camPathFile.empty()) {
+                ImVec2 cur = ImGui::GetMousePos();
+                float dx = cur.x - s_GroupPressPos.x;
+                float dy = cur.y - s_GroupPressPos.y;
+                float dist2 = dx*dx + dy*dy;
+                const float clickThreshold = ImGui::GetIO().MouseDragThreshold;
+                if (dist2 <= clickThreshold * clickThreshold) {
+                    std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_campath select all; mirv_campath edit start";
+                    Afx_ExecClientCmd(cmd.c_str());
+                    advancedfx::Message("Overlay: [Group View] Loading camera '%s'\n", camera.name.c_str());
+                    g_ActiveCameraCampathPath = camera.camPathFile;
+                }
+            }
+
+            ImGui::PopID();
+        }
+
+        // Reset drag tracking when mouse released
+        if (!ImGui::IsMouseDown(0)) {
+            s_GroupDragActive = false;
+            s_GroupPressedIndex = -1;
+        }
+
+        // Dummy to reserve grid space
+        int rows = ((int)group.cameraIndices.size() + columns - 1) / columns;
+        float totalHeight = rows * buttonSize.y + (rows > 0 ? (rows - 1) * spacingY : 0.0f);
+        ImGui::SetCursorScreenPos(ImVec2(gridOrigin.x, gridOrigin.y + totalHeight));
+        ImGui::Dummy(ImVec2(0, 0));
+
+        ImGui::EndChild(); // End GroupViewContent child
 
         ImGui::End();
     }
@@ -4217,7 +4918,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     Hud::Viewport vp{ g_PreviewRectMin, g_PreviewRectSize };
                     auto opt = g_GsiServer.TryGetHudState();
                     if (opt.has_value()) {
-                        Hud::RenderAll(g_PreviewDrawList, vp, *opt);
+                        Hud::RenderAll(g_PreviewDrawList, vp, *opt, &g_HudPlayerRects);
                     } else {
                         // Fallback/demo data if no websocket
                         Hud::State st{};
@@ -4239,142 +4940,207 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         }
                         st.leftPlayers[1].isFocused = true; st.focusedPlayerId = st.leftPlayers[1].id;
                         st.round.number = 5; st.round.phase = "Please start GSI server"; st.round.timeLeft = 73.0f;
-                        Hud::RenderAll(g_PreviewDrawList, vp, st);
+                        Hud::RenderAll(g_PreviewDrawList, vp, st, &g_HudPlayerRects);
+                    }
+                } else {
+                    g_HudPlayerRects.clear();
+                }
+                const ImGuiHoveredFlags hoverFlags = ImGuiHoveredFlags_AllowWhenBlockedByActiveItem | ImGuiHoveredFlags_AllowWhenOverlapped;
+                bool hoveredImage = ImGui::IsItemHovered(hoverFlags);
+
+                // Handle right-clicks on HUD player rows (only when RMB control disabled)
+                if (!g_ViewportEnableRmbControl && hoveredImage && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                    ImVec2 mousePos = ImGui::GetMousePos();
+                    for (const auto& rect : g_HudPlayerRects) {
+                        if (mousePos.x >= rect.min.x && mousePos.x <= rect.max.x &&
+                            mousePos.y >= rect.min.y && mousePos.y <= rect.max.y) {
+                            g_BirdContextTargetObserverSlot = rect.observerSlot;
+                            g_BirdContextTargetPlayerId = rect.playerId;
+                            g_BirdContextMenuOpen = true;
+                            ImGui::OpenPopup("##bird_context");
+                            break;
+                        }
                     }
                 }
 
-                const ImGuiHoveredFlags hoverFlags = ImGuiHoveredFlags_AllowWhenBlockedByActiveItem | ImGuiHoveredFlags_AllowWhenOverlapped;
-                bool hoveredImage = ImGui::IsItemHovered(hoverFlags);
+                // Bird camera context menu
+                if (ImGui::BeginPopup("##bird_context")) {
+                    if (ImGui::MenuItem("ToBird")) {
+                        // Get current focused player's controller index from HUD
+                        int fromIdx = GetFocusedPlayerControllerIndex();
+
+                        // Map observer slot to controller index using hotkey bindings
+                        // observerSlot from HUD is 0-9, but bindings use keyboard format 1-9,0
+                        // So we need to convert: 0->1, 1->2, ..., 8->9, 9->0
+                        int keyNum = (g_BirdContextTargetObserverSlot == 9) ? 0 : (g_BirdContextTargetObserverSlot + 1);
+                        int toIdx = -1;
+                        auto it = g_ObservingHotkeyBindings.find(keyNum);
+                        if (it != g_ObservingHotkeyBindings.end()) {
+                            toIdx = it->second;
+                        }
+
+                        advancedfx::Message("BirdCamera: ToBird clicked - fromIdx=%d, toIdx=%d, observerSlot=%d, keyNum=%d\n",
+                                  fromIdx, toIdx, g_BirdContextTargetObserverSlot, keyNum);
+
+                        if (fromIdx >= 0 && toIdx >= 0) {
+                            advancedfx::overlay::BirdCamera_StartGoto(fromIdx, toIdx, 1000.0f);
+                        } else {
+                            if (fromIdx < 0) {
+                                advancedfx::Message("BirdCamera: Failed to get focused player (fromIdx=%d). Make sure HUD and GSI are working.\n", fromIdx);
+                            }
+                            if (toIdx < 0) {
+                                advancedfx::Message("BirdCamera: Failed to get target player (toIdx=%d, observerSlot=%d, keyNum=%d). Make sure Observing Bindings are configured.\n",
+                                                  toIdx, g_BirdContextTargetObserverSlot, keyNum);
+                            }
+                        }
+                        g_BirdContextMenuOpen = false;
+                    }
+                    ImGui::EndPopup();
+                } else if (g_BirdContextMenuOpen) {
+                    g_BirdContextMenuOpen = false;
+                }
+
 
                 // RMB-native control over Mirv camera inside preview image
                 static bool s_bbCtrlActive = false;
                 static bool s_bbSkipFirstDelta = false;
                 static POINT s_bbCtrlSavedCursor = {0,0};
 
-                if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                if (g_ViewportEnableRmbControl) {
+                    if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                        if (s_bbCtrlActive) {
+                            // End control: restore cursor position and visibility
+                            ShowCursor(TRUE);
+                            g_pendingWarpPt.x = s_bbCtrlSavedCursor.x;
+                            g_pendingWarpPt.y = s_bbCtrlSavedCursor.y;
+                            g_hasPendingWarp  = true;
+                            s_bbCtrlActive = false;
+                            //
+                        }
+                    } else if (hoveredImage && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                        // Begin control: save cursor, hide it
+                        GetCursorPos(&s_bbCtrlSavedCursor);
+                        ShowCursor(FALSE);
+                        {
+                            ImVec2 itemMin = ImGui::GetItemRectMin();
+                            ImVec2 itemMax = ImGui::GetItemRectMax();
+                            ImVec2 itemCenter = ImVec2((itemMin.x + itemMax.x) * 0.5f, (itemMin.y + itemMax.y) * 0.5f);
+                            POINT ptCenterClient = { (LONG)itemCenter.x, (LONG)itemCenter.y };
+                            POINT ptCenterScreen = ptCenterClient;
+                            ClientToScreen(m_Hwnd, &ptCenterScreen);
+                            g_pendingWarpPt.x = ptCenterScreen.x;
+                            g_pendingWarpPt.y = ptCenterScreen.y;
+                            g_hasPendingWarp  = true;
+                        }
+                        s_bbCtrlActive = true;
+                        s_bbSkipFirstDelta = true;
+                    }
+
                     if (s_bbCtrlActive) {
-                        // End control: restore cursor position and visibility
+                        // Compute center of the preview in client + screen coords
+                        ImVec2 itemMin = ImGui::GetItemRectMin();
+                        ImVec2 itemMax = ImGui::GetItemRectMax();
+                        ImVec2 itemCenter = ImVec2((itemMin.x + itemMax.x) * 0.5f, (itemMin.y + itemMax.y) * 0.5f);
+
+                        POINT ptCenterClient = { (LONG)itemCenter.x, (LONG)itemCenter.y };
+                        POINT ptCenterScreen = ptCenterClient;
+                        ClientToScreen(m_Hwnd, &ptCenterScreen);
+
+                        // Read current cursor and compute delta relative to center in client space
+                        POINT ptScreen; GetCursorPos(&ptScreen);
+                        POINT ptClient = ptScreen; ScreenToClient(m_Hwnd, &ptClient);
+                        float dx = (float)(ptClient.x - ptCenterClient.x);
+                        float dy = (float)(ptClient.y - ptCenterClient.y);
+                        // Lock cursor to preview center
+                        if (s_bbSkipFirstDelta) { dx = 0.0f; dy = 0.0f; s_bbSkipFirstDelta = false; }
+                        g_pendingWarpPt.x = ptCenterScreen.x;
+                        g_pendingWarpPt.y = ptCenterScreen.y;
+                        g_hasPendingWarp  = true;
+                        ImGuiIO& io = ImGui::GetIO();
+                        float wheel = io.MouseWheel;
+                        if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                            pMirv->SetCameraControlMode(true);
+                            if (wheel != 0.0f) {
+                                int clicks = (wheel > 0.f) ? (int)floorf(wheel + 0.0001f)
+                                                        : (int)ceilf (wheel - 0.0001f);
+                                double ks = pMirv->GetKeyboardSensitivty();
+
+                                const double up   = 1.10;
+                                const double down = 1.0 / up;
+
+                                if (clicks > 0) for (int i = 0; i < clicks; ++i) ks *= up;
+                                if (clicks < 0) for (int i = 0; i < -clicks; ++i) ks *= down;
+
+                                // Clamp to your preferred range
+                                ks = std::clamp(ks, 0.01, 100.0);
+
+                                pMirv->SetKeyboardSensitivity(ks);
+                                g_uiKsens = (float)ks; g_uiKsensInit = true; // sync UI
+                            }
+                            const double sens = pMirv->GetMouseSensitivty();
+                            const double yawS = pMirv->MouseYawSpeed_get();
+                            const double pitchS = pMirv->MousePitchSpeed_get();
+                            const double lookScale = (double)(g_PreviewLookScale * g_PreviewLookMultiplier);
+
+                            // Base: yaw/pitch from mouse
+                            const double dYaw = sens * yawS * (double)(-dx) * lookScale;
+                            const double dPitch = sens * pitchS * (double)(dy) * lookScale;
+
+                            // Modifiers: R=roll, F=fov
+                            const bool rHeld = (GetKeyState('R') & 0x8000) != 0;
+                            const bool fHeld = (GetKeyState('F') & 0x8000) != 0;
+
+                            double cx,cy,cz, rx,ry,rz; float fov; Afx_GetLastCameraData(cx,cy,cz, rx,ry,rz, fov);
+
+                            double curYaw = ry;
+                            double curPitch = rx;
+                            if (!rHeld && !fHeld) {
+                                curYaw += dYaw;
+                                curPitch += dPitch;
+                                pMirv->SetRy((float)curYaw);
+                                pMirv->SetRx((float)curPitch);
+                            } else if (rHeld) {
+                                pMirv->SetRz((float)(rz + sens * yawS * (double)(dx) * lookScale));
+                            } else if (fHeld) {
+                                pMirv->SetFov((float)(fov + sens * yawS * (double)(-dx) * lookScale));
+                            }
+
+                            // WASD movement (camera space), scaled by keyboard sensitivity and speeds
+                            const float dt = ImGui::GetIO().DeltaTime;
+                            double moveF = 0.0, moveR = 0.0;
+                            if ((GetKeyState('W') & 0x8000) != 0) moveF += pMirv->KeyboardForwardSpeed_get();
+                            if ((GetKeyState('S') & 0x8000) != 0) moveF -= pMirv->KeyboardBackwardSpeed_get();
+                            if ((GetKeyState('D') & 0x8000) != 0) moveR += pMirv->KeyboardRightSpeed_get();
+                            if ((GetKeyState('A') & 0x8000) != 0) moveR -= pMirv->KeyboardLeftSpeed_get();
+
+                            if (moveF != 0.0 || moveR != 0.0) {
+                                const double ksens = pMirv->GetKeyboardSensitivty();
+                                const double speedF = ksens * moveF * (double)dt;
+                                const double speedR = ksens * moveR * (double)dt;
+                                // Use HLAE's vector builder (Z-up, Source-like) from angles (roll=0, pitch, yaw)
+                                double fwdQ[3], rightQ[3], upQ[3];
+                                Afx::Math::MakeVectors(/*roll*/0.0, /*pitch*/curPitch, /*yaw*/curYaw, fwdQ, rightQ, upQ);
+
+                                const double nx = cx + fwdQ[0] * speedF + rightQ[0] * speedR;
+                                const double ny = cy + fwdQ[1] * speedF + rightQ[1] * speedR;
+                                const double nz = cz + fwdQ[2] * speedF + rightQ[2] * speedR;
+                                pMirv->SetTx((float)nx);
+                                pMirv->SetTy((float)ny);
+                                pMirv->SetTz((float)nz);
+                            }
+                        }
+
+
+                    }
+                } else {
+                    // RMB control disabled: ensure camera control is released if it was active
+                    if (s_bbCtrlActive) {
                         ShowCursor(TRUE);
                         g_pendingWarpPt.x = s_bbCtrlSavedCursor.x;
                         g_pendingWarpPt.y = s_bbCtrlSavedCursor.y;
                         g_hasPendingWarp  = true;
                         s_bbCtrlActive = false;
-                        //
                     }
-                } else if (hoveredImage && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                    // Begin control: save cursor, hide it
-                    GetCursorPos(&s_bbCtrlSavedCursor);
-                    ShowCursor(FALSE);
-                    {
-                        ImVec2 itemMin = ImGui::GetItemRectMin();
-                        ImVec2 itemMax = ImGui::GetItemRectMax();
-                        ImVec2 itemCenter = ImVec2((itemMin.x + itemMax.x) * 0.5f, (itemMin.y + itemMax.y) * 0.5f);
-                        POINT ptCenterClient = { (LONG)itemCenter.x, (LONG)itemCenter.y };
-                        POINT ptCenterScreen = ptCenterClient;
-                        ClientToScreen(m_Hwnd, &ptCenterScreen);
-                        g_pendingWarpPt.x = ptCenterScreen.x;
-                        g_pendingWarpPt.y = ptCenterScreen.y;
-                        g_hasPendingWarp  = true;
-                    }
-                    s_bbCtrlActive = true;
-                    s_bbSkipFirstDelta = true;
-                }
-
-                if (s_bbCtrlActive) {
-                    // Compute center of the preview in client + screen coords
-                    ImVec2 itemMin = ImGui::GetItemRectMin();
-                    ImVec2 itemMax = ImGui::GetItemRectMax();
-                    ImVec2 itemCenter = ImVec2((itemMin.x + itemMax.x) * 0.5f, (itemMin.y + itemMax.y) * 0.5f);
-
-                    POINT ptCenterClient = { (LONG)itemCenter.x, (LONG)itemCenter.y };
-                    POINT ptCenterScreen = ptCenterClient;
-                    ClientToScreen(m_Hwnd, &ptCenterScreen);
-
-                    // Read current cursor and compute delta relative to center in client space
-                    POINT ptScreen; GetCursorPos(&ptScreen);
-                    POINT ptClient = ptScreen; ScreenToClient(m_Hwnd, &ptClient);
-                    float dx = (float)(ptClient.x - ptCenterClient.x);
-                    float dy = (float)(ptClient.y - ptCenterClient.y);
-                    // Lock cursor to preview center
-                    if (s_bbSkipFirstDelta) { dx = 0.0f; dy = 0.0f; s_bbSkipFirstDelta = false; }
-                    g_pendingWarpPt.x = ptCenterScreen.x;
-                    g_pendingWarpPt.y = ptCenterScreen.y;
-                    g_hasPendingWarp  = true;
-                    ImGuiIO& io = ImGui::GetIO();
-                    float wheel = io.MouseWheel;
-                    if (MirvInput* pMirv = Afx_GetMirvInput()) {
-                        pMirv->SetCameraControlMode(true);
-                        if (wheel != 0.0f) {
-                            int clicks = (wheel > 0.f) ? (int)floorf(wheel + 0.0001f)
-                                                    : (int)ceilf (wheel - 0.0001f);
-                            double ks = pMirv->GetKeyboardSensitivty();
-
-                            const double up   = 1.10;
-                            const double down = 1.0 / up;
-
-                            if (clicks > 0) for (int i = 0; i < clicks; ++i) ks *= up;
-                            if (clicks < 0) for (int i = 0; i < -clicks; ++i) ks *= down;
-
-                            // Clamp to your preferred range
-                            ks = std::clamp(ks, 0.01, 100.0);
-
-                            pMirv->SetKeyboardSensitivity(ks);
-                            g_uiKsens = (float)ks; g_uiKsensInit = true; // sync UI
-                        }
-                        const double sens = pMirv->GetMouseSensitivty();
-                        const double yawS = pMirv->MouseYawSpeed_get();
-                        const double pitchS = pMirv->MousePitchSpeed_get();
-                        const double lookScale = (double)(g_PreviewLookScale * g_PreviewLookMultiplier);
-
-                        // Base: yaw/pitch from mouse
-                        const double dYaw = sens * yawS * (double)(-dx) * lookScale;
-                        const double dPitch = sens * pitchS * (double)(dy) * lookScale;
-
-                        // Modifiers: R=roll, F=fov
-                        const bool rHeld = (GetKeyState('R') & 0x8000) != 0;
-                        const bool fHeld = (GetKeyState('F') & 0x8000) != 0;
-
-                        double cx,cy,cz, rx,ry,rz; float fov; Afx_GetLastCameraData(cx,cy,cz, rx,ry,rz, fov);
-
-                        double curYaw = ry;
-                        double curPitch = rx;
-                        if (!rHeld && !fHeld) {
-                            curYaw += dYaw;
-                            curPitch += dPitch;
-                            pMirv->SetRy((float)curYaw);
-                            pMirv->SetRx((float)curPitch);
-                        } else if (rHeld) {
-                            pMirv->SetRz((float)(rz + sens * yawS * (double)(dx) * lookScale));
-                        } else if (fHeld) {
-                            pMirv->SetFov((float)(fov + sens * yawS * (double)(-dx) * lookScale));
-                        }
-
-                        // WASD movement (camera space), scaled by keyboard sensitivity and speeds
-                        const float dt = ImGui::GetIO().DeltaTime;
-                        double moveF = 0.0, moveR = 0.0;
-                        if ((GetKeyState('W') & 0x8000) != 0) moveF += pMirv->KeyboardForwardSpeed_get();
-                        if ((GetKeyState('S') & 0x8000) != 0) moveF -= pMirv->KeyboardBackwardSpeed_get();
-                        if ((GetKeyState('D') & 0x8000) != 0) moveR += pMirv->KeyboardRightSpeed_get();
-                        if ((GetKeyState('A') & 0x8000) != 0) moveR -= pMirv->KeyboardLeftSpeed_get();
-
-                        if (moveF != 0.0 || moveR != 0.0) {
-                            const double ksens = pMirv->GetKeyboardSensitivty();
-                            const double speedF = ksens * moveF * (double)dt;
-                            const double speedR = ksens * moveR * (double)dt;
-                            // Use HLAE's vector builder (Z-up, Source-like) from angles (roll=0, pitch, yaw)
-                            double fwdQ[3], rightQ[3], upQ[3];
-                            Afx::Math::MakeVectors(/*roll*/0.0, /*pitch*/curPitch, /*yaw*/curYaw, fwdQ, rightQ, upQ);
-
-                            const double nx = cx + fwdQ[0] * speedF + rightQ[0] * speedR;
-                            const double ny = cy + fwdQ[1] * speedF + rightQ[1] * speedR;
-                            const double nz = cz + fwdQ[2] * speedF + rightQ[2] * speedR;
-                            pMirv->SetTx((float)nx);
-                            pMirv->SetTy((float)ny);
-                            pMirv->SetTz((float)nz);
-                        }
-                    }
-
-
                 }
             }
 
@@ -4393,6 +5159,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 const char* srcNames[] = { "Backbuffer", "BeforeUi" };
                 ImGui::SetNextItemWidth(120.0f);
                 ImGui::Combo("Source", &g_ViewportSourceMode, srcNames, (int)(sizeof(srcNames)/sizeof(srcNames[0])));
+                ImGui::SameLine();
+                ImGui::Checkbox("RMB Control", &g_ViewportEnableRmbControl);
             }
 
             if (g_ViewportPlayersMenuOpen) {
@@ -4455,6 +5223,40 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (!hasPlayers) {
                 ImGui::BeginDisabled(true);
             }
+            // Bird camera controls
+            if (ImGui::SmallButton("Bird")) {
+                // Go to bird's eye view of current player
+                int curIdx = GetFocusedPlayerControllerIndex();
+                advancedfx::Message("BirdCamera: Bird button clicked - curIdx=%d\n", curIdx);
+                if (curIdx >= 0) {
+                    advancedfx::overlay::BirdCamera_StartPlayer(curIdx, 1000.0f);
+                } else {
+                    advancedfx::Message("BirdCamera: Failed to get focused player controller index. Make sure HUD is visible and GSI is connected.\n");
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Bird's eye view of current player");
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Return")) {
+                advancedfx::Message("BirdCamera: Return button clicked\n");
+                advancedfx::overlay::BirdCamera_StartPlayerReturn();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Return to player POV");
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Stop")) {
+                advancedfx::Message("BirdCamera: Stop button clicked\n");
+                advancedfx::overlay::BirdCamera_Stop();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Stop bird camera");
+            }
+            ImGui::SameLine();
+            ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+            ImGui::SameLine();
+
             if (ImGui::SmallButton("<")) {
                 if (MirvInput* pMirv = Afx_GetMirvInput()) {pMirv->SetCameraControlMode(false);}
                 Afx_ExecClientCmd("spec_prev");
@@ -5739,7 +6541,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         char cmd[128];
                         _snprintf_s(cmd, _TRUNCATE, "mirv_campath enabled 0; spec_mode 2; spec_player %d", controllerIndex);
                         Afx_ExecClientCmd(cmd);
-                        advancedfx::Message("Overlay: Executing %s\n", cmd);
+                        BirdCamera_Stop();
+                        //advancedfx::Message("Overlay: Executing %s\n", cmd);
                     }
                 }
             }

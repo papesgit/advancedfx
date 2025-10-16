@@ -78,19 +78,28 @@ struct Viewport {
     ImVec2 size;
 };
 
+struct PlayerRowRect {
+    ImVec2 min;
+    ImVec2 max;
+    int observerSlot; // 1-9,0 for keyboard bindings
+    int playerId;     // stable player ID
+};
+
 // Top bar in center (scores + clock)
 void RenderTopBar(ImDrawList* dl, const Viewport& vp, const State& st);
 
 // Sidebars at left/right (players summary)
-void RenderSidebars(ImDrawList* dl, const Viewport& vp, const State& st);
+// If outRects is provided, it will be filled with clickable player row rectangles
+void RenderSidebars(ImDrawList* dl, const Viewport& vp, const State& st, std::vector<PlayerRowRect>* outRects = nullptr);
 
 // Focused player panel at bottom center
 void RenderFocusedPlayer(ImDrawList* dl, const Viewport& vp, const State& st);
 
 // Unified helper to draw all parts (ordering matters for layering)
-inline void RenderAll(ImDrawList* dl, const Viewport& vp, const State& st) {
+// If outRects is provided, it will be filled with clickable player row rectangles from sidebars
+inline void RenderAll(ImDrawList* dl, const Viewport& vp, const State& st, std::vector<PlayerRowRect>* outRects = nullptr) {
     RenderTopBar(dl, vp, st);
-    RenderSidebars(dl, vp, st);
+    RenderSidebars(dl, vp, st, outRects);
     RenderFocusedPlayer(dl, vp, st);
 }
 

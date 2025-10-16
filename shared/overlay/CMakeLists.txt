@@ -49,6 +49,10 @@ set(HLAE_OVERLAY_SOURCES
     Hud.cpp
     GsiHttpServer.h
     GsiHttpServer.cpp
+    BirdCamera.cpp
+    BirdCamera.h
+    CameraOverride.cpp
+    CameraOverride.h
 
     radar/Radar.h
     radar/Radar.cpp

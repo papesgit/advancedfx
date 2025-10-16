@@ -365,8 +365,10 @@ static void RenderPlayerRow(ImDrawList* dl, ImVec2 pos, ImVec2 size, const Playe
     }
 }
 
-void RenderSidebars(ImDrawList* dl, const Viewport& vp, const State& st) {
+void RenderSidebars(ImDrawList* dl, const Viewport& vp, const State& st, std::vector<PlayerRowRect>* outRects) {
     if (!dl) return;
+    if (outRects) outRects->clear();
+
     const float barW = (std::min)(360.0f, vp.size.x * 0.20f);
     const float rowH = 55.0f;
     const float gap  = 6.0f;
@@ -391,7 +393,18 @@ void RenderSidebars(ImDrawList* dl, const Viewport& vp, const State& st) {
     size_t leftIdx = 0;
     for (const auto& p : st.leftPlayers) {
         char labelDigit = (leftIdx < 5) ? leftDigits[leftIdx] : 0;
-        RenderPlayerRow(dl, ImVec2(vp.min.x + 16.0f, y), ImVec2(barW, rowH), p, false, st.leftTeam.color, labelDigit);
+        ImVec2 pos = ImVec2(vp.min.x + 16.0f, y);
+        RenderPlayerRow(dl, pos, ImVec2(barW, rowH), p, false, st.leftTeam.color, labelDigit);
+
+        if (outRects) {
+            PlayerRowRect rect;
+            rect.min = pos;
+            rect.max = ImVec2(pos.x + barW, pos.y + rowH);
+            rect.observerSlot = p.observerSlot;
+            rect.playerId = p.id;
+            outRects->push_back(rect);
+        }
+
         y += rowH + gap;
         ++leftIdx;
     }
@@ -413,7 +426,18 @@ void RenderSidebars(ImDrawList* dl, const Viewport& vp, const State& st) {
     size_t rightIdx = 0;
     for (const auto& p : st.rightPlayers) {
         char labelDigit = (rightIdx < 5) ? rightDigits[rightIdx] : 0;
-        RenderPlayerRow(dl, ImVec2(rightX, yR), ImVec2(barW, rowH), p, true, st.rightTeam.color, labelDigit);
+        ImVec2 pos = ImVec2(rightX, yR);
+        RenderPlayerRow(dl, pos, ImVec2(barW, rowH), p, true, st.rightTeam.color, labelDigit);
+
+        if (outRects) {
+            PlayerRowRect rect;
+            rect.min = pos;
+            rect.max = ImVec2(pos.x + barW, pos.y + rowH);
+            rect.observerSlot = p.observerSlot;
+            rect.playerId = p.id;
+            outRects->push_back(rect);
+        }
+
         yR += rowH + gap;
         ++rightIdx;
     }
