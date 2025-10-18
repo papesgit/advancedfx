@@ -371,6 +371,7 @@ static float g_ViewportSmoothHalftimeFov = 0.20f;   // Halftime for smooth FOV m
 static bool g_ViewportSmoothSettingsOpen = false;   // Settings window open state
 static float g_ViewportSmoothScrollSpeedIncrement = 0.10f;  // Multiplier for scroll speed adjustment (1.0 + this value)
 static float g_ViewportSmoothScrollFovIncrement = 2.0f;     // FOV change per scroll click
+static bool g_ViewportSmoothAnalogInput = false;    // Enable analog keyboard input (Wooting, etc.)
 static bool g_GetSmoothPass = false;
 static int g_GetSmoothIndex = -1;
 static float g_GetSmoothTime = 0.0f;
@@ -5619,14 +5620,47 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
                                 // WASD + R/F movement (camera space)
                                 double moveF = 0.0, moveR = 0.0, moveU = 0.0;
-                                if ((GetKeyState('W') & 0x8000) != 0) moveF += pMirv->KeyboardForwardSpeed_get();
-                                if ((GetKeyState('S') & 0x8000) != 0) moveF -= pMirv->KeyboardBackwardSpeed_get();
-                                if ((GetKeyState('D') & 0x8000) != 0) moveR += pMirv->KeyboardRightSpeed_get();
-                                if ((GetKeyState('A') & 0x8000) != 0) moveR -= pMirv->KeyboardLeftSpeed_get();
 
-                                // R/F for up/down movement relative to forward vector
-                                if (spaceHeld) moveU += pMirv->KeyboardForwardSpeed_get();
-                                if (ctrlHeld) moveU -= pMirv->KeyboardForwardSpeed_get();
+                                if (g_ViewportSmoothAnalogInput) {
+                                    // Analog input mode: read gamepad stick values
+                                    // Left stick: WASD (forward/back, right/left)
+                                    // Right stick: Space/Ctrl (up/down)
+                                    const ImGuiIO& io = ImGui::GetIO();
+                                    const int lStickUpIdx = ImGuiKey_GamepadLStickUp - ImGuiKey_NamedKey_BEGIN;
+                                    const int lStickDownIdx = ImGuiKey_GamepadLStickDown - ImGuiKey_NamedKey_BEGIN;
+                                    const int lStickRightIdx = ImGuiKey_GamepadLStickRight - ImGuiKey_NamedKey_BEGIN;
+                                    const int lStickLeftIdx = ImGuiKey_GamepadLStickLeft - ImGuiKey_NamedKey_BEGIN;
+                                    const int rStickUpIdx = ImGuiKey_GamepadRStickUp - ImGuiKey_NamedKey_BEGIN;
+                                    const int rStickDownIdx = ImGuiKey_GamepadRStickDown - ImGuiKey_NamedKey_BEGIN;
+
+                                    // Left stick Y-axis: forward/backward (up = W, down = S)
+                                    float lStickUp = io.KeysData[lStickUpIdx].AnalogValue;
+                                    float lStickDown = io.KeysData[lStickDownIdx].AnalogValue;
+                                    moveF += lStickUp * pMirv->KeyboardForwardSpeed_get();
+                                    moveF -= lStickDown * pMirv->KeyboardBackwardSpeed_get();
+
+                                    // Left stick X-axis: right/left (right = D, left = A)
+                                    float lStickRight = io.KeysData[lStickRightIdx].AnalogValue;
+                                    float lStickLeft = io.KeysData[lStickLeftIdx].AnalogValue;
+                                    moveR += lStickRight * pMirv->KeyboardRightSpeed_get();
+                                    moveR -= lStickLeft * pMirv->KeyboardLeftSpeed_get();
+
+                                    // Right stick Y-axis: up/down (up = Space, down = Ctrl)
+                                    float rStickUp = io.KeysData[rStickUpIdx].AnalogValue;
+                                    float rStickDown = io.KeysData[rStickDownIdx].AnalogValue;
+                                    moveU += rStickUp * pMirv->KeyboardForwardSpeed_get();
+                                    moveU -= rStickDown * pMirv->KeyboardForwardSpeed_get();
+                                } else {
+                                    // Regular keyboard input mode
+                                    if ((GetKeyState('W') & 0x8000) != 0) moveF += pMirv->KeyboardForwardSpeed_get();
+                                    if ((GetKeyState('S') & 0x8000) != 0) moveF -= pMirv->KeyboardBackwardSpeed_get();
+                                    if ((GetKeyState('D') & 0x8000) != 0) moveR += pMirv->KeyboardRightSpeed_get();
+                                    if ((GetKeyState('A') & 0x8000) != 0) moveR -= pMirv->KeyboardLeftSpeed_get();
+
+                                    // Space/Ctrl for up/down movement
+                                    if (spaceHeld) moveU += pMirv->KeyboardForwardSpeed_get();
+                                    if (ctrlHeld) moveU -= pMirv->KeyboardForwardSpeed_get();
+                                }
 
                                 if (moveF != 0.0 || moveR != 0.0 || moveU != 0.0) {
                                     const double ksens = pMirv->GetKeyboardSensitivty();
@@ -5838,6 +5872,18 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     }
                     ImGui::Spacing();
                     ImGui::Separator();
+                    ImGui::Spacing();
+
+                    ImGui::Text("Input Settings");
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    ImGui::Checkbox("Enable Analog Input", &g_ViewportSmoothAnalogInput);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Enable analog keyboard input (Wooting, etc.)\nSet your analog keyboard to 'Xbox Controller' mode\nLeft Stick: WASD movement | Right Stick Up/Down: Space/Ctrl (Up/Down movement)");
+                    }
+                    ImGui::Spacing();
+                    ImGui::Separator();
 
                     if (ImGui::Button("Reset to Defaults")) {
                         g_ViewportSmoothHalftimePos = 0.15f;
@@ -5845,6 +5891,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         g_ViewportSmoothHalftimeFov = 0.20f;
                         g_ViewportSmoothScrollSpeedIncrement = 0.10f;
                         g_ViewportSmoothScrollFovIncrement = 2.0f;
+                        g_ViewportSmoothAnalogInput = false;
                     }
                     ImGui::SameLine();
                     if (ImGui::Button("Close")) {
