@@ -218,33 +218,50 @@ void GsiHttpServer::RebuildRadarSnapshotFromGsi() {
                 int ownerSide = 0;
                 if (gr.contains("owner") && gr["owner"].is_string()) ownerSide = ownerSideFromSteam(gr["owner"].get<std::string>());
 
+                // Map GSI grenade types to RadarGrenade enum
+                RadarGrenade::Type grenadeType;
+                bool validType = false;
+
                 if (type == "smoke") {
-                    bool isDet = false;
-                    if (gr.contains("velocity") && gr["velocity"].is_string()) {
-                        float v[3]; if (ParseVec3Csv(gr["velocity"].get<std::string>(), v)) {
-                            isDet = (v[0]==0.0f && v[1]==0.0f && v[2]==0.0f);
-                        }
-                    }
-                    if (!isDet) continue;
-                    float p[3]; if (gr.contains("position") && gr["position"].is_string() && ParseVec3Csv(gr["position"].get<std::string>(), p)) {
-                        RadarGrenade rg{}; rg.type = RadarGrenade::Smoke; rg.ownerSide = ownerSide; rg.pos[0]=p[0]; rg.pos[1]=p[1]; rg.pos[2]=p[2];
-                        outGrenades.emplace_back(rg);
-                    }
+                    grenadeType = RadarGrenade::Smoke;
+                    validType = true;
                 } else if (type == "inferno") {
-                    if (gr.contains("flames") && gr["flames"].is_object()) {
+                    grenadeType = RadarGrenade::Inferno;
+                    validType = true;
+                } else if (type == "decoy") {
+                    grenadeType = RadarGrenade::Decoy;
+                    validType = true;
+                } else if (type == "firebomb" || type == "molotov") {
+                    grenadeType = RadarGrenade::Molotov;
+                    validType = true;
+                } else if (type == "flashbang") {
+                    grenadeType = RadarGrenade::Flashbang;
+                    validType = true;
+                } else if (type == "frag") {
+                    grenadeType = RadarGrenade::Frag;
+                    validType = true;
+                }
+
+                if (validType) {
+                    // For inferno with flames, add each flame position
+                    if (grenadeType == RadarGrenade::Inferno && gr.contains("flames") && gr["flames"].is_object()) {
                         const json& fl = gr["flames"];
                         for (auto fit = fl.begin(); fit != fl.end(); ++fit) {
                             const json& pos = fit.value();
                             if (pos.is_string()) {
                                 float p[3]; if (ParseVec3Csv(pos.get<std::string>(), p)) {
-                                    RadarGrenade rg{}; rg.type = RadarGrenade::Inferno; rg.ownerSide = ownerSide; rg.pos[0]=p[0]; rg.pos[1]=p[1]; rg.pos[2]=p[2];
+                                    RadarGrenade rg{}; rg.type = grenadeType; rg.ownerSide = ownerSide;
+                                    rg.pos[0]=p[0]; rg.pos[1]=p[1]; rg.pos[2]=p[2];
                                     outGrenades.emplace_back(rg);
                                 }
                             }
                         }
-                    } else if (gr.contains("position") && gr["position"].is_string()) {
+                    }
+                    // Otherwise add grenade by its position
+                    else if (gr.contains("position") && gr["position"].is_string()) {
                         float p[3]; if (ParseVec3Csv(gr["position"].get<std::string>(), p)) {
-                            RadarGrenade rg{}; rg.type = RadarGrenade::Inferno; rg.ownerSide = ownerSide; rg.pos[0]=p[0]; rg.pos[1]=p[1]; rg.pos[2]=p[2];
+                            RadarGrenade rg{}; rg.type = grenadeType; rg.ownerSide = ownerSide;
+                            rg.pos[0]=p[0]; rg.pos[1]=p[1]; rg.pos[2]=p[2];
                             outGrenades.emplace_back(rg);
                         }
                     }
@@ -398,6 +415,7 @@ bool GsiHttpServer::HandleOneConnection(SocketHandle sh) {
     MergeGsiIntoState(j);
     RebuildHudStateFromGsi();
     RebuildRadarSnapshotFromGsi();
+    heartbeat_.fetch_add(1); // Increment heartbeat on each GSI update
 
     SendHttpResponse((SocketHandle)s, 204);
     return true;

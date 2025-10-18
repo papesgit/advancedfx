@@ -44,9 +44,9 @@ public:
     std::optional<std::vector<RadarPlayer>> TryGetRadarPlayers();
 
     struct RadarGrenade {
-        enum Type { Smoke, Inferno } type;
+        enum Type { Smoke, Inferno, Decoy, Molotov, Flashbang, Frag } type;
         int   ownerSide = 0; // 2=T, 3=CT (best-effort)
-        float pos[3] = {0,0,0}; // center for smoke; per-flame pos for inferno
+        float pos[3] = {0,0,0}; // world position
     };
     std::optional<std::vector<RadarGrenade>> TryGetRadarGrenades();
 
@@ -59,6 +59,9 @@ public:
 
     // Get current map name from GSI data (e.g., "de_mirage")
     std::optional<std::string> TryGetMapName();
+
+    // Get GSI heartbeat counter (increments on each GSI update)
+    uint64_t GetHeartbeat() const { return heartbeat_.load(); }
 
 private:
     void ThreadMain(int port);
@@ -73,6 +76,7 @@ private:
 private:
     std::thread thr_;
     std::atomic<bool> running_{false};
+    std::atomic<uint64_t> heartbeat_{0}; // Increments on each GSI POST
     std::mutex mtx_;
     // last full merged gsi state
     nlohmann::json gsi_;

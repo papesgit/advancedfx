@@ -58,6 +58,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <map>
+#include <set>
 #include <thread>
 #include <limits.h>
 
@@ -65,6 +66,10 @@
 #include "radar/Radar.h"
 #include "Hud.h"
 #include "GsiHttpServer.h"
+
+// NanoSVG for grenade icon loading (implementation already in Hud.cpp)
+#include "third_party/nanosvg/nanosvg.h"
+#include "third_party/nanosvg/nanosvgrast.h"
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -359,6 +364,18 @@ static bool g_ShowBackbufferWindow = false;
 // Viewport source: 0=Backbuffer (with UI), 1=BeforeUi (no UI)
 static int  g_ViewportSourceMode = 0;
 static bool g_ViewportEnableRmbControl = true;  // Enable RMB camera control in viewport by default
+static bool g_ViewportSmoothMode = false;       // Enable smooth camera movements with acceleration/deceleration
+static float g_ViewportSmoothHalftimePos = 0.15f;   // Halftime for smooth position movements (in seconds)
+static float g_ViewportSmoothHalftimeAngle = 0.10f; // Halftime for smooth angle movements (in seconds)
+static float g_ViewportSmoothHalftimeFov = 0.20f;   // Halftime for smooth FOV movements (in seconds)
+static bool g_ViewportSmoothSettingsOpen = false;   // Settings window open state
+static float g_ViewportSmoothScrollSpeedIncrement = 0.10f;  // Multiplier for scroll speed adjustment (1.0 + this value)
+static float g_ViewportSmoothScrollFovIncrement = 2.0f;     // FOV change per scroll click
+static bool g_GetSmoothPass = false;
+static int g_GetSmoothIndex = -1;
+static float g_GetSmoothTime = 0.0f;
+static bool g_GetSmoothFirstFrame = false;
+static float g_GetSmoothFirstPos[3] = {0, 0, 0};
 // ImGui per-draw opaque blend override for viewport image
 static ID3D11BlendState* g_ViewportOpaqueBlend = nullptr;
 static ID3D11DeviceContext* g_ImguiD3DContext = nullptr;
@@ -637,6 +654,8 @@ static std::map<int, int> g_ObservingHotkeyBindings; // Map from key (0-9) to co
 
 // Radar state for Observing tab
 static bool g_ShowRadar = false;
+static bool g_ShowRadarSettings = false;
+
 // cs-hud radar integration settings
 static char g_RadarsJsonPath[1024] = "";             // e.g. path to cs-hud src/themes/fennec/radars.json
 static char g_RadarImagePath[1024] = "";              // e.g. .../img/radars/ingame/de_mirage.png
@@ -644,6 +663,7 @@ static char g_RadarImagePath[1024] = "";              // e.g. .../img/radars/ing
 static float g_RadarUiPosX = 50.0f;
 static float g_RadarUiPosY = 50.0f;
 static float g_RadarUiSize = 300.0f; // width==height in pixels
+static float g_RadarDotScale = 1.0f;
 static char g_RadarMapName[128] = "de_mirage";        // default example
 static bool g_RadarAssetsLoaded = false;
 static Radar::Context g_RadarCtx;                     // holds cfg, texture SRV, smoothers
@@ -651,6 +671,27 @@ static bool g_ShowHud = false;                        // draw native HUD in view
 static int  g_GsiPort = 31983;                        // must match CS2 cfg
 static GsiHttpServer g_GsiServer;
 static char g_FilteredPlayers[512] = "";              // comma-separated player names to filter out (e.g., coaches)
+
+// Smoke detonation tracking (detect when smokes become stationary)
+struct SmokeTracker {
+    float pos[3];
+    float lastPos[3];
+    int ownerSide;
+    bool isDetonated;
+    uint64_t lastHeartbeat; // Last GSI heartbeat when position was updated
+    int stationaryUpdates; // Count GSI updates smoke hasn't moved
+    double detonationTime; // ImGui::GetTime() when smoke was detonated
+};
+static std::map<int, SmokeTracker> g_SmokeTrackers; // Key: hash of position for identification
+
+// Grenade icon cache
+struct GrenadeIconTex {
+    ID3D11ShaderResourceView* srv = nullptr;
+    int w = 0;
+    int h = 0;
+};
+static std::unordered_map<std::string, GrenadeIconTex> g_GrenadeIconCache;
+
 // Bird camera context menu
 static bool g_BirdContextMenuOpen = false;
 static int g_BirdContextTargetObserverSlot = -1;
@@ -1663,6 +1704,107 @@ static void CameraGroups_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, 
     }
 }
 
+// Helper function to load grenade icon SVG using NanoSVG
+static GrenadeIconTex LoadGrenadeIcon(ID3D11Device* device, const std::wstring& svgPath) {
+    GrenadeIconTex result{};
+    if (!device) return result;
+
+    // Check if file exists
+    DWORD attr = GetFileAttributesW(svgPath.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) return result;
+
+    // Read SVG file
+    FILE* f = _wfopen(svgPath.c_str(), L"rb");
+    if (!f) return result;
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return result; }
+    rewind(f);
+
+    std::string svgText;
+    svgText.resize((size_t)sz + 1);
+    size_t rd = fread(&svgText[0], 1, (size_t)sz, f);
+    fclose(f);
+    if (rd != (size_t)sz) return result;
+    svgText[sz] = '\0';
+
+    // Parse SVG
+    NSVGimage* img = nsvgParse(&svgText[0], "px", 96.0f);
+    if (!img) return result;
+
+    // Calculate raster size
+    float maxDim = (img->width > img->height) ? img->width : img->height;
+    float target = 64.0f; // base raster size for grenade icons
+    float scale = (maxDim > 0.0f) ? (target / maxDim) : 1.0f;
+    int rw = (int)ceilf(img->width * scale);
+    int rh = (int)ceilf(img->height * scale);
+    if (rw < 1) rw = 1;
+    if (rh < 1) rh = 1;
+
+    // Rasterize SVG
+    std::vector<unsigned char> rgba((size_t)rw * (size_t)rh * 4u);
+    NSVGrasterizer* rast = nsvgCreateRasterizer();
+    if (!rast) { nsvgDelete(img); return result; }
+
+    nsvgRasterize(rast, img, 0.0f, 0.0f, scale, rgba.data(), rw, rh, rw * 4);
+    nsvgDeleteRasterizer(rast);
+    nsvgDelete(img);
+
+    // Create D3D11 texture
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = rw;
+    desc.Height = rh;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA init{};
+    init.pSysMem = rgba.data();
+    init.SysMemPitch = rw * 4;
+
+    ID3D11Texture2D* tex2d = nullptr;
+    if (SUCCEEDED(device->CreateTexture2D(&desc, &init, &tex2d)) && tex2d) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sdesc{};
+        sdesc.Format = desc.Format;
+        sdesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        sdesc.Texture2D.MostDetailedMip = 0;
+        sdesc.Texture2D.MipLevels = 1;
+
+        ID3D11ShaderResourceView* srv = nullptr;
+        if (SUCCEEDED(device->CreateShaderResourceView(tex2d, &sdesc, &srv)) && srv) {
+            result.srv = srv;
+            result.w = rw;
+            result.h = rh;
+        }
+        tex2d->Release();
+    }
+
+    return result;
+}
+
+// Get or load grenade icon from cache
+static GrenadeIconTex GetGrenadeIcon(ID3D11Device* device, const char* iconName) {
+    auto it = g_GrenadeIconCache.find(iconName);
+    if (it != g_GrenadeIconCache.end()) return it->second;
+
+    GrenadeIconTex tex{};
+    if (!device) { g_GrenadeIconCache[iconName] = tex; return tex; }
+
+    // Build path: {hlaeFolder}resources/overlay/weapons/{iconName}.svg
+    const wchar_t* hf = GetHlaeFolderW();
+    if (!hf || !*hf) { g_GrenadeIconCache[iconName] = tex; return tex; }
+
+    std::wstring svgPath = std::wstring(hf) + L"resources\\overlay\\weapons\\" +
+                           std::wstring(iconName, iconName + strlen(iconName)) + L".svg";
+
+    tex = LoadGrenadeIcon(device, svgPath);
+    g_GrenadeIconCache[iconName] = tex;
+    return tex;
+}
 
 // Helper function to load image from file using WIC and create D3D11 texture
 static bool LoadImageToTexture(ID3D11Device* device, const std::string& filePath, CameraTexture& outTexture) {
@@ -2391,7 +2533,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         char cmd[512];
                         // Quote name if it contains spaces
                         bool hasSpace = strchr(name, ' ') != nullptr;
-                        Afx_ExecClientCmd("spec_mode 5");
+                        Afx_ExecClientCmd("spec_mode 2");
                         if (hasSpace) {
                             _snprintf_s(cmd, _TRUNCATE, "spec_player \"%s\"", name);
                         } else {
@@ -2516,10 +2658,15 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             // Grenade overlays (smoke + inferno) between background and players
             {
                 auto optg = g_GsiServer.TryGetRadarGrenades();
+                uint64_t currentHeartbeat = g_GsiServer.GetHeartbeat();
+
                 if (optg.has_value()) {
                     // Constants from cs-hud (fennec theme): sizes are relative to 1024
                     const float uvSmokeRadius = (28.8f / 1024.0f); // 57.6 diameter
                     const float uvInfernoRadius = (7.0f / 1024.0f); // 14 diameter per flame
+                    const float positionThreshold = 1.0f; // Distance threshold to consider smoke stationary
+                    const int stationaryUpdatesRequired = 2; // GSI updates smoke must be stationary to be considered detonated
+
                     auto colorFor = [](int side, bool smoke)->ImU32{
                         if (smoke) {
                             return side==3 ? IM_COL32(99,134,150,190) : (side==2 ? IM_COL32(119,115,78,190) : IM_COL32(110,110,110,180));
@@ -2527,12 +2674,137 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             return side==3 ? IM_COL32(142,79,111,190) : (side==2 ? IM_COL32(193,68,2,190) : IM_COL32(160,80,20,190));
                         }
                     };
+
+                    // Update smoke trackers with current smoke positions (only on GSI heartbeat change)
+                    static uint64_t lastProcessedHeartbeat = 0;
+                    if (currentHeartbeat != lastProcessedHeartbeat) {
+                        lastProcessedHeartbeat = currentHeartbeat;
+
+                        std::set<int> currentSmokeKeys;
+                        for (const auto &g : *optg) {
+                            if (g.type == GsiHttpServer::RadarGrenade::Smoke) {
+                                // Create a simple hash key from position (rounded to avoid floating point issues)
+                                int key = (int)(g.pos[0] / 10.0f) * 1000000 + (int)(g.pos[1] / 10.0f) * 1000 + (int)(g.pos[2] / 10.0f);
+                                currentSmokeKeys.insert(key);
+
+                                auto it = g_SmokeTrackers.find(key);
+                                if (it == g_SmokeTrackers.end()) {
+                                    // New smoke - add to tracker
+                                    SmokeTracker tracker;
+                                    tracker.pos[0] = g.pos[0]; tracker.pos[1] = g.pos[1]; tracker.pos[2] = g.pos[2];
+                                    tracker.lastPos[0] = g.pos[0]; tracker.lastPos[1] = g.pos[1]; tracker.lastPos[2] = g.pos[2];
+                                    tracker.ownerSide = g.ownerSide;
+                                    tracker.isDetonated = false;
+                                    tracker.lastHeartbeat = currentHeartbeat;
+                                    tracker.stationaryUpdates = 0;
+                                    tracker.detonationTime = 0.0;
+                                    g_SmokeTrackers[key] = tracker;
+                                } else {
+                                    // Update existing smoke on new GSI update
+                                    SmokeTracker &tracker = it->second;
+
+                                    // Calculate distance moved since last GSI update
+                                    float dx = g.pos[0] - tracker.pos[0];
+                                    float dy = g.pos[1] - tracker.pos[1];
+                                    float dz = g.pos[2] - tracker.pos[2];
+                                    float distMoved = sqrtf(dx*dx + dy*dy + dz*dz);
+
+                                    if (distMoved < positionThreshold) {
+                                        tracker.stationaryUpdates++;
+                                        if (tracker.stationaryUpdates >= stationaryUpdatesRequired && !tracker.isDetonated) {
+                                            tracker.isDetonated = true;
+                                            tracker.detonationTime = ImGui::GetTime();
+                                        }
+                                    } else {
+                                        tracker.stationaryUpdates = 0;
+                                        tracker.isDetonated = false;
+                                    }
+
+                                    tracker.lastPos[0] = tracker.pos[0]; tracker.lastPos[1] = tracker.pos[1]; tracker.lastPos[2] = tracker.pos[2];
+                                    tracker.pos[0] = g.pos[0]; tracker.pos[1] = g.pos[1]; tracker.pos[2] = g.pos[2];
+                                    tracker.ownerSide = g.ownerSide;
+                                    tracker.lastHeartbeat = currentHeartbeat;
+                                }
+                            }
+                        }
+
+                        // Remove old smokes that are no longer in GSI data
+                        for (auto it = g_SmokeTrackers.begin(); it != g_SmokeTrackers.end(); ) {
+                            if (currentSmokeKeys.find(it->first) == currentSmokeKeys.end()) {
+                                it = g_SmokeTrackers.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        }
+                    }
+
+                    // Draw grenades (projectiles and detonated)
+                    double currentTime = ImGui::GetTime();
+                    const float grenadeIconHeight = (16.0f / 1024.0f) * radarWidth; // Icon height for projectiles
+
+                    // Helper lambda to draw grenade icon
+                    auto drawGrenadeIcon = [&](const char* iconName, ImVec2 center, float height) {
+                        GrenadeIconTex icon = GetGrenadeIcon(m_Device, iconName);
+                        if (icon.srv && icon.h > 0) {
+                            float w = height * (float)icon.w / (float)icon.h;
+                            ImVec2 tl = ImVec2(center.x - w * 0.5f, center.y - height * 0.5f);
+                            ImVec2 br = ImVec2(tl.x + w, tl.y + height);
+                            drawList->AddImage((ImTextureID)icon.srv, tl, br, ImVec2(0,0), ImVec2(1,1), IM_COL32(255,255,255,255));
+                        }
+                    };
+
                     for (const auto &g : *optg) {
                         Radar::Vec2 uv = Radar::WorldToUV({ g.pos[0], g.pos[1], g.pos[2] }, g_RadarCtx.cfg);
                         ImVec2 center = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
-                        float r = (g.type == GsiHttpServer::RadarGrenade::Smoke ? uvSmokeRadius : uvInfernoRadius) * radarWidth;
-                        ImU32 col = colorFor(g.ownerSide, g.type == GsiHttpServer::RadarGrenade::Smoke);
-                        drawList->AddCircleFilled(center, r, col, 20);
+
+                        if (g.type == GsiHttpServer::RadarGrenade::Smoke) {
+                            int key = (int)(g.pos[0] / 10.0f) * 1000000 + (int)(g.pos[1] / 10.0f) * 1000 + (int)(g.pos[2] / 10.0f);
+                            auto it = g_SmokeTrackers.find(key);
+
+                            if (it != g_SmokeTrackers.end() && it->second.isDetonated) {
+                                // Draw detonated smoke plume
+                                float r = uvSmokeRadius * radarWidth;
+                                ImU32 col = colorFor(g.ownerSide, true);
+                                drawList->AddCircleFilled(center, r, col, 20);
+
+                                // Calculate and draw countdown text
+                                double elapsed = currentTime - it->second.detonationTime;
+                                float timeRemaining = 20.0f - (float)elapsed;
+                                if (timeRemaining < 0.0f) timeRemaining = 0.0f;
+
+                                int timeLeft = (int)ceilf(timeRemaining);
+                                if (timeLeft < 0) timeLeft = 0;
+                                char timeText[8];
+                                snprintf(timeText, sizeof(timeText), "%d", timeLeft);
+
+                                ImVec2 textSize = ImGui::CalcTextSize(timeText);
+                                ImVec2 textPos = ImVec2(center.x - textSize.x * 0.5f, center.y - textSize.y * 0.5f);
+
+                                // Draw text with outline for visibility
+                                drawList->AddText(ImVec2(textPos.x + 1, textPos.y + 1), IM_COL32(0, 0, 0, 255), timeText);
+                                drawList->AddText(textPos, IM_COL32(255, 255, 255, 255), timeText);
+                            } else {
+                                // Draw smoke projectile icon (before detonation)
+                                drawGrenadeIcon("smokegrenade", center, grenadeIconHeight);
+                            }
+                        } else if (g.type == GsiHttpServer::RadarGrenade::Inferno) {
+                            // Draw inferno flames
+                            float r = uvInfernoRadius * radarWidth;
+                            ImU32 col = colorFor(g.ownerSide, false);
+                            drawList->AddCircleFilled(center, r, col, 20);
+                        } else if (g.type == GsiHttpServer::RadarGrenade::Decoy) {
+                            // Draw decoy projectile icon
+                            drawGrenadeIcon("tagrenade", center, grenadeIconHeight);
+                        } else if (g.type == GsiHttpServer::RadarGrenade::Molotov) {
+                            // Draw molotov/firebomb projectile icon
+                            drawGrenadeIcon("molotov", center, grenadeIconHeight);
+                        } else if (g.type == GsiHttpServer::RadarGrenade::Flashbang) {
+                            // Draw flashbang projectile icon
+                            drawGrenadeIcon("flashbang", center, grenadeIconHeight);
+                        } else if (g.type == GsiHttpServer::RadarGrenade::Frag) {
+                            // Draw frag/HE grenade projectile icon
+                            drawGrenadeIcon("frag_grenade", center, grenadeIconHeight);
+                        }
                     }
                 }
             }
@@ -2569,9 +2841,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             // Scale markers with radar size (base = 300px => radius 7px)
             float scale = radarWidth > 1.0f ? (radarWidth / 300.0f) : 1.0f;
             if (scale < 0.25f) scale = 0.25f; if (scale > 5.0f) scale = 5.0f;
-            float markerRadius = 7.0f * scale;
+            float markerRadius = 7.0f * scale * g_RadarDotScale;
             // Draw only entities and border (background already drawn)
-            Radar::Render(drawList, radarPos, ImVec2(radarWidth, radarHeight), g_RadarCtx, entities, markerRadius, true, false);
+            Radar::Render(drawList, radarPos, ImVec2(radarWidth, radarHeight), g_RadarCtx, entities, markerRadius, false, false);
 
             // Focus ring for spectated player (above markers, below labels)
             {
@@ -2640,7 +2912,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 ImFont* font = ImGui::GetFont();
                 if (!font) font = ImGui::GetIO().FontDefault;
                 float baseSize = ImGui::GetFontSize();
-                float fontSize = baseSize * scale;
+                float fontSize = baseSize * scale *g_RadarDotScale;
                 if (fontSize < 8.0f) fontSize = 8.0f; if (fontSize > 60.0f) fontSize = 60.0f;
 
                 // Text size and centered position
@@ -2651,6 +2923,66 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 float o = std::roundf((std::max)(1.0f, scale));
                 drawList->AddText(font, fontSize, ImVec2(p0.x + o, p0.y + o), IM_COL32(0,0,0,220), txt);
                 drawList->AddText(font, fontSize, p0, IM_COL32(255,255,255,255), txt);
+            }
+
+            // Handle Ctrl+Left-click on radar player dots (check after all drawing is done)
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
+                ImVec2 mousePos = ImGui::GetMousePos();
+                float hitRadius = markerRadius + 4.0f; // Slightly larger than marker for easier clicking
+
+                for (const auto &p : players) {
+                    // Position on radar
+                    Radar::Vec2 uv = Radar::WorldToUV({ p.ent.pos.x, p.ent.pos.y, p.ent.pos.z }, g_RadarCtx.cfg);
+                    ImVec2 pt = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+
+                    // Check if mouse is within circular click region
+                    float dx = mousePos.x - pt.x;
+                    float dy = mousePos.y - pt.y;
+                    float distSq = dx * dx + dy * dy;
+
+                    if (distSq <= hitRadius * hitRadius) {
+                        // Ctrl+Left-click detected on this player - trigger GetSmooth
+                        float pos[3] = {0, 0, 0};
+
+                        // Find controller index from observerSlot
+                        int clickIdx = -1;
+                        if (p.slot >= 0) {
+                            // Map observerSlot (0-9) to keyboard format (1-9,0)
+                            int keyNum = (p.slot == 9) ? 0 : (p.slot + 1);
+                            auto bindIt = g_ObservingHotkeyBindings.find(keyNum);
+                            if (bindIt != g_ObservingHotkeyBindings.end()) {
+                                clickIdx = bindIt->second;
+                            }
+                        }
+
+                        if (clickIdx >= 0) {
+                            g_GetSmoothIndex = clickIdx;
+                            if (g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                                CEntityInstance* controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, clickIdx);
+                                if (controller && controller->IsPlayerController()) {
+                                    auto pawnHandle = controller->GetPlayerPawnHandle();
+                                    if (pawnHandle.IsValid()) {
+                                        int pawnIdx = pawnHandle.GetEntryIndex();
+                                        CEntityInstance* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIdx);
+                                        if (pawn && pawn->IsPlayerPawn()) {
+                                            // Store first position for velocity calculation
+                                            pawn->GetRenderEyeOrigin(pos);
+                                            g_GetSmoothFirstPos[0] = pos[0];
+                                            g_GetSmoothFirstPos[1] = pos[1];
+                                            g_GetSmoothFirstPos[2] = pos[2];
+
+                                            // Mark for next-frame capture
+                                            g_GetSmoothPass = true;
+                                            g_GetSmoothFirstFrame = true;
+                                            g_GetSmoothTime = ImGui::GetTime();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break; // Only process one click
+                    }
+                }
             }
         } else {
             // Placeholder box + URL (legacy)
@@ -3058,16 +3390,9 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             ImGui::Separator();
             ImGui::Checkbox("Show viewport HUD", &g_ShowHud);
             ImGui::Checkbox("Show Radar", &g_ShowRadar);
-            if (g_ShowRadar) {
-                // Position and size controls
-                ImGui::TextUnformatted("Radar Placement");
-                ImGui::PushID("radar_placement");
-                ImGui::SliderFloat("Pos X", &g_RadarUiPosX, 0.0f, ImGui::GetIO().DisplaySize.x, "%.0f");
-                ImGui::SliderFloat("Pos Y", &g_RadarUiPosY, 0.0f, ImGui::GetIO().DisplaySize.y, "%.0f");
-                ImGui::SliderFloat("Size", &g_RadarUiSize, 100.0f, 900.0f, "%.0f px");
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Reset##radar_ui")) { g_RadarUiPosX = 50.0f; g_RadarUiPosY = 50.0f; g_RadarUiSize = 300.0f; }
-                ImGui::PopID();
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Settings")) {
+                g_ShowRadarSettings = !g_ShowRadarSettings;
             }
             // Load map list from built-in radars.json if not yet loaded
             if (!g_RadarMapsLoaded) {
@@ -3255,6 +3580,24 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     }
 
     ImGui::End();
+
+    if (g_ShowRadarSettings) {
+        ImGui::Begin("Radar Settings", &g_ShowRadarSettings);
+        {
+            // Position and size controls
+            ImGui::TextUnformatted("Radar Placement");
+            ImGui::PushID("radar_placement");
+            ImGui::SliderFloat("Pos X", &g_RadarUiPosX, 0.0f, ImGui::GetIO().DisplaySize.x, "%.0f");
+            ImGui::SliderFloat("Pos Y", &g_RadarUiPosY, 0.0f, ImGui::GetIO().DisplaySize.y, "%.0f");
+            ImGui::SliderFloat("Size", &g_RadarUiSize, 100.0f, 1600.0f, "%.0f px");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset##radar_ui")) { g_RadarUiPosX = 50.0f; g_RadarUiPosY = 50.0f; g_RadarUiSize = 300.0f; }
+            ImGui::SliderFloat("Dotscale", &g_RadarDotScale, 0.1f, 2.0f, "%.1f px");
+            ImGui::PopID();
+        }
+        ImGui::End();
+    }
+
     if (g_ShowAttachmentControl) {
         ImGui::Begin("Attachment Control");
         {
@@ -4045,7 +4388,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         if (camIdx >= 0 && camIdx < (int)profile.cameras.size()) {
                             const CameraItem& camera = profile.cameras[camIdx];
                             if (!camera.camPathFile.empty()) {
-                                std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_campath select all; mirv_campath edit start";
+                                std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_input end; mirv_campath select all; mirv_campath edit start";
                                 Afx_ExecClientCmd(cmd.c_str());
                                 advancedfx::Message("Overlay: [Group '%s'] Loading camera '%s' (%s mode, idx=%d)\n",
                                                   group.name.c_str(), camera.name.c_str(),
@@ -4331,7 +4674,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     float dist2 = dx*dx + dy*dy;
                     const float clickThreshold = ImGui::GetIO().MouseDragThreshold; // pixels
                     if (dist2 <= clickThreshold * clickThreshold) {
-                    std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_campath select all; mirv_campath edit start";
+                    std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_input end; mirv_campath select all; mirv_campath edit start";
                     Afx_ExecClientCmd(cmd.c_str());
                     advancedfx::Message("Overlay: Loading campath '%s' from camera '%s'\n", camera.camPathFile.c_str(), camera.name.c_str());
                     g_ActiveCameraCampathPath = camera.camPathFile;
@@ -4600,7 +4943,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 float dist2 = dx*dx + dy*dy;
                 const float clickThreshold = ImGui::GetIO().MouseDragThreshold;
                 if (dist2 <= clickThreshold * clickThreshold) {
-                    std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_campath select all; mirv_campath edit start";
+                    std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_input end; mirv_campath select all; mirv_campath edit start";
                     Afx_ExecClientCmd(cmd.c_str());
                     advancedfx::Message("Overlay: [Group View] Loading camera '%s'\n", camera.name.c_str());
                     g_ActiveCameraCampathPath = camera.camPathFile;
@@ -4949,7 +5292,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 bool hoveredImage = ImGui::IsItemHovered(hoverFlags);
 
                 // Handle right-clicks on HUD player rows (only when RMB control disabled)
-                if (!g_ViewportEnableRmbControl && hoveredImage && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                if (hoveredImage && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
                     ImVec2 mousePos = ImGui::GetMousePos();
                     for (const auto& rect : g_HudPlayerRects) {
                         if (mousePos.x >= rect.min.x && mousePos.x <= rect.max.x &&
@@ -4963,7 +5306,122 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     }
                 }
 
-                // Bird camera context menu
+                if (hoveredImage && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
+                    ImVec2 mousePos = ImGui::GetMousePos();
+                    for (const auto& rect : g_HudPlayerRects) {
+                        if (mousePos.x >= rect.min.x && mousePos.x <= rect.max.x &&
+                            mousePos.y >= rect.min.y && mousePos.y <= rect.max.y) {
+                            g_BirdContextTargetObserverSlot = rect.observerSlot;
+                            g_BirdContextTargetPlayerId = rect.playerId;
+                            int keyNum = (g_BirdContextTargetObserverSlot == 9) ? 0 : (g_BirdContextTargetObserverSlot + 1);
+                            int toIdx = -1;
+                            auto it = g_ObservingHotkeyBindings.find(keyNum);
+                            if (it != g_ObservingHotkeyBindings.end()) {
+                                toIdx = it->second;
+                            }
+                            char cmd[128];
+                            _snprintf_s(cmd, _TRUNCATE, "spec_mode 2; spec_player %d; mirv_campath enabled 0; mirv_input end", toIdx);
+                            Afx_ExecClientCmd(cmd);
+                        }
+                    }
+                }
+                // Smooth camera mode state
+                static double s_smoothTargetX = 0.0, s_smoothTargetY = 0.0, s_smoothTargetZ = 0.0;
+                static double s_smoothTargetRx = 0.0, s_smoothTargetRy = 0.0, s_smoothTargetRz = 0.0;
+                static float s_smoothTargetFov = 90.0f;
+                static double s_smoothCurrentX = 0.0, s_smoothCurrentY = 0.0, s_smoothCurrentZ = 0.0;
+                static double s_smoothCurrentRx = 0.0, s_smoothCurrentRy = 0.0, s_smoothCurrentRz = 0.0;
+                static float s_smoothCurrentFov = 90.0f;
+                static bool s_smoothInitialized = false;
+                // Bird camera context menu - velocity-based smooth tracking
+                if (g_GetSmoothPass && g_GetSmoothFirstFrame && ImGui::GetTime() - g_GetSmoothTime >= 0.5) {
+                    // Second frame: fetch position again and calculate velocity
+                    float pos[3] = {0, 0, 0};
+                    if (g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                        CEntityInstance* controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, g_GetSmoothIndex);
+                        if (controller && controller->IsPlayerController()) {
+                            auto pawnHandle = controller->GetPlayerPawnHandle();
+                            if (pawnHandle.IsValid()) {
+                                int pawnIdx = pawnHandle.GetEntryIndex();
+                                CEntityInstance* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIdx);
+                                if (pawn && pawn->IsPlayerPawn()) {
+                                    pawn->GetRenderEyeOrigin(pos);
+
+                                    // Calculate time delta and velocity
+                                    float deltaTime = ImGui::GetTime() - g_GetSmoothTime;
+                                    float velocity[3] = {
+                                        (pos[0] - g_GetSmoothFirstPos[0]) / deltaTime,
+                                        (pos[1] - g_GetSmoothFirstPos[1]) / deltaTime,
+                                        (pos[2] - g_GetSmoothFirstPos[2]) / deltaTime
+                                    };
+
+                                    // Calculate movement direction vector for angle
+                                    float moveDir[3] = {
+                                        pos[0] - g_GetSmoothFirstPos[0],
+                                        pos[1] - g_GetSmoothFirstPos[1],
+                                        pos[2] - g_GetSmoothFirstPos[2]
+                                    };
+                                    // Set current position and angles on second frame
+                                    s_smoothCurrentX = g_GetSmoothFirstPos[0];
+                                    s_smoothCurrentY = g_GetSmoothFirstPos[1];
+                                    s_smoothCurrentZ = g_GetSmoothFirstPos[2];
+
+                                    s_smoothCurrentFov = 90.0f;
+                                    // Calculate yaw and pitch from movement direction
+                                    // Only update angle if there's significant movement
+                                    float moveMagnitude = sqrtf(moveDir[0]*moveDir[0] + moveDir[1]*moveDir[1] + moveDir[2]*moveDir[2]);
+                                    if (moveMagnitude > 0.01f) {
+                                        // Normalize movement direction
+                                        moveDir[0] /= moveMagnitude;
+                                        moveDir[1] /= moveMagnitude;
+                                        moveDir[2] /= moveMagnitude;
+
+                                        // Calculate angles from direction vector
+                                        // yaw = atan2(y, x) in degrees
+                                        // pitch = asin(z) in degrees
+                                        float targetYaw = atan2f(moveDir[1], moveDir[0]) * (180.0f / 3.14159265359f);
+                                        float targetPitch = asinf(-moveDir[2]) * (180.0f / 3.14159265359f);
+                                        s_smoothCurrentRy = targetYaw;
+                                        s_smoothCurrentRx = targetPitch;
+                                        s_smoothCurrentRz = 0.0f;
+                                        s_smoothTargetRy = targetYaw;
+                                        s_smoothTargetRx = targetPitch;
+                                        s_smoothTargetRz = 0.0f;
+                                    }
+
+                                    // Apply velocity-based target with some lookahead (0.5 seconds)
+                                    float lookahead = 0.5f;
+                                    s_smoothTargetX = pos[0] + velocity[0] * lookahead;
+                                    s_smoothTargetY = pos[1] + velocity[1] * lookahead;
+                                    s_smoothTargetZ = pos[2] + velocity[2] * lookahead;
+                                    s_smoothTargetFov = 90.0f;
+
+                                    // Calculate and set appropriate keyboard sensitivity based on player velocity
+                                    if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                                        float velocityMagnitude = sqrtf(velocity[0]*velocity[0] + velocity[1]*velocity[1] + velocity[2]*velocity[2]);
+
+                                        // Only set if there's significant movement
+                                        if (velocityMagnitude > 1.0f) {
+                                            // Calculate required ksens: velocity = ksens * KeyboardForwardSpeed
+                                            // So: ksens = velocity / KeyboardForwardSpeed
+                                            double forwardSpeed = pMirv->KeyboardForwardSpeed_get();
+                                            if (forwardSpeed > 0.001) {
+                                                double calculatedKsens = (double)velocityMagnitude / forwardSpeed;
+                                                calculatedKsens = std::clamp(calculatedKsens, 0.01, 100.0);
+                                                pMirv->SetKeyboardSensitivity(calculatedKsens);
+                                                g_uiKsens = (float)calculatedKsens;
+                                                g_uiKsensInit = true;
+                                            }
+                                        }
+                                    }
+
+                                    g_GetSmoothPass = false;
+                                    g_GetSmoothFirstFrame = false;
+                                }
+                            }
+                        }
+                    }
+                }
                 if (ImGui::BeginPopup("##bird_context")) {
                     if (ImGui::MenuItem("ToBird")) {
                         // Get current focused player's controller index from HUD
@@ -4995,16 +5453,52 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         }
                         g_BirdContextMenuOpen = false;
                     }
+                    if (ImGui::MenuItem("GetSmooth")) {
+                        float pos[3] = {0, 0, 0};
+
+                        int keyNum = (g_BirdContextTargetObserverSlot == 9) ? 0 : (g_BirdContextTargetObserverSlot + 1);
+                        int clickIdx = -1;
+                        auto it = g_ObservingHotkeyBindings.find(keyNum);
+                        if (it != g_ObservingHotkeyBindings.end()) {
+                            clickIdx = it->second;
+                        }
+                        g_GetSmoothIndex = clickIdx;
+                        if (g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                            CEntityInstance* controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, clickIdx);
+                            if (controller && controller->IsPlayerController()) {
+                                auto pawnHandle = controller->GetPlayerPawnHandle();
+                                if (pawnHandle.IsValid()) {
+                                    int pawnIdx = pawnHandle.GetEntryIndex();
+                                    CEntityInstance* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIdx);
+                                    if (pawn && pawn->IsPlayerPawn()) {
+                                        // Store first position for velocity calculation
+                                        pawn->GetRenderEyeOrigin(pos);
+                                        g_GetSmoothFirstPos[0] = pos[0];
+                                        g_GetSmoothFirstPos[1] = pos[1];
+                                        g_GetSmoothFirstPos[2] = pos[2];
+
+                                        // Mark for next-frame capture (don't set s_smoothCurrent yet)
+                                        g_GetSmoothPass = true;
+                                        g_GetSmoothFirstFrame = true;
+                                        g_GetSmoothTime = ImGui::GetTime();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     ImGui::EndPopup();
                 } else if (g_BirdContextMenuOpen) {
                     g_BirdContextMenuOpen = false;
                 }
 
 
+
                 // RMB-native control over Mirv camera inside preview image
                 static bool s_bbCtrlActive = false;
                 static bool s_bbSkipFirstDelta = false;
                 static POINT s_bbCtrlSavedCursor = {0,0};
+
+
 
                 if (g_ViewportEnableRmbControl) {
                     if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
@@ -5015,7 +5509,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             g_pendingWarpPt.y = s_bbCtrlSavedCursor.y;
                             g_hasPendingWarp  = true;
                             s_bbCtrlActive = false;
-                            //
+                            // In smooth mode, don't stop immediately - let interpolation finish
                         }
                     } else if (hoveredImage && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                         // Begin control: save cursor, hide it
@@ -5036,6 +5530,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         s_bbSkipFirstDelta = true;
                     }
 
+                    // Handle input when RMB is held
                     if (s_bbCtrlActive) {
                         // Compute center of the preview in client + screen coords
                         ImVec2 itemMin = ImGui::GetItemRectMin();
@@ -5060,23 +5555,26 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         float wheel = io.MouseWheel;
                         if (MirvInput* pMirv = Afx_GetMirvInput()) {
                             pMirv->SetCameraControlMode(true);
-                            if (wheel != 0.0f) {
-                                int clicks = (wheel > 0.f) ? (int)floorf(wheel + 0.0001f)
-                                                        : (int)ceilf (wheel - 0.0001f);
-                                double ks = pMirv->GetKeyboardSensitivty();
+                            int fromIdx = GetFocusedPlayerControllerIndex();
+                            if (fromIdx != -1) Afx_ExecClientCmd("spec_mode 4");
 
-                                const double up   = 1.10;
-                                const double down = 1.0 / up;
+                            // Get current camera data
+                            double cx,cy,cz, rx,ry,rz; float fov;
+                            Afx_GetLastCameraData(cx,cy,cz, rx,ry,rz, fov);
 
-                                if (clicks > 0) for (int i = 0; i < clicks; ++i) ks *= up;
-                                if (clicks < 0) for (int i = 0; i < -clicks; ++i) ks *= down;
-
-                                // Clamp to your preferred range
-                                ks = std::clamp(ks, 0.01, 100.0);
-
-                                pMirv->SetKeyboardSensitivity(ks);
-                                g_uiKsens = (float)ks; g_uiKsensInit = true; // sync UI
+                            // Initialize smooth mode targets on first run or when switching modes
+                            if (!s_smoothInitialized) {
+                                s_smoothTargetX = s_smoothCurrentX = cx;
+                                s_smoothTargetY = s_smoothCurrentY = cy;
+                                s_smoothTargetZ = s_smoothCurrentZ = cz;
+                                s_smoothTargetRx = s_smoothCurrentRx = rx;
+                                s_smoothTargetRy = s_smoothCurrentRy = ry;
+                                s_smoothTargetRz = s_smoothCurrentRz = rz;
+                                s_smoothTargetFov = s_smoothCurrentFov = fov;
+                                s_smoothInitialized = true;
                             }
+
+                            const float dt = ImGui::GetIO().DeltaTime;
                             const double sens = pMirv->GetMouseSensitivty();
                             const double yawS = pMirv->MouseYawSpeed_get();
                             const double pitchS = pMirv->MousePitchSpeed_get();
@@ -5086,51 +5584,171 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             const double dYaw = sens * yawS * (double)(-dx) * lookScale;
                             const double dPitch = sens * pitchS * (double)(dy) * lookScale;
 
-                            // Modifiers: R=roll, F=fov
-                            const bool rHeld = (GetKeyState('R') & 0x8000) != 0;
-                            const bool fHeld = (GetKeyState('F') & 0x8000) != 0;
+                            if (g_ViewportSmoothMode) {
+                                // ===== SMOOTH MODE INPUT HANDLING =====
+                                // Modifiers: Shift=FOV (with scroll), R=up, F=down
+                                const bool shiftHeld = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                                const bool spaceHeld = (GetKeyState(VK_SPACE) & 0x8000) != 0;
+                                const bool ctrlHeld = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
-                            double cx,cy,cz, rx,ry,rz; float fov; Afx_GetLastCameraData(cx,cy,cz, rx,ry,rz, fov);
+                                // Handle scroll wheel
+                                if (wheel != 0.0f) {
+                                    int clicks = (wheel > 0.f) ? (int)floorf(wheel + 0.0001f)
+                                                            : (int)ceilf (wheel - 0.0001f);
 
-                            double curYaw = ry;
-                            double curPitch = rx;
-                            if (!rHeld && !fHeld) {
-                                curYaw += dYaw;
-                                curPitch += dPitch;
-                                pMirv->SetRy((float)curYaw);
-                                pMirv->SetRx((float)curPitch);
-                            } else if (rHeld) {
-                                pMirv->SetRz((float)(rz + sens * yawS * (double)(dx) * lookScale));
-                            } else if (fHeld) {
-                                pMirv->SetFov((float)(fov + sens * yawS * (double)(-dx) * lookScale));
-                            }
+                                    if (shiftHeld) {
+                                        // Shift+scroll: adjust FOV
+                                        const float fovDelta = clicks * g_ViewportSmoothScrollFovIncrement;
+                                        s_smoothTargetFov = std::clamp(s_smoothTargetFov + fovDelta, 1.0f, 179.0f);
+                                    } else {
+                                        // Regular scroll: adjust keyboard sensitivity (movement speed)
+                                        double ks = pMirv->GetKeyboardSensitivty();
+                                        const double up   = 1.0 + (double)g_ViewportSmoothScrollSpeedIncrement;
+                                        const double down = 1.0 / up;
+                                        if (clicks > 0) for (int i = 0; i < clicks; ++i) ks *= up;
+                                        if (clicks < 0) for (int i = 0; i < -clicks; ++i) ks *= down;
+                                        ks = std::clamp(ks, 0.01, 100.0);
+                                        pMirv->SetKeyboardSensitivity(ks);
+                                        g_uiKsens = (float)ks; g_uiKsensInit = true;
+                                    }
+                                }
 
-                            // WASD movement (camera space), scaled by keyboard sensitivity and speeds
-                            const float dt = ImGui::GetIO().DeltaTime;
-                            double moveF = 0.0, moveR = 0.0;
-                            if ((GetKeyState('W') & 0x8000) != 0) moveF += pMirv->KeyboardForwardSpeed_get();
-                            if ((GetKeyState('S') & 0x8000) != 0) moveF -= pMirv->KeyboardBackwardSpeed_get();
-                            if ((GetKeyState('D') & 0x8000) != 0) moveR += pMirv->KeyboardRightSpeed_get();
-                            if ((GetKeyState('A') & 0x8000) != 0) moveR -= pMirv->KeyboardLeftSpeed_get();
+                                // Update target angles from mouse movement (always allow mouse look)
+                                s_smoothTargetRy += dYaw;
+                                s_smoothTargetRx += dPitch;
 
-                            if (moveF != 0.0 || moveR != 0.0) {
-                                const double ksens = pMirv->GetKeyboardSensitivty();
-                                const double speedF = ksens * moveF * (double)dt;
-                                const double speedR = ksens * moveR * (double)dt;
-                                // Use HLAE's vector builder (Z-up, Source-like) from angles (roll=0, pitch, yaw)
-                                double fwdQ[3], rightQ[3], upQ[3];
-                                Afx::Math::MakeVectors(/*roll*/0.0, /*pitch*/curPitch, /*yaw*/curYaw, fwdQ, rightQ, upQ);
+                                // WASD + R/F movement (camera space)
+                                double moveF = 0.0, moveR = 0.0, moveU = 0.0;
+                                if ((GetKeyState('W') & 0x8000) != 0) moveF += pMirv->KeyboardForwardSpeed_get();
+                                if ((GetKeyState('S') & 0x8000) != 0) moveF -= pMirv->KeyboardBackwardSpeed_get();
+                                if ((GetKeyState('D') & 0x8000) != 0) moveR += pMirv->KeyboardRightSpeed_get();
+                                if ((GetKeyState('A') & 0x8000) != 0) moveR -= pMirv->KeyboardLeftSpeed_get();
 
-                                const double nx = cx + fwdQ[0] * speedF + rightQ[0] * speedR;
-                                const double ny = cy + fwdQ[1] * speedF + rightQ[1] * speedR;
-                                const double nz = cz + fwdQ[2] * speedF + rightQ[2] * speedR;
-                                pMirv->SetTx((float)nx);
-                                pMirv->SetTy((float)ny);
-                                pMirv->SetTz((float)nz);
+                                // R/F for up/down movement relative to forward vector
+                                if (spaceHeld) moveU += pMirv->KeyboardForwardSpeed_get();
+                                if (ctrlHeld) moveU -= pMirv->KeyboardForwardSpeed_get();
+
+                                if (moveF != 0.0 || moveR != 0.0 || moveU != 0.0) {
+                                    const double ksens = pMirv->GetKeyboardSensitivty();
+                                    const double speedF = ksens * moveF * (double)dt;
+                                    const double speedR = ksens * moveR * (double)dt;
+                                    const double speedU = ksens * moveU * (double)dt;
+
+                                    // Use current target angles for movement direction
+                                    double fwdQ[3], rightQ[3], upQ[3];
+                                    Afx::Math::MakeVectors(/*roll*/0.0, /*pitch*/s_smoothTargetRx, /*yaw*/s_smoothTargetRy, fwdQ, rightQ, upQ);
+
+                                    // Update position targets
+                                    // WASD: forward/right movement in camera space
+                                    // R/F: up/down movement in camera's local space (using camera's up vector)
+                                    s_smoothTargetX += fwdQ[0] * speedF + rightQ[0] * speedR + upQ[0] * speedU;
+                                    s_smoothTargetY += fwdQ[1] * speedF + rightQ[1] * speedR + upQ[1] * speedU;
+                                    s_smoothTargetZ += fwdQ[2] * speedF + rightQ[2] * speedR + upQ[2] * speedU;
+                                }
+
+                            } else {
+                                // ===== REGULAR MODE (original behavior) =====
+                                if (wheel != 0.0f) {
+                                    int clicks = (wheel > 0.f) ? (int)floorf(wheel + 0.0001f)
+                                                            : (int)ceilf (wheel - 0.0001f);
+                                    double ks = pMirv->GetKeyboardSensitivty();
+
+                                    const double up   = 1.10;
+                                    const double down = 1.0 / up;
+
+                                    if (clicks > 0) for (int i = 0; i < clicks; ++i) ks *= up;
+                                    if (clicks < 0) for (int i = 0; i < -clicks; ++i) ks *= down;
+
+                                    // Clamp to your preferred range
+                                    ks = std::clamp(ks, 0.01, 100.0);
+
+                                    pMirv->SetKeyboardSensitivity(ks);
+                                    g_uiKsens = (float)ks; g_uiKsensInit = true; // sync UI
+                                }
+
+                                // Modifiers: R=roll, F=fov
+                                const bool rHeld = (GetKeyState('R') & 0x8000) != 0;
+                                const bool fHeld = (GetKeyState('F') & 0x8000) != 0;
+
+                                double curYaw = ry;
+                                double curPitch = rx;
+                                if (!rHeld && !fHeld) {
+                                    curYaw += dYaw;
+                                    curPitch += dPitch;
+                                    pMirv->SetRy((float)curYaw);
+                                    pMirv->SetRx((float)curPitch);
+                                } else if (rHeld) {
+                                    pMirv->SetRz((float)(rz + sens * yawS * (double)(dx) * lookScale));
+                                } else if (fHeld) {
+                                    pMirv->SetFov((float)(fov + sens * yawS * (double)(-dx) * lookScale));
+                                }
+
+                                // WASD movement (camera space), scaled by keyboard sensitivity and speeds
+                                double moveF = 0.0, moveR = 0.0;
+                                if ((GetKeyState('W') & 0x8000) != 0) moveF += pMirv->KeyboardForwardSpeed_get();
+                                if ((GetKeyState('S') & 0x8000) != 0) moveF -= pMirv->KeyboardBackwardSpeed_get();
+                                if ((GetKeyState('D') & 0x8000) != 0) moveR += pMirv->KeyboardRightSpeed_get();
+                                if ((GetKeyState('A') & 0x8000) != 0) moveR -= pMirv->KeyboardLeftSpeed_get();
+
+                                if (moveF != 0.0 || moveR != 0.0) {
+                                    const double ksens = pMirv->GetKeyboardSensitivty();
+                                    const double speedF = ksens * moveF * (double)dt;
+                                    const double speedR = ksens * moveR * (double)dt;
+                                    // Use HLAE's vector builder (Z-up, Source-like) from angles (roll=0, pitch, yaw)
+                                    double fwdQ[3], rightQ[3], upQ[3];
+                                    Afx::Math::MakeVectors(/*roll*/0.0, /*pitch*/curPitch, /*yaw*/curYaw, fwdQ, rightQ, upQ);
+
+                                    const double nx = cx + fwdQ[0] * speedF + rightQ[0] * speedR;
+                                    const double ny = cy + fwdQ[1] * speedF + rightQ[1] * speedR;
+                                    const double nz = cz + fwdQ[2] * speedF + rightQ[2] * speedR;
+                                    pMirv->SetTx((float)nx);
+                                    pMirv->SetTy((float)ny);
+                                    pMirv->SetTz((float)nz);
+                                }
+
+                                // Reset smooth mode initialization when not in smooth mode
+                                s_smoothInitialized = false;
                             }
                         }
 
 
+                    }
+
+                    // Apply smooth camera interpolation (runs even when RMB is released)
+                    if (g_ViewportSmoothMode && s_smoothInitialized) {
+                        if (MirvInput* pMirv = Afx_GetMirvInput()) {
+                            bool camEnabled = pMirv->GetCameraControlMode();
+                            if (camEnabled) {
+                                const float dt = ImGui::GetIO().DeltaTime;
+
+                                // Apply exponential smoothing with individual halftimes
+                                const double smoothFactorPos = 1.0 - pow(0.5, (double)dt / (double)g_ViewportSmoothHalftimePos);
+                                const double smoothFactorAngle = 1.0 - pow(0.5, (double)dt / (double)g_ViewportSmoothHalftimeAngle);
+                                const double smoothFactorFov = 1.0 - pow(0.5, (double)dt / (double)g_ViewportSmoothHalftimeFov);
+
+                                // Interpolate position
+                                s_smoothCurrentX  += (s_smoothTargetX  - s_smoothCurrentX)  * smoothFactorPos;
+                                s_smoothCurrentY  += (s_smoothTargetY  - s_smoothCurrentY)  * smoothFactorPos;
+                                s_smoothCurrentZ  += (s_smoothTargetZ  - s_smoothCurrentZ)  * smoothFactorPos;
+
+                                // Interpolate angles
+                                s_smoothCurrentRx += (s_smoothTargetRx - s_smoothCurrentRx) * smoothFactorAngle;
+                                s_smoothCurrentRy += (s_smoothTargetRy - s_smoothCurrentRy) * smoothFactorAngle;
+                                s_smoothCurrentRz += (s_smoothTargetRz - s_smoothCurrentRz) * smoothFactorAngle;
+
+                                // Interpolate FOV
+                                s_smoothCurrentFov += (s_smoothTargetFov - s_smoothCurrentFov) * smoothFactorFov;
+
+                                // Apply smoothed values to camera
+                                pMirv->SetTx((float)s_smoothCurrentX);
+                                pMirv->SetTy((float)s_smoothCurrentY);
+                                pMirv->SetTz((float)s_smoothCurrentZ);
+                                pMirv->SetRx((float)s_smoothCurrentRx);
+                                pMirv->SetRy((float)s_smoothCurrentRy);
+                                pMirv->SetRz((float)s_smoothCurrentRz);
+                                pMirv->SetFov(s_smoothCurrentFov);
+                            }
+                        }
                     }
                 } else {
                     // RMB control disabled: ensure camera control is released if it was active
@@ -5161,6 +5779,79 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 ImGui::Combo("Source", &g_ViewportSourceMode, srcNames, (int)(sizeof(srcNames)/sizeof(srcNames[0])));
                 ImGui::SameLine();
                 ImGui::Checkbox("RMB Control", &g_ViewportEnableRmbControl);
+                ImGui::SameLine();
+                ImGui::Checkbox("Smooth", &g_ViewportSmoothMode);
+                if (g_ViewportSmoothMode) {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Settings##SmoothSettings")) {
+                        g_ViewportSmoothSettingsOpen = !g_ViewportSmoothSettingsOpen;
+                    }
+                }
+            }
+
+            // Smooth camera settings window
+            if (g_ViewportSmoothSettingsOpen) {
+                ImGui::SetNextWindowSize(ImVec2(380, 320), ImGuiCond_FirstUseEver);
+                if (ImGui::Begin("Smooth Camera Settings", &g_ViewportSmoothSettingsOpen)) {
+                    ImGui::Text("Halftime Settings");
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    ImGui::Text("Position Halftime:");
+                    ImGui::SliderFloat("##PosHalftime", &g_ViewportSmoothHalftimePos, 0.01f, 1.0f, "%.3f s");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Time for position to move halfway to target");
+                    }
+                    ImGui::Spacing();
+
+                    ImGui::Text("Angle Halftime:");
+                    ImGui::SliderFloat("##AngleHalftime", &g_ViewportSmoothHalftimeAngle, 0.01f, 1.0f, "%.3f s");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Time for rotation to move halfway to target");
+                    }
+                    ImGui::Spacing();
+
+                    ImGui::Text("FOV Halftime:");
+                    ImGui::SliderFloat("##FovHalftime", &g_ViewportSmoothHalftimeFov, 0.01f, 1.0f, "%.3f s");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Time for FOV to move halfway to target");
+                    }
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    ImGui::Text("Scroll Increment Settings");
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    ImGui::Text("Movement Speed Scroll Multiplier:");
+                    ImGui::SliderFloat("##SpeedScrollInc", &g_ViewportSmoothScrollSpeedIncrement, 0.01f, 0.50f, "%.2f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Speed multiplier per scroll click (e.g., 0.10 = 10%% increase/decrease per click)");
+                    }
+                    ImGui::Spacing();
+
+                    ImGui::Text("FOV Scroll Increment:");
+                    ImGui::SliderFloat("##FovScrollInc", &g_ViewportSmoothScrollFovIncrement, 0.5f, 10.0f, "%.1f");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("FOV change per Shift+Scroll click");
+                    }
+                    ImGui::Spacing();
+                    ImGui::Separator();
+
+                    if (ImGui::Button("Reset to Defaults")) {
+                        g_ViewportSmoothHalftimePos = 0.15f;
+                        g_ViewportSmoothHalftimeAngle = 0.10f;
+                        g_ViewportSmoothHalftimeFov = 0.20f;
+                        g_ViewportSmoothScrollSpeedIncrement = 0.10f;
+                        g_ViewportSmoothScrollFovIncrement = 2.0f;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Close")) {
+                        g_ViewportSmoothSettingsOpen = false;
+                    }
+                }
+                ImGui::End();
             }
 
             if (g_ViewportPlayersMenuOpen) {
@@ -6539,7 +7230,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     if (it != g_ObservingHotkeyBindings.end()) {
                         int controllerIndex = it->second;
                         char cmd[128];
-                        _snprintf_s(cmd, _TRUNCATE, "mirv_campath enabled 0; spec_mode 2; spec_player %d", controllerIndex);
+                        _snprintf_s(cmd, _TRUNCATE, "spec_mode 2; spec_player %d; mirv_campath enabled 0; mirv_input end", controllerIndex);
                         Afx_ExecClientCmd(cmd);
                         BirdCamera_Stop();
                         //advancedfx::Message("Overlay: Executing %s\n", cmd);

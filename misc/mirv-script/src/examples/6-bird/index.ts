@@ -111,6 +111,16 @@
         return `#${idx}`;
     }
 
+    function getTeamForControllerIndex(idx: number): number | null {
+        try {
+            const c = mirv.getEntityFromIndex(idx);
+            if (c && c.isPlayerController()) {
+                return c.getTeam();
+            }
+        } catch { /* ignore */ }
+        return null;
+    }
+
     enum Phase { Idle = 0, AscendA = 1, HoldA = 2, ToB = 3, HoldB = 4, DescendB = 5 }
     enum Mode { Goto = 0, Player = 1 }
 
@@ -338,8 +348,7 @@
                 // Switch spectated player to destination so releasing later lands on them
                 const outName = getNameForControllerIndex(state.toIdx);
                 const qName = outName.includes(' ') ? `"${outName.replaceAll('"', '\\"')}"` : outName;
-                mirv.exec('spec_mode 5');
-                mirv.exec(`spec_player ${qName}`);
+                mirv.exec('spec_mode 4');
                 // Capture and align yaw to world axes (nearest 90°)
                 state.downYaw = snapYawToCardinal(state.ang[1]);
                 beginPhase(Phase.ToB);
@@ -361,6 +370,8 @@
         } else if (state.phase === Phase.DescendB) {
             const d = v.len(v.sub(state.pos, targetPos));
             if (d <= state.margin) {
+                mirv.exec('spec_mode 2');
+                mirv.exec(`spec_player ${state.toIdx}`);
                 mirv.exec('mirv_input end');
                 try { mirv.getMainCampath().enabled = false; } catch {}
                 state.active = false; state.initialized = false; mirv.onCViewRenderSetupView = undefined;
@@ -407,8 +418,7 @@
                         const fromName = getNameForControllerIndex(fromIdx);
                         const toName = getNameForControllerIndex(toIdx);
                         const qFrom = fromName.includes(' ') ? `"${fromName.replaceAll('"', '\\"')}"` : fromName;
-                        mirv.exec('spec_mode 5');
-                        mirv.exec(`spec_player ${qFrom}`);
+                        mirv.exec('spec_mode 4');
                         mirv.message(`mirv_bird: from ${fromName} -> ${toName} height=${height.toFixed(1)} speed=${state.linSpeed.toFixed(0)} holdA=${state.holdTimeA.toFixed(1)}s holdB=${state.holdTimeB.toFixed(1)}s\n`);
                         return;
                     }
@@ -441,8 +451,7 @@
                         // Ensure spectator will be on the selected player when we return
                         const toName = getNameForControllerIndex(toIdx);
                         const qTo = toName.includes(' ') ? `"${toName.replaceAll('"', '\\"')}"` : toName;
-                        mirv.exec('spec_mode 5');
-                        mirv.exec(`spec_player ${qTo}`);
+                        mirv.exec('spec_mode 4');
 
                         if (transition) {
                             // For player mode, ascend vertically with tight XY lock
@@ -470,6 +479,131 @@
                 } else {
                     mirv.warning('mirv_bird: not in player hold mode.\n');
                 }
+                return;
+            }
+            if (sub === 'bind') {
+                // mirv_bird bind <tfirst/ctfirst> [height] [speed] [holdA] [holdB] [velSmooth] [angSmooth] [margin]
+                if (argc >= 3) {
+                    const order = args.argV(2).toLowerCase();
+                    if (order !== 'tfirst' && order !== 'ctfirst') {
+                        mirv.warning(`mirv_bird: bind order must be 'tfirst' or 'ctfirst'\n`);
+                        return;
+                    }
+
+                    // Collect all player controllers with their teams
+                    const hi = mirv.getHighestEntityIndex();
+                    const tPlayers: number[] = [];
+                    const ctPlayers: number[] = [];
+
+                    for (let i = 0; i <= hi; i++) {
+                        try {
+                            const ent = mirv.getEntityFromIndex(i);
+                            if (ent && ent.isPlayerController()) {
+                                const team = ent.getTeam();
+                                if (team === 2) { // Terrorist
+                                    tPlayers.push(i);
+                                } else if (team === 3) { // CT
+                                    ctPlayers.push(i);
+                                }
+                            }
+                        } catch { /* ignore */ }
+                    }
+
+                    // Sort each team by index (lowest to highest)
+                    tPlayers.sort((a, b) => a - b);
+                    ctPlayers.sort((a, b) => a - b);
+
+                    // Arrange keys 1-0 based on team order
+                    const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
+                    const players: (number | null)[] = new Array(10).fill(null);
+
+                    if (order === 'tfirst') {
+                        // T: keys 1-5, CT: keys 6-0
+                        for (let i = 0; i < Math.min(5, tPlayers.length); i++) {
+                            players[i] = tPlayers[i];
+                        }
+                        for (let i = 0; i < Math.min(5, ctPlayers.length); i++) {
+                            players[5 + i] = ctPlayers[i];
+                        }
+                    } else { // ctfirst
+                        // CT: keys 1-5, T: keys 6-0
+                        for (let i = 0; i < Math.min(5, ctPlayers.length); i++) {
+                            players[i] = ctPlayers[i];
+                        }
+                        for (let i = 0; i < Math.min(5, tPlayers.length); i++) {
+                            players[5 + i] = tPlayers[i];
+                        }
+                    }
+
+                    // Parse height parameter
+                    const height = argc >= 4 ? parseFloat(args.argV(3)) : 1000.0;
+
+                    // Get additional arguments for specbind (everything after height)
+                    let additionalArgs = '';
+                    if (argc >= 5) {
+                        const parts: string[] = [];
+                        for (let i = 4; i < argc; i++) {
+                            parts.push(args.argV(i));
+                        }
+                        additionalArgs = parts.join(' ');
+                    }
+
+                    // Build goto command arguments (use default values for all params)
+                    const gotoArgs = `${height} 1000 1.0 1.0 0.5 0.25 5.0`;
+
+                    // Generate alias commands for birdbind1-0
+                    for (let i = 0; i < 10; i++) {
+                        const key = keys[i];
+                        const playerIdx = players[i];
+                        if (playerIdx !== null) {
+                            mirv.exec(`alias birdbind${key} "mirv_bird goto ${playerIdx} ${gotoArgs}"`);
+                        } else {
+                            // Bind to empty command if no player for this slot
+                            mirv.exec(`alias birdbind${key} ""`);
+                        }
+                    }
+
+                    // Generate spec bindings (spec_player with same index + optional additional commands)
+                    for (let i = 0; i < 10; i++) {
+                        const key = keys[i];
+                        const playerIdx = players[i];
+                        if (playerIdx !== null) {
+                            const playerName = getNameForControllerIndex(playerIdx);
+                            const qName = playerName.includes(' ') ? `"${playerName.replaceAll('"', '\\"')}"` : playerName;
+                            if (additionalArgs.length > 0) {
+                                mirv.exec(`alias specbind${key} "spec_player ${playerIdx}; ${additionalArgs}"`);
+                            } else {
+                                mirv.exec(`alias specbind${key} "spec_player ${playerIdx}"`);
+                            }
+                        } else {
+                            // Empty binding if no player for this slot
+                            mirv.exec(`alias specbind${key} ""`);
+                        }
+                    }
+
+                    // Create +ctrlheld/-ctrlheld aliases
+                    const bindList = keys.map(k => `bind ${k} birdbind${k}`).join('; ');
+                    const unbindList = keys.map(k => `bind ${k} slot${k === '0' ? '10' : k}`).join('; ');
+
+                    mirv.exec(`alias +ctrlheld "${bindList}"`);
+                    mirv.exec(`alias -ctrlheld "${unbindList}"`);
+                    mirv.exec('bind ctrl +ctrlheld');
+
+                    // Set default bindings to specbind
+                    for (let i = 0; i < 10; i++) {
+                        const key = keys[i];
+                        mirv.exec(`bind ${key} specbind${key}`);
+                    }
+
+                    mirv.message(`mirv_bird: bindings created (${order}, height=${height.toFixed(1)})\n`);
+                    mirv.message(`  T: ${tPlayers.map(p => getNameForControllerIndex(p)).join(', ') || 'none'}\n`);
+                    mirv.message(`  CT: ${ctPlayers.map(p => getNameForControllerIndex(p)).join(', ') || 'none'}\n`);
+                    if (additionalArgs.length > 0) {
+                        mirv.message(`  Additional args: ${additionalArgs}\n`);
+                    }
+                    return;
+                }
+                mirv.message(`${cmd} bind <tfirst/ctfirst> [height=1000] [additional arguments]\n`);
                 return;
             }
             if (sub === 'indexlist') {
@@ -500,6 +634,7 @@
             `${cmd} goto <controllerIndex> <height> [speed=1000] [holdA=1.0] [holdB=1.0] [velSmooth=0.5] [angSmooth=0.25] [margin=5]\n` +
             `${cmd} player <height> [speed=1000] [transition=1] [velSmooth=0.5] [angSmooth=0.25] [margin=5]\n` +
             `${cmd} player_return [speed=1000]\n` +
+            `${cmd} bind <tfirst/ctfirst> [height=1000] [additional arguments]\n` +
             `${cmd} indexlist\n` +
             `${cmd} stop\n`.dedent()
         );
