@@ -1,6 +1,7 @@
 #include "InputRouter.h"
 #include "Overlay.h"
 #include "../AfxConsole.h"
+#include "third_party/imgui/imgui.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -15,20 +16,28 @@ InputRouter* InputRouter::s_Active = nullptr;
 std::atomic<bool> InputRouter::s_KeydownSeenThisFrame{false};
 bool InputRouter::s_FirstKeydownLogged = false;
 const int InputRouter::kToggleVk = OVERLAY_TOGGLE_VK;
-const int InputRouter::kToggleAltVk = OVERLAY_TOGGLE_ALT_VK;
 
 long __stdcall InputRouter::WndProcThunk(void* hwnd, unsigned int msg, unsigned long long wParam, long long lParam) {
     HWND hWnd = (HWND)hwnd;
-    // Toggle visibility on F10 keydown regardless of visibility (do not consume).
+    // Toggle visibility on F8 keydown regardless of visibility (do not consume).
+    // Disabled when viewports are enabled to prevent crashes with external windows.
     if (msg == WM_KEYDOWN) {
         if (!s_FirstKeydownLogged) {
             s_FirstKeydownLogged = true;
             advancedfx::Message("Overlay: first WM_KEYDOWN vk=0x%02X\n", (unsigned)wParam);
         }
         s_KeydownSeenThisFrame.store(true, std::memory_order_relaxed);
-        if (wParam == kToggleVk || wParam == kToggleAltVk) {
-            advancedfx::Message("Overlay: toggle hotkey (WndProc) vk=0x%02X\n", (unsigned)wParam);
-            Overlay::Get().ToggleVisible();
+        if (wParam == kToggleVk) {
+            // Check if viewports are enabled - if so, disable toggle to prevent crashes
+            ImGuiContext* ctx = ImGui::GetCurrentContext();
+            bool viewportsEnabled = ctx && (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable);
+
+            if (viewportsEnabled) {
+                advancedfx::Message("Overlay: toggle hotkey disabled when viewports are enabled\n");
+            } else {
+                advancedfx::Message("Overlay: toggle hotkey (WndProc) vk=0x%02X\n", (unsigned)wParam);
+                Overlay::Get().ToggleVisible();
+            }
         }
     }
 
@@ -91,7 +100,6 @@ void InputRouter::NotifyKeydown() {
 }
 
 int InputRouter::GetToggleKey() { return kToggleVk; }
-int InputRouter::GetAltToggleKey() { return kToggleAltVk; }
 #endif
 
 } // namespace overlay

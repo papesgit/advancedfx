@@ -36,3 +36,4 @@
 [submodule "shared/overlay/third_party/imgui"]
 	path = shared/overlay/third_party/imgui
 	url = https://github.com/papesgit/imgui.git
+	branch = docking-advancedfx

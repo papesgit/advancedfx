@@ -168,9 +168,9 @@ if (MSVC)
     target_link_libraries(${PROJECT_NAME} PUBLIC shell32.lib)
 endif()
 
-# Use safer default toggle keys on 32-bit (Source 1): F8 only; disable alt toggle
+# Use F8 as default toggle key on 32-bit (Source 1)
 if (CMAKE_SIZEOF_VOID_P EQUAL 4)
-    target_compile_definitions(${PROJECT_NAME} PUBLIC OVERLAY_TOGGLE_VK=0x77 OVERLAY_TOGGLE_ALT_VK=0)
+    target_compile_definitions(${PROJECT_NAME} PUBLIC OVERLAY_TOGGLE_VK=0x77)
 endif()
 
 # Install built-in radar assets alongside other resources so runtime can pick them automatically.

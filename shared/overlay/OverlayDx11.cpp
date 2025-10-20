@@ -38,6 +38,8 @@
 
 #include <d3d11.h>
 #include <dxgi.h>
+#include <mutex>
+#include <deque>
 #include <wincodec.h>
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -343,6 +345,60 @@ static bool g_windowActive = true;
 static bool g_dropFirstMouseAfterActivate = false;
 
 static std::mutex g_imguiInputMutex;
+// Queue Win32 messages coming from WndProc to feed ImGui on the render thread.
+// This avoids races/drops when WndProc fires while the render thread is inside NewFrame/Render.
+struct ImGuiQueuedMsg { HWND hwnd; UINT msg; WPARAM wParam; LPARAM lParam; };
+static std::mutex g_imguiMsgQueueMutex;
+static std::deque<ImGuiQueuedMsg> g_imguiMsgQueue;
+static void ImGui_EnqueueWin32Msg(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    std::lock_guard<std::mutex> lk(g_imguiMsgQueueMutex);
+    if (g_imguiMsgQueue.size() > 2048) g_imguiMsgQueue.pop_front();
+    g_imguiMsgQueue.push_back(ImGuiQueuedMsg{ hwnd, msg, wParam, lParam });
+}
+static void ImGui_DrainQueuedWin32Msgs()
+{
+    // Move to local to minimize time holding the queue mutex
+    std::deque<ImGuiQueuedMsg> local;
+    {
+        std::lock_guard<std::mutex> lk(g_imguiMsgQueueMutex);
+        if (!g_imguiMsgQueue.empty()) { local.swap(g_imguiMsgQueue); }
+    }
+    for (const auto &m : local)
+        ImGui_ImplWin32_WndProcHandler(m.hwnd, m.msg, m.wParam, m.lParam);
+}
+
+// Optional: group all overlay windows inside a single ImGui window with a DockSpace
+static bool   g_GroupIntoWorkspace = false;         // user toggle
+static bool   g_WorkspaceNeedsLayout = false;       // request (re)build of docking layout
+static bool   g_WorkspaceForceRedock = false;       // force rebuild even if .ini exists (from "Redock all" button)
+static bool   g_WorkspaceLayoutInitialized = false; // true once layout has been built at least once
+static bool   g_WorkspaceOpen = true;               // visibility of the workspace window
+static ImGuiID g_WorkspaceDockspaceId = 0;          // ID of the DockSpace inside the workspace window
+static ImGuiID g_WorkspaceViewportId = 0;           // Platform viewport ID hosting the workspace window
+
+// Separate .ini files for normal and workspace modes
+static std::string g_IniFileNormal = "imgui.ini";
+static std::string g_IniFileWorkspace = "imgui_workspace.ini";
+
+// Store window visibility settings from .ini to apply after workspace is created
+struct WorkspaceWindowSettings {
+    bool hasSettings = false;
+    bool showRadar = false;
+    bool showRadarSettings = false;
+    bool showAttachmentControl = false;
+    bool showDofWindow = false;
+    bool showObservingBindings = false;
+    bool showObservingCameras = false;
+    bool showGroupViewWindow = false;
+    bool showMultikillWindow = false;
+    bool showBackbufferWindow = false;
+    bool showSequencer = false;
+    bool showCameraControl = false;
+    bool showOverlayConsole = false;
+    bool showGizmo = false;
+};
+static WorkspaceWindowSettings g_WorkspaceWindowSettings;
 
 static bool  g_hasPendingWarp = false;
 static POINT g_pendingWarpPt  = {0, 0};
@@ -1152,15 +1208,35 @@ static bool g_DemoDialogInit = false;
 
 static bool CallImGuiWndProcGuarded(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-    static thread_local bool s_in_imgui = false; // re-entrancy on the same thread
+    // Enqueue message for processing on the render thread before NewFrame.
+    // Do not block the game window thread here.
+    static thread_local bool s_in_imgui = false;
     if (s_in_imgui) return false;
+    ImGui_EnqueueWin32Msg(hwnd, msg, wparam, lparam);
 
-    std::lock_guard<std::mutex> lock(g_imguiInputMutex);    // <-- serialize with NewFrame
-    s_in_imgui = true;
-    bool handled = ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam) ? true : false;
-    s_in_imgui = false;
-    return handled;
+    // Best-effort prediction to preserve pass-through behavior without blocking.
+    ImGuiIO& io = ImGui::GetIO();
+    auto is_mouse_msg = [](UINT m){
+        switch(m){
+            case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+            case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+            case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+            case WM_MOUSEMOVE: case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+            case WM_XBUTTONDOWN: case WM_XBUTTONUP:
+                return true; default: return false; }
+    };
+    auto is_kbd_msg = [](UINT m){ return m==WM_KEYDOWN||m==WM_KEYUP||m==WM_SYSKEYDOWN||m==WM_SYSKEYUP||m==WM_CHAR; };
+    bool predict_consumed = false;
+    if (is_mouse_msg(msg)) predict_consumed = io.WantCaptureMouse;
+    else if (is_kbd_msg(msg)) predict_consumed = io.WantCaptureKeyboard;
+    return predict_consumed;
 }
+
+// TLS flag to detect when we are inside ImGui platform window rendering/present.
+// Used by Present hook to avoid re-entrancy into Overlay::BeginFrame/Render.
+static thread_local bool g_in_platform_windows_present = false;
+
+bool IsInPlatformWindowsPresent() { return g_in_platform_windows_present; }
 
 
 // Multikill Parser helpers
@@ -1527,6 +1603,56 @@ static void Mk_StartParseThread(const std::string& parserPathUtf8, const std::st
     });
 }
 
+// ImGui ini handler for persisting workspace window visibility
+static void* WorkspaceWindows_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
+    return (0 == strcmp(name, "WindowVisibility")) ? (void*)1 : nullptr;
+}
+
+static void WorkspaceWindows_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line) {
+    const char* eq = strchr(line, '=');
+    if (!eq) return;
+    std::string key(line, eq - line);
+    int val = atoi(eq + 1);
+    bool visible = (val != 0);
+
+    // Store settings to apply later when workspace is created
+    g_WorkspaceWindowSettings.hasSettings = true;
+
+    if (key == "Radar") g_WorkspaceWindowSettings.showRadar = visible;
+    else if (key == "RadarSettings") g_WorkspaceWindowSettings.showRadarSettings = visible;
+    else if (key == "AttachmentControl") g_WorkspaceWindowSettings.showAttachmentControl = visible;
+    else if (key == "DOFControl") g_WorkspaceWindowSettings.showDofWindow = visible;
+    else if (key == "ObservingBindings") g_WorkspaceWindowSettings.showObservingBindings = visible;
+    else if (key == "ObservingCameras") g_WorkspaceWindowSettings.showObservingCameras = visible;
+    else if (key == "GroupView") g_WorkspaceWindowSettings.showGroupViewWindow = visible;
+    else if (key == "EventBrowser") g_WorkspaceWindowSettings.showMultikillWindow = visible;
+    else if (key == "Viewport") g_WorkspaceWindowSettings.showBackbufferWindow = visible;
+    else if (key == "Sequencer") g_WorkspaceWindowSettings.showSequencer = visible;
+    else if (key == "MirvCamera") g_WorkspaceWindowSettings.showCameraControl = visible;
+    else if (key == "Console") g_WorkspaceWindowSettings.showOverlayConsole = visible;
+    else if (key == "Gizmo") g_WorkspaceWindowSettings.showGizmo = visible;
+}
+
+static void WorkspaceWindows_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out_buf) {
+    // Only save when workspace is enabled
+    if (!g_GroupIntoWorkspace) return;
+
+    out_buf->appendf("[%s][%s]\n", handler->TypeName, "WindowVisibility");
+    out_buf->appendf("Radar=%d\n", g_ShowRadar ? 1 : 0);
+    out_buf->appendf("RadarSettings=%d\n", g_ShowRadarSettings ? 1 : 0);
+    out_buf->appendf("AttachmentControl=%d\n", g_ShowAttachmentControl ? 1 : 0);
+    out_buf->appendf("DOFControl=%d\n", g_ShowDofWindow ? 1 : 0);
+    out_buf->appendf("ObservingBindings=%d\n", g_ShowObservingBindings ? 1 : 0);
+    out_buf->appendf("ObservingCameras=%d\n", g_ShowObservingCameras ? 1 : 0);
+    out_buf->appendf("GroupView=%d\n", g_ShowGroupViewWindow ? 1 : 0);
+    out_buf->appendf("EventBrowser=%d\n", g_ShowMultikillWindow ? 1 : 0);
+    out_buf->appendf("Viewport=%d\n", g_ShowBackbufferWindow ? 1 : 0);
+    out_buf->appendf("Sequencer=%d\n", g_ShowSequencer ? 1 : 0);
+    out_buf->appendf("MirvCamera=%d\n", g_ShowCameraControl ? 1 : 0);
+    out_buf->appendf("Console=%d\n", g_ShowOverlayConsole ? 1 : 0);
+    out_buf->appendf("Gizmo=%d\n", g_ShowGizmo ? 1 : 0);
+    out_buf->append("\n");
+}
 
 // ImGui ini handler for persisting overlay paths
 static void* OverlayPaths_ReadOpen(ImGuiContext*, ImGuiSettingsHandler*, const char* name) {
@@ -2106,7 +2232,12 @@ bool OverlayDx11::Initialize() {
     ApplyHlaeDarkStyle();
     ImGuiIO& io = ImGui::GetIO();
 
+    // Always start in normal mode with imgui.ini
+    // When user enables workspace, we'll switch to imgui_workspace.ini
+    io.IniFilename = g_IniFileNormal.c_str();
+
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;    // Enable docking for workspace container
     io.ConfigWindowsMoveFromTitleBarOnly = true;
     io.ConfigInputTrickleEventQueue = false;
     // Load our fonts once (before backend init so device objects match the atlas)
@@ -2164,6 +2295,17 @@ bool OverlayDx11::Initialize() {
             std::wstring wdir = std::wstring(hf) + L"resources\\overlay";
             Hud::SetIconsDirectoryW(wdir);
         }
+    }
+
+    // Register custom ImGui ini settings handler for workspace window visibility
+    if (!ImGui::FindSettingsHandler("HLAEWorkspaceWindows")) {
+        ImGuiSettingsHandler iniWS;
+        iniWS.TypeName = "HLAEWorkspaceWindows";
+        iniWS.TypeHash = ImHashStr(iniWS.TypeName);
+        iniWS.ReadOpenFn = WorkspaceWindows_ReadOpen;
+        iniWS.ReadLineFn = WorkspaceWindows_ReadLine;
+        iniWS.WriteAllFn = WorkspaceWindows_WriteAll;
+        ImGui::AddSettingsHandler(&iniWS);
     }
 
     // Register custom ImGui ini settings handler for last-used directories
@@ -2382,7 +2524,7 @@ bool OverlayDx11::Initialize() {
                 }
 
                 // Otherwise, if overlay visible and ImGui didn't already consume, eat typical inputs
-                if (!consumed && overlayVisible) {
+                if (!consumed && overlayVisible && !g_GroupIntoWorkspace) {
                     switch (msg) {
                         case WM_MOUSEMOVE:
                         case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
@@ -2440,6 +2582,17 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 #ifdef _WIN32
     if (!m_Initialized) return;
 
+    {
+        ImGuiIO& io0 = ImGui::GetIO();
+        if (io0.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
     // Serialize with WndProc touching ImGui’s input/event queue
     std::lock_guard<std::mutex> lock(g_imguiInputMutex);
 
@@ -2448,8 +2601,92 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
     // Keep backend order consistent with Dear ImGui examples
     ImGui_ImplDX11_NewFrame();
+    // Drain queued Win32 messages into ImGui before Win32_NewFrame so IO is in sync
+    ImGui_DrainQueuedWin32Msgs();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
+
+    // Optional Workspace container: a parent window that hosts a DockSpace and can hold
+    // all other overlay windows as tabs/panes. This allows dragging a single platform window
+    // to move all overlay windows together outside the game.
+    if (g_GroupIntoWorkspace) {
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;  // Enable multi-viewport / platform windows
+
+        ImGuiWindowFlags ws_flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking;
+
+        // NEW: keep the workspace as its own platform window from frame 1
+        ImGuiWindowClass wc{};
+        wc.ViewportFlagsOverrideSet   = ImGuiViewportFlags_NoAutoMerge;      // per-window "no merge"
+        // Optional extras:
+        // wc.ViewportFlagsOverrideSet |= ImGuiViewportFlags_NoTaskBarIcon;   // no taskbar icon
+        // wc.ViewportFlagsOverrideSet |= ImGuiViewportFlags_NoDecoration;    // no OS decorations
+        ImGui::SetNextWindowClass(&wc);
+
+        // Optional: initial placement/size on first show (not required for NoAutoMerge)
+        // ImGui::SetNextWindowPos(ImGui::GetMainViewport()->Pos + ImVec2(80, 80), ImGuiCond_Appearing);
+        // ImGui::SetNextWindowSize(ImVec2(1000, 700), ImGuiCond_Appearing);
+
+        if (ImGui::Begin("HLAE Workspace", &g_WorkspaceOpen, ws_flags)) {
+            if (ImGuiViewport* vp = ImGui::GetWindowViewport())
+                g_WorkspaceViewportId = vp->ID;
+
+            g_WorkspaceDockspaceId = ImGui::GetID("HLAE_WorkspaceDockSpace");
+            ImGui::DockSpace(g_WorkspaceDockspaceId, ImVec2(0, 0), ImGuiDockNodeFlags_None);
+
+            // Build default layout only when:
+            // 1. User clicked "Redock all" (g_WorkspaceForceRedock), OR
+            // 2. Workspace was just enabled AND there's no saved layout in .ini
+            ImGuiDockNode* existingNode = ImGui::DockBuilderGetNode(g_WorkspaceDockspaceId);
+
+            bool shouldBuildLayout = g_WorkspaceForceRedock || (g_WorkspaceNeedsLayout && !existingNode);
+
+            if (shouldBuildLayout) {
+                g_WorkspaceNeedsLayout = false;
+                g_WorkspaceForceRedock = false;
+                g_WorkspaceLayoutInitialized = true;
+                ImGui::DockBuilderRemoveNode(g_WorkspaceDockspaceId);
+                ImGui::DockBuilderAddNode(g_WorkspaceDockspaceId, ImGuiDockNodeFlags_DockSpace);
+                ImGui::DockBuilderSetNodeSize(g_WorkspaceDockspaceId, ImGui::GetWindowSize());
+
+                const char* kWindowsToDock[] = {
+                    "HLAE Overlay","Radar","Radar Settings","Attachment Control","DOF Control",
+                    "Observing Bindings","Observing Cameras","Group View","Event Browser","Viewport",
+                    "Smooth Camera Settings","HLAE Sequencer","Mirv Camera","HLAE Console","Gizmo",
+                };
+                for (const char* w : kWindowsToDock)
+                    ImGui::DockBuilderDockWindow(w, g_WorkspaceDockspaceId);
+
+                ImGui::DockBuilderFinish(g_WorkspaceDockspaceId);
+            } else if (g_WorkspaceNeedsLayout && existingNode) {
+                // Workspace was enabled but .ini already has a saved layout - use that instead
+                g_WorkspaceNeedsLayout = false;
+                g_WorkspaceLayoutInitialized = true;
+            }
+        }
+        ImGui::End();
+
+        // Apply stored window visibility settings now that workspace exists
+        if (g_WorkspaceWindowSettings.hasSettings) {
+            g_ShowRadar = g_WorkspaceWindowSettings.showRadar;
+            g_ShowRadarSettings = g_WorkspaceWindowSettings.showRadarSettings;
+            g_ShowAttachmentControl = g_WorkspaceWindowSettings.showAttachmentControl;
+            g_ShowDofWindow = g_WorkspaceWindowSettings.showDofWindow;
+            g_ShowObservingBindings = g_WorkspaceWindowSettings.showObservingBindings;
+            g_ShowObservingCameras = g_WorkspaceWindowSettings.showObservingCameras;
+            g_ShowGroupViewWindow = g_WorkspaceWindowSettings.showGroupViewWindow;
+            g_ShowMultikillWindow = g_WorkspaceWindowSettings.showMultikillWindow;
+            g_ShowBackbufferWindow = g_WorkspaceWindowSettings.showBackbufferWindow;
+            g_ShowSequencer = g_WorkspaceWindowSettings.showSequencer;
+            g_ShowCameraControl = g_WorkspaceWindowSettings.showCameraControl;
+            g_ShowOverlayConsole = g_WorkspaceWindowSettings.showOverlayConsole;
+            g_ShowGizmo = g_WorkspaceWindowSettings.showGizmo;
+            g_WorkspaceWindowSettings.hasSettings = false; // Only apply once
+        }
+    } else {
+        g_WorkspaceViewportId = 0;
+    }
+
     {
         // Query entity data for bird camera if active
         if (advancedfx::overlay::BirdCamera_IsActive()) {
@@ -2558,6 +2795,12 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     }
 
     if (g_ShowRadar) {
+        // Radar in its own ImGui window instead of drawing on the background
+        ImGui::SetNextWindowSize(ImVec2(360, 360), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Radar", &g_ShowRadar, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar)) {
+            ImGui::End();
+            // Even if closed this frame, still proceed with asset housekeeping below in next frames
+        } else {
         // Auto-load radar map from GSI data
         {
             auto mapOpt = g_GsiServer.TryGetMapName();
@@ -2605,16 +2848,16 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             }
         }
 
-        // Simple native radar using cs-hud mapping
-        float radarWidth = g_RadarUiSize;
-        float radarHeight = g_RadarUiSize;
-        // Clamp to screen bounds
-        ImVec2 ds = ImGui::GetIO().DisplaySize;
-        float px = g_RadarUiPosX; if (px < 0) px = 0; if (px > ds.x - radarWidth) px = ds.x - radarWidth;
-        float py = g_RadarUiPosY; if (py < 0) py = 0; if (py > ds.y - radarHeight) py = ds.y - radarHeight;
-        ImVec2 radarPos = ImVec2(px, py);
-
-        ImDrawList* drawList = ImGui::GetBackgroundDrawList();
+        // Radar canvas inside the window (square that fits available content)
+        ImVec2 avail = ImGui::GetContentRegionAvail();
+        float side = (std::min)(avail.x, avail.y);
+        if (side < 64.0f) side = 64.0f;
+        ImVec2 canvasMin = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##radar_canvas", ImVec2(side, side), ImGuiButtonFlags_AllowOverlap);
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        ImVec2 radarPos = canvasMin;
+        float radarWidth = side;
+        float radarHeight = side;
 
         // If assets are loaded and we have a valid config, render it
         if (g_RadarAssetsLoaded && (g_RadarCtx.cfg.scale != 0.0)) {
@@ -2986,13 +3229,15 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 }
             }
         } else {
-            // Placeholder box + URL (legacy)
+            // Placeholder box when assets not yet loaded
             ImVec2 radarEnd = ImVec2(radarPos.x + radarWidth, radarPos.y + radarHeight);
             drawList->AddRectFilled(radarPos, radarEnd, IM_COL32(50, 50, 50, 128));
             drawList->AddRect(radarPos, radarEnd, IM_COL32(255, 255, 255, 255));
             const char* text = "Radar not loaded";
             ImVec2 textSize = ImGui::CalcTextSize(text);
             drawList->AddText(ImVec2(radarPos.x + (radarWidth - textSize.x) / 2, radarPos.y + (radarHeight - textSize.y) / 2), IM_COL32(255, 255, 255, 255), text);
+        }
+        ImGui::End();
         }
     }
 
@@ -3126,7 +3371,11 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     }
 
                     // Render dialogs
+                    if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+                        ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
                     s_campathOpenDialog.Display();
+                    if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+                        ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
                     s_campathSaveDialog.Display();
 
                     // Handle selections
@@ -3203,6 +3452,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     AfxStreams_SetRecordNameUtf8(s_recName);
                     advancedfx::Message("Overlay: mirv_streams record name set.\n");
                 }
+                if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+                    ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
                 dirDialog.Display();
                 if (dirDialog.HasSelected()) {
                     const std::string selected = dirDialog.GetSelected().string();
@@ -3506,6 +3757,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 }
 
                 // Render and handle selection
+                if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+                    ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
                 g_DemoOpenDialog.Display();
                 if (g_DemoOpenDialog.HasSelected()) {
                     const std::string path = g_DemoOpenDialog.GetSelected().string();
@@ -3572,6 +3825,35 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             float pct = g_DimOpacity * 100.0f;
             if (ImGui::SliderFloat("Dim strength", &pct, 0.0f, 100.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp)) {
                 g_DimOpacity = pct / 100.0f;
+            }
+            // Layout section: allow grouping all overlay windows inside a workspace window (with DockSpace)
+            {
+                ImGui::BeginDisabled(g_GroupIntoWorkspace);
+                bool prev = g_GroupIntoWorkspace;
+                if (ImGui::Checkbox("External workspace mode", &g_GroupIntoWorkspace)) {
+                    if (g_GroupIntoWorkspace && !prev) {
+                        // Save current .ini before switching
+                        ImGui::SaveIniSettingsToDisk(g_IniFileNormal.c_str());
+
+                        // Switch to workspace .ini
+                        ImGuiIO& io = ImGui::GetIO();
+                        io.IniFilename = g_IniFileWorkspace.c_str();
+                        ImGui::LoadIniSettingsFromDisk(g_IniFileWorkspace.c_str());
+
+                        g_WorkspaceNeedsLayout = true; // build layout next frame
+                        g_WorkspaceOpen = true;
+                    }
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Requires restart to disable");
+                }
+                ImGui::EndDisabled();
+                if (g_GroupIntoWorkspace) {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Redock all")) {
+                        g_WorkspaceForceRedock = true;
+                    }
+                }
             }
 
             ImGui::EndTabItem();
@@ -4684,6 +4966,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
                 // Handle file browsers
                 if (cameraFileBrowsers.find(camIdx) != cameraFileBrowsers.end()) {
+                    if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+                        ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
                     cameraFileBrowsers[camIdx].Display();
                 if (cameraFileBrowsers[camIdx].HasSelected()) {
                     camera.camPathFile = cameraFileBrowsers[camIdx].GetSelected().string();
@@ -4695,6 +4979,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             }
 
                 if (imageFileBrowsers.find(camIdx) != imageFileBrowsers.end()) {
+                    if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+                        ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
                     imageFileBrowsers[camIdx].Display();
                     if (imageFileBrowsers[camIdx].HasSelected()) {
                         std::string newImagePath = imageFileBrowsers[camIdx].GetSelected().string();
@@ -5014,6 +5300,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (!g_OverlayPaths.demoDir.empty()) s_mkDialog.SetDirectory(g_OverlayPaths.demoDir);
             s_mkDialog.Open();
         }
+        if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+            ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
         s_mkDialog.Display();
         if (s_mkDialog.HasSelected()) {
             const std::string path = s_mkDialog.GetSelected().string();
@@ -5513,19 +5801,22 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             // In smooth mode, don't stop immediately - let interpolation finish
                         }
                     } else if (hoveredImage && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-                        // Begin control: save cursor, hide it
+                    // Begin control: save cursor, hide it
                         GetCursorPos(&s_bbCtrlSavedCursor);
                         ShowCursor(FALSE);
                         {
                             ImVec2 itemMin = ImGui::GetItemRectMin();
                             ImVec2 itemMax = ImGui::GetItemRectMax();
                             ImVec2 itemCenter = ImVec2((itemMin.x + itemMax.x) * 0.5f, (itemMin.y + itemMax.y) * 0.5f);
-                            POINT ptCenterClient = { (LONG)itemCenter.x, (LONG)itemCenter.y };
-                            POINT ptCenterScreen = ptCenterClient;
-                            ClientToScreen(m_Hwnd, &ptCenterScreen);
-                            g_pendingWarpPt.x = ptCenterScreen.x;
-                            g_pendingWarpPt.y = ptCenterScreen.y;
-                            g_hasPendingWarp  = true;
+                            POINT ptCenterScreen = { (LONG)itemCenter.x, (LONG)itemCenter.y };
+                            HWND ownerHwnd = m_Hwnd;
+                            if (ImGui::GetWindowViewport() && ImGui::GetWindowViewport()->PlatformHandleRaw)
+                                ownerHwnd = (HWND)ImGui::GetWindowViewport()->PlatformHandleRaw;
+                            // Also compute client center for later deltas
+                            POINT ptCenterClient = ptCenterScreen; ScreenToClient(ownerHwnd, &ptCenterClient);
+                            (void)ptCenterClient; // silence unused warning in release
+                            // Lock immediately to center of image in screen space
+                            ::SetCursorPos(ptCenterScreen.x, ptCenterScreen.y);
                         }
                         s_bbCtrlActive = true;
                         s_bbSkipFirstDelta = true;
@@ -5538,20 +5829,21 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         ImVec2 itemMax = ImGui::GetItemRectMax();
                         ImVec2 itemCenter = ImVec2((itemMin.x + itemMax.x) * 0.5f, (itemMin.y + itemMax.y) * 0.5f);
 
-                        POINT ptCenterClient = { (LONG)itemCenter.x, (LONG)itemCenter.y };
-                        POINT ptCenterScreen = ptCenterClient;
-                        ClientToScreen(m_Hwnd, &ptCenterScreen);
+                        POINT ptCenterScreen = { (LONG)itemCenter.x, (LONG)itemCenter.y };
+                        HWND ownerHwnd = m_Hwnd;
+                        if (ImGui::GetWindowViewport() && ImGui::GetWindowViewport()->PlatformHandleRaw)
+                            ownerHwnd = (HWND)ImGui::GetWindowViewport()->PlatformHandleRaw;
+                        // Convert to client coordinates for delta computation
+                        POINT ptCenterClient = ptCenterScreen; ScreenToClient(ownerHwnd, &ptCenterClient);
 
                         // Read current cursor and compute delta relative to center in client space
                         POINT ptScreen; GetCursorPos(&ptScreen);
-                        POINT ptClient = ptScreen; ScreenToClient(m_Hwnd, &ptClient);
+                        POINT ptClient = ptScreen; ScreenToClient(ownerHwnd, &ptClient);
                         float dx = (float)(ptClient.x - ptCenterClient.x);
                         float dy = (float)(ptClient.y - ptCenterClient.y);
                         // Lock cursor to preview center
                         if (s_bbSkipFirstDelta) { dx = 0.0f; dy = 0.0f; s_bbSkipFirstDelta = false; }
-                        g_pendingWarpPt.x = ptCenterScreen.x;
-                        g_pendingWarpPt.y = ptCenterScreen.y;
-                        g_hasPendingWarp  = true;
+                        ::SetCursorPos(ptCenterScreen.x, ptCenterScreen.y);
                         ImGuiIO& io = ImGui::GetIO();
                         float wheel = io.MouseWheel;
                         if (MirvInput* pMirv = Afx_GetMirvInput()) {
@@ -5598,11 +5890,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                                                             : (int)ceilf (wheel - 0.0001f);
 
                                     if (shiftHeld) {
-                                        // Shift+scroll: adjust FOV
-                                        const float fovDelta = clicks * g_ViewportSmoothScrollFovIncrement;
-                                        s_smoothTargetFov = std::clamp(s_smoothTargetFov + fovDelta, 1.0f, 179.0f);
-                                    } else {
-                                        // Regular scroll: adjust keyboard sensitivity (movement speed)
+                                        // Shift scroll: adjust keyboard sensitivity (movement speed)
                                         double ks = pMirv->GetKeyboardSensitivty();
                                         const double up   = 1.0 + (double)g_ViewportSmoothScrollSpeedIncrement;
                                         const double down = 1.0 / up;
@@ -5611,6 +5899,10 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                                         ks = std::clamp(ks, 0.01, 100.0);
                                         pMirv->SetKeyboardSensitivity(ks);
                                         g_uiKsens = (float)ks; g_uiKsensInit = true;
+                                    } else {
+                                        // scroll: adjust FOV
+                                        const float fovDelta = clicks * g_ViewportSmoothScrollFovIncrement;
+                                        s_smoothTargetFov = std::clamp(s_smoothTargetFov + fovDelta, 1.0f, 179.0f);
                                     }
                                 }
 
@@ -6032,7 +6324,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     if (g_ShowSequencer) {
         // Sequencer: horizontally resizable; adjust height to content each frame
         ImGui::SetNextWindowSize(ImVec2(720, 200), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("HLAE Sequencer", &g_ShowSequencer, ImGuiWindowFlags_NoCollapse)) {
+        bool sequencerWindowOpen = ImGui::Begin("HLAE Sequencer", &g_ShowSequencer, ImGuiWindowFlags_NoCollapse);
+        if (sequencerWindowOpen) {
             static ImGui::FrameIndexType s_seqFrame = 0;
             static ImGui::FrameIndexType s_seqStart = 0;
             static ImGui::FrameIndexType s_seqEnd = 0;
@@ -7099,8 +7392,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 if (desired < min_h) desired = min_h;
                 ImGui::SetWindowSize(ImVec2(cur.x, desired));
             }
-            ImGui::End();
         }
+        ImGui::End();
     }
 
     // Mirv input camera controls/indicator
@@ -7607,47 +7900,51 @@ void OverlayDx11::Render() {
 #ifdef _WIN32
     if (!m_Initialized) return;
 
-    std::lock_guard<std::mutex> lock(g_imguiInputMutex);
-
-    // Update backbuffer size cache
-    UpdateBackbufferSize();
-
-    // Prepare opaque blend state for viewport image callbacks
-    g_ImguiD3DContext = m_Context;
-    if (!g_ViewportOpaqueBlend && m_Device) {
-        D3D11_BLEND_DESC bd = {};
-        bd.AlphaToCoverageEnable = FALSE;
-        bd.IndependentBlendEnable = FALSE;
-        bd.RenderTarget[0].BlendEnable = FALSE; // disable blending -> opaque
-        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        ID3D11BlendState* bs = nullptr;
-        if (SUCCEEDED(m_Device->CreateBlendState(&bd, &bs))) {
-            g_ViewportOpaqueBlend = bs;
-        }
-    }
-
-    // Recreate ImGui device objects once after a resize/device-loss
-    if (m_ImGuiNeedRecreate) {
-        ImGui_ImplDX11_CreateDeviceObjects();
-        m_ImGuiNeedRecreate = false;
-
-        // Refresh viewport preview from swapchain just before drawing overlay
-        if (g_ShowBackbufferWindow) { UpdateBackbufferPreviewTexture(); }
-    }
-    // Per-frame Mirv rendering below (no attach-camera updates here)
-
-    // Backup current state we might disturb (render targets + viewport)
+    // Declare variables for D3D11 state backup/restore outside mutex block
     ID3D11RenderTargetView* prevRtv = nullptr;
     ID3D11DepthStencilView* prevDsv = nullptr;
-    m_Context->OMGetRenderTargets(1, &prevRtv, &prevDsv);
-
     UINT prevVpCount = 0;
-    m_Context->RSGetViewports(&prevVpCount, nullptr);
     D3D11_VIEWPORT prevVp = {};
-    if (prevVpCount > 0) {
-        prevVpCount = 1;
-        m_Context->RSGetViewports(&prevVpCount, &prevVp);
-    }
+
+    // Use a scoped block for the mutex so we can release it before platform windows
+    {
+        std::lock_guard<std::mutex> lock(g_imguiInputMutex);
+
+        // Update backbuffer size cache
+        UpdateBackbufferSize();
+
+        // Prepare opaque blend state for viewport image callbacks
+        g_ImguiD3DContext = m_Context;
+        if (!g_ViewportOpaqueBlend && m_Device) {
+            D3D11_BLEND_DESC bd = {};
+            bd.AlphaToCoverageEnable = FALSE;
+            bd.IndependentBlendEnable = FALSE;
+            bd.RenderTarget[0].BlendEnable = FALSE; // disable blending -> opaque
+            bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+            ID3D11BlendState* bs = nullptr;
+            if (SUCCEEDED(m_Device->CreateBlendState(&bd, &bs))) {
+                g_ViewportOpaqueBlend = bs;
+            }
+        }
+
+        // Recreate ImGui device objects once after a resize/device-loss
+        if (m_ImGuiNeedRecreate) {
+            ImGui_ImplDX11_CreateDeviceObjects();
+            m_ImGuiNeedRecreate = false;
+
+            // Refresh viewport preview from swapchain just before drawing overlay
+            if (g_ShowBackbufferWindow) { UpdateBackbufferPreviewTexture(); }
+        }
+        // Per-frame Mirv rendering below (no attach-camera updates here)
+
+        // Backup current state we might disturb (render targets + viewport)
+        m_Context->OMGetRenderTargets(1, &prevRtv, &prevDsv);
+
+        m_Context->RSGetViewports(&prevVpCount, nullptr);
+        if (prevVpCount > 0) {
+            prevVpCount = 1;
+            m_Context->RSGetViewports(&prevVpCount, &prevVp);
+        }
 
     // Create ephemeral RTV this frame, render, then release
     ID3D11Texture2D* backbuffer = nullptr;
@@ -7662,8 +7959,22 @@ void OverlayDx11::Render() {
         }
         backbuffer->Release();
     }
+    } // Release mutex before platform windows to avoid deadlock
 
-    // Restore viewport
+    // Update and render ImGui platform windows (multi-viewport support)
+    // Must be outside mutex lock since platform window Present calls trigger our hooks.
+    // Mark scope so Present hook can skip overlay re-entrancy when these swapchains present.
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+        g_in_platform_windows_present = true;
+        ImGui::UpdatePlatformWindows();
+        ImGui::RenderPlatformWindowsDefault();
+        g_in_platform_windows_present = false;
+
+        // Note: do not pump Win32 messages here to avoid re-entrancy while rendering.
+    }
+
+    // Restore viewport (outside mutex, but still safe - these are local variables)
     if (prevVpCount > 0)
         m_Context->RSSetViewports(1, &prevVp);
 

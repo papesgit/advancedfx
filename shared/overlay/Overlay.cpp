@@ -87,9 +87,9 @@ void Overlay::BeginFrame() {
 #ifdef _WIN32
     // Only poll for toggles if we own a Win32 WndProc via InputRouter (Source 2).
     // On Source 1 we integrate with the game's WndProc; polling can double-toggle.
+    // Disabled when viewports are enabled to prevent crashes with external windows.
     static int s_noKeydownFrames = 0;
     static bool s_prevDownMain = false;
-    static bool s_prevDownAlt = false;
     if (m_InputRouter) {
         bool sawKeydown = InputRouter::ConsumeKeydownSeenThisFrame();
         if (sawKeydown) {
@@ -97,25 +97,20 @@ void Overlay::BeginFrame() {
         } else {
             s_noKeydownFrames++;
             if (s_noKeydownFrames > 120) { // ~2s at 60 FPS without keydown messages
-                int vkMain = InputRouter::GetToggleKey();
-                SHORT s = (SHORT)0;
-                if (vkMain) s = GetAsyncKeyState(vkMain);
-                bool down = (s & 0x8000) != 0;
-                if (down && !s_prevDownMain) {
-                    advancedfx::Message("Overlay: toggle hotkey (poll) vk=0x%02X\n", (unsigned)vkMain);
-                    ToggleVisible();
-                }
-                s_prevDownMain = down;
-                // also allow alternate toggle key
-                int vkAlt = InputRouter::GetAltToggleKey();
-                if (vkAlt) {
-                    s = GetAsyncKeyState(vkAlt);
-                    down = (s & 0x8000) != 0;
-                    if (down && !s_prevDownAlt) {
-                        advancedfx::Message("Overlay: toggle hotkey (poll) vk=0x%02X\n", (unsigned)vkAlt);
+                // Check if viewports are enabled - if so, disable toggle to prevent crashes
+                ImGuiContext* ctx = ImGui::GetCurrentContext();
+                bool viewportsEnabled = ctx && (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable);
+
+                if (!viewportsEnabled) {
+                    int vkMain = InputRouter::GetToggleKey();
+                    SHORT s = (SHORT)0;
+                    if (vkMain) s = GetAsyncKeyState(vkMain);
+                    bool down = (s & 0x8000) != 0;
+                    if (down && !s_prevDownMain) {
+                        advancedfx::Message("Overlay: toggle hotkey (poll) vk=0x%02X\n", (unsigned)vkMain);
                         ToggleVisible();
                     }
-                    s_prevDownAlt = down;
+                    s_prevDownMain = down;
                 }
             }
         }
@@ -123,7 +118,6 @@ void Overlay::BeginFrame() {
         // No router: ensure polling state machines don't linger
         s_noKeydownFrames = 0;
         s_prevDownMain = false;
-        s_prevDownAlt = false;
     }
 #endif
 

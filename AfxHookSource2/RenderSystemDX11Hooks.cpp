@@ -1904,9 +1904,16 @@ std::atomic<int>  g_OverlayResizeRetry{0};
 // Quarantine: skip overlay and all backbuffer queries for a few frames after resize or when we detect transitional swapchain states.
 std::atomic<int>  g_OverlayQuarantineFrames{0};
 
+// Forward declaration to avoid including overlay sources here
+namespace advancedfx { namespace overlay { bool IsInPlatformWindowsPresent(); } }
+
 HRESULT STDMETHODCALLTYPE New_Present( void * This,
             /* [in] */ UINT SyncInterval,
             /* [in] */ UINT Flags) {
+    // Skip all overlay work when ImGui is presenting platform viewports.
+    // This prevents re-entrant Overlay::BeginFrame()/ImGui::NewFrame() calls.
+    if (advancedfx::overlay::IsInPlatformWindowsPresent())
+        return g_OldPresent(This, SyncInterval, Flags);
 
     g_bInOwnDraw = true;
     // Always track the latest swapchain instance being presented.
@@ -1964,9 +1971,18 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
                 auto router = overlay.GetInputRouter();
                 void* cur = router ? router->GetAttachedHwnd() : nullptr;
                 if (router && tmp.OutputWindow && cur && cur != tmp.OutputWindow) {
-                    router->Detach();
-                    router->Attach(tmp.OutputWindow);
-                    advancedfx::Message("Overlay: WndProc hook reattached hwnd=0x%p\n", tmp.OutputWindow);
+                    // Avoid reattaching to Dear ImGui platform windows; their WndProc is owned by the backend.
+                    wchar_t cls[64] = {0};
+                    bool is_imgui_platform = false;
+                    if (GetClassNameW((HWND)tmp.OutputWindow, cls, (int)(sizeof(cls)/sizeof(cls[0])))) {
+                        if (0 == wcscmp(cls, L"ImGui Platform"))
+                            is_imgui_platform = true;
+                    }
+                    if (!is_imgui_platform) {
+                        router->Detach();
+                        router->Attach(tmp.OutputWindow);
+                        advancedfx::Message("Overlay: WndProc hook reattached hwnd=0x%p\n", tmp.OutputWindow);
+                    }
                 }
             }
         }
@@ -2085,25 +2101,27 @@ HRESULT STDMETHODCALLTYPE New_ResizeBuffers( void * This,
             /* [in] */ UINT Height,
             /* [in] */ DXGI_FORMAT NewFormat,
             /* [in] */ UINT SwapChainFlags) {
-    // Pre-release any overlay resources referencing the backbuffer and unbind RTs
-    // to avoid INVALID_CALL on ResizeBuffers due to outstanding references.
-    {
-        auto &overlay = advancedfx::overlay::Overlay::Get();
-        if (overlay.HasRenderer())
-            overlay.OnDeviceLost();
-        IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
-        // No further D3D unbinding here to avoid interfering with engine state.
+    IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+    const bool is_main_swapchain = (sc == g_pSwapChain);
+
+    if (is_main_swapchain) {
+        // Pre-release any overlay resources referencing the main backbuffer
+        {
+            auto &overlay = advancedfx::overlay::Overlay::Get();
+            if (overlay.HasRenderer())
+                overlay.OnDeviceLost();
+        }
+
+        // Mark pending resize so overlay skips touching backbuffers until we complete, and enter quarantine.
+        g_OverlayResizePending.store(true, std::memory_order_relaxed);
+        g_OverlayResizeRetry.store(0, std::memory_order_relaxed);
+        g_OverlayQuarantineFrames.store(30, std::memory_order_relaxed);
+
+        // Drop any cached preview texture that references old backbuffers/RTs
+        if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
+        if (g_BeforeUiCopy)   { g_BeforeUiCopy->Release();   g_BeforeUiCopy   = nullptr; ZeroMemory(&g_BeforeUiCopyDesc, sizeof(g_BeforeUiCopyDesc)); }
+        // AfterUi/PrePresent cleanup removed
     }
-
-    // Mark pending resize so overlay skips touching backbuffers until we complete, and enter quarantine.
-    g_OverlayResizePending.store(true, std::memory_order_relaxed);
-    g_OverlayResizeRetry.store(0, std::memory_order_relaxed);
-    g_OverlayQuarantineFrames.store(30, std::memory_order_relaxed);
-
-    // Drop any cached preview texture that references old backbuffers/RTs
-    if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
-    if (g_BeforeUiCopy)   { g_BeforeUiCopy->Release();   g_BeforeUiCopy   = nullptr; ZeroMemory(&g_BeforeUiCopyDesc, sizeof(g_BeforeUiCopyDesc)); }
-    // AfterUi/PrePresent cleanup removed
 
     return g_OldResizeBuffers(This, BufferCount, Width, Height, NewFormat, SwapChainFlags);
 }
@@ -2142,8 +2160,10 @@ HRESULT STDMETHODCALLTYPE New_CreateSwapChain( void * This,
             if(NO_ERROR != DetourTransactionCommit()) ErrorBox("Failed to detour IDXGISwapChain methods.");
         }
 
-        // (Re)initialize overlay DX11 renderer for the current swapchain.
-        if (g_pSwapChain) {
+        // Initialize overlay DX11 renderer for the game's main swapchain (first one only).
+        // Subsequent swap chains (e.g., ImGui platform windows) should not reinitialize the overlay.
+        static bool s_overlayInitialized = false;
+        if (g_pSwapChain && !s_overlayInitialized) {
             auto &overlay = advancedfx::overlay::Overlay::Get();
             ID3D11Device* pDev = nullptr;
             ID3D11DeviceContext* pCtx = nullptr;
@@ -2154,6 +2174,7 @@ HRESULT STDMETHODCALLTYPE New_CreateSwapChain( void * This,
                     overlay.SetRenderer(std::unique_ptr<advancedfx::overlay::IOverlayRenderer>(
                         new advancedfx::overlay::OverlayDx11(pDev, pCtx, g_pSwapChain, desc2.OutputWindow))
                     );
+                    s_overlayInitialized = true;
                 }
                 if (pCtx) pCtx->Release();
                 pDev->Release();

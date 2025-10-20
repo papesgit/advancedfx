@@ -30,9 +30,8 @@ public:
     // Mark that a WM_KEYDOWN was observed this frame (for external WndProc integrations).
     static void NotifyKeydown();
 
-    // Public accessors for configured toggle keys.
+    // Public accessor for configured toggle key.
     static int GetToggleKey();
-    static int GetAltToggleKey();
 #endif
 
 private:
@@ -50,15 +49,11 @@ private:
     static std::atomic<bool> s_KeydownSeenThisFrame;
     static bool s_FirstKeydownLogged;
 
-    // Compile-time selectable toggle keys
+    // Compile-time selectable toggle key
     #ifndef OVERLAY_TOGGLE_VK
-    #define OVERLAY_TOGGLE_VK VK_F10
-    #endif
-    #ifndef OVERLAY_TOGGLE_ALT_VK
-    #define OVERLAY_TOGGLE_ALT_VK VK_F8
+    #define OVERLAY_TOGGLE_VK VK_F8
     #endif
     static const int kToggleVk;
-    static const int kToggleAltVk;
 #endif
 };
 
