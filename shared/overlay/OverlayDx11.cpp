@@ -6336,6 +6336,43 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         ::SetCursorPos(ptCenterScreen.x, ptCenterScreen.y);
                         ImGuiIO& io = ImGui::GetIO();
                         float wheel = io.MouseWheel;
+
+                        // While RMB control is active, allow observing hotkeys (0-9).
+                        // If pressed, immediately end RMB control and execute the hotkey.
+                        if (g_ObservingEnabled) {
+                            static const ImGuiKey numKeys[10] = {
+                                ImGuiKey_0, ImGuiKey_1, ImGuiKey_2, ImGuiKey_3, ImGuiKey_4,
+                                ImGuiKey_5, ImGuiKey_6, ImGuiKey_7, ImGuiKey_8, ImGuiKey_9
+                            };
+                            int pressedDigit = -1;
+                            for (int i = 0; i <= 9; ++i) {
+                                if (ImGui::IsKeyPressed(numKeys[i], false)) { pressedDigit = i; break; }
+                            }
+                            if (pressedDigit >= 0) {
+                                // End control: restore cursor + stop camera control
+                                ShowCursor(TRUE);
+                                g_pendingWarpPt.x = s_bbCtrlSavedCursor.x;
+                                g_pendingWarpPt.y = s_bbCtrlSavedCursor.y;
+                                g_hasPendingWarp  = true;
+                                s_bbCtrlActive = false;
+                                if (MirvInput* pMirv2 = Afx_GetMirvInput()) {
+                                    pMirv2->SetCameraControlMode(false);
+                                }
+                                // Execute spectate command
+                                auto it = g_ObservingHotkeyBindings.find(pressedDigit);
+                                if (it != g_ObservingHotkeyBindings.end()) {
+                                    int controllerIndex = it->second;
+                                    char cmd[128];
+                                    _snprintf_s(cmd, _TRUNCATE, "spec_mode 2; spec_player %d; mirv_campath enabled 0; mirv_input end", controllerIndex);
+                                    Afx_ExecClientCmd(cmd);
+                                    g_CameraLockActive = false;
+                                    g_RadarCampathActive = false;
+                                    BirdCamera_Stop();
+                                }
+                                // Skip the rest of RMB handling for this frame; user must release & press RMB again
+                                goto RmbAfterControl;
+                            }
+                        }
                         if (MirvInput* pMirv = Afx_GetMirvInput()) {
                             pMirv->SetCameraControlMode(true);
                             int fromIdx = GetFocusedPlayerControllerIndex();
@@ -6593,6 +6630,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
                     }
 
+RmbAfterControl:
                     // Apply smooth camera interpolation (runs even when RMB is released)
                     if (g_ViewportSmoothMode && s_smoothInitialized) {
                         if (MirvInput* pMirv = Afx_GetMirvInput()) {
@@ -8146,6 +8184,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         char cmd[128];
                         _snprintf_s(cmd, _TRUNCATE, "spec_mode 2; spec_player %d; mirv_campath enabled 0; mirv_input end", controllerIndex);
                         Afx_ExecClientCmd(cmd);
+                        g_CameraLockActive = false;
                         g_RadarCampathActive = false;
                         BirdCamera_Stop();
                         //advancedfx::Message("Overlay: Executing %s\n", cmd);
