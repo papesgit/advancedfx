@@ -25,6 +25,17 @@ void CameraOverride_SetAngles(const float ang[3]) {
     g_CameraOverrideState.ang[2] = ang[2];
 }
 
+void CameraOverride_SetFov(float fov) {
+    std::lock_guard<std::mutex> _l(g_CameraOverrideMutex);
+    g_CameraOverrideState.fov = fov;
+    g_CameraOverrideState.fovEnabled = true;
+}
+
+void CameraOverride_ClearFov() {
+    std::lock_guard<std::mutex> _l(g_CameraOverrideMutex);
+    g_CameraOverrideState.fovEnabled = false;
+}
+
 void CameraOverride_GetState(CameraOverrideState &out) {
     std::lock_guard<std::mutex> _l(g_CameraOverrideMutex);
     out = g_CameraOverrideState;

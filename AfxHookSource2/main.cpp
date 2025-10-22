@@ -1092,6 +1092,9 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
             Rx = camOverride.ang[0];
             Ry = camOverride.ang[1];
             Rz = camOverride.ang[2];
+            if (camOverride.fovEnabled) {
+                Fov = camOverride.fov;
+            }
             originOrAnglesOverriden = true;
             didCameraOverride = true;
         } else if (camOverride.enabled) {

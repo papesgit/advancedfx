@@ -448,6 +448,27 @@ static bool g_CameraLockQPressed = false;
 static float g_ViewportSmoothLockHalftimeAngle = 0.0f;  // Angle halftime when camera lock is active
 static float g_CameraLockHalftimeTransition = 0.0f;     // Current transition progress (0=normal, 1=locked)
 static float g_CameraLockHalftimeTransitionSpeed = 1.0f; // Transition duration in seconds
+// Radar campath (Alt-drag on radar to draw a line, then click a player dot to pick Z/target)
+static bool         g_RadarCampathDragging = false;      // Alt+LMB drag in progress on radar
+static bool         g_RadarCampathHasLine = false;       // Finished drag, line defined (awaiting target)
+static bool         g_RadarCampathAwaitTarget = false;   // Waiting for player click to pick Z + look target
+static Radar::Vec2  g_RadarCampathUvStart = {0,0};       // Start UV in [0,1]
+static Radar::Vec2  g_RadarCampathUvEnd   = {0,0};       // End UV in [0,1]
+static float        g_RadarCampathWorldStart[3] = {0,0,0};
+static float        g_RadarCampathWorldEnd[3]   = {0,0,0};
+static int          g_RadarCampathTargetControllerIdx = -1; // Player to face during playback
+static bool         g_RadarCampathActive = false;        // Playback active
+static double       g_RadarCampathStartTime = 0.0;       // ImGui::GetTime() at start
+static float        g_RadarCampathDuration = 3.0f;       // Seconds from start to end
+static float        g_RadarCampathCurAng[3] = {0,0,0};   // Smoothed camera angles (pitch,yaw,roll)
+static float        g_RadarCampathAngleHalftime = 0.15f; // Halftime for angle smoothing
+static bool         g_RadarCampathDebugDraw = true;      // Draw line over radar while defined/active
+static Radar::Vec2  g_RadarCampathActiveUvStart = {0,0}; // UV of active path (for progress rendering)
+static Radar::Vec2  g_RadarCampathActiveUvEnd   = {0,0};
+static bool         g_RadarCampathHasLastTargetPos = false; // Keep last target position when player dies
+static float        g_RadarCampathLastTargetPos[3] = {0,0,0};
+static float        g_RadarCampathStartFov = 90.0f;     // FOV at path start
+static float        g_RadarCampathEndFov   = 90.0f;     // FOV at path end
 // ImGui per-draw opaque blend override for viewport image
 static ID3D11BlendState* g_ViewportOpaqueBlend = nullptr;
 static ID3D11DeviceContext* g_ImguiD3DContext = nullptr;
@@ -2886,6 +2907,103 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         // Update bird camera transitions
         advancedfx::overlay::BirdCamera_Update(io.DeltaTime, (float)g_MirvTime.curtime_get());
 
+        // Update radar campath camera override (if active)
+        if (g_RadarCampathActive && !advancedfx::overlay::BirdCamera_IsActive()) {
+            double now = ImGui::GetTime();
+            float t = (float)((now - g_RadarCampathStartTime) / (double)g_RadarCampathDuration);
+            if (t >= 1.0f) t = 1.0f;
+
+            // Linear position along world segment
+            float pos[3];
+            pos[0] = g_RadarCampathWorldStart[0] + (g_RadarCampathWorldEnd[0] - g_RadarCampathWorldStart[0]) * t;
+            pos[1] = g_RadarCampathWorldStart[1] + (g_RadarCampathWorldEnd[1] - g_RadarCampathWorldStart[1]) * t;
+            pos[2] = g_RadarCampathWorldStart[2] + (g_RadarCampathWorldEnd[2] - g_RadarCampathWorldStart[2]) * t;
+
+            // Desired angles: face selected player (if any); otherwise face line direction
+            float desired[3] = { g_RadarCampathCurAng[0], g_RadarCampathCurAng[1], 0.0f };
+            bool haveTarget = false;
+            if (g_RadarCampathTargetControllerIdx >= 0 && g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                if (auto* controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, g_RadarCampathTargetControllerIdx)) {
+                    if (controller->IsPlayerController()) {
+                        auto pawnHandle = controller->GetPlayerPawnHandle();
+                        if (pawnHandle.IsValid()) {
+                            int pawnIdx = pawnHandle.GetEntryIndex();
+                            if (auto* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIdx)) {
+                                if (pawn->IsPlayerPawn() && pawn->GetHealth() != 0) {
+                                    float tgt[3] = {0,0,0};
+                                    pawn->GetRenderEyeOrigin(tgt);
+                                    double dx = (double)tgt[0] - (double)pos[0];
+                                    double dy = (double)tgt[1] - (double)pos[1];
+                                    double dz = (double)tgt[2] - (double)pos[2];
+                                    double hdist = sqrt(dx*dx + dy*dy);
+                                    desired[1] = (float)(atan2(dy, dx) * (180.0 / 3.14159265359)); // yaw
+                                    desired[0] = (float)(atan2(-dz, hdist) * (180.0 / 3.14159265359)); // pitch
+                                    haveTarget = true;
+                                    // Update last-known target position for death fallback
+                                    g_RadarCampathHasLastTargetPos = true;
+                                    g_RadarCampathLastTargetPos[0] = tgt[0];
+                                    g_RadarCampathLastTargetPos[1] = tgt[1];
+                                    g_RadarCampathLastTargetPos[2] = tgt[2];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!haveTarget && g_RadarCampathHasLastTargetPos) {
+                double dx = (double)g_RadarCampathLastTargetPos[0] - (double)pos[0];
+                double dy = (double)g_RadarCampathLastTargetPos[1] - (double)pos[1];
+                double dz = (double)g_RadarCampathLastTargetPos[2] - (double)pos[2];
+                double hdist = sqrt(dx*dx + dy*dy);
+                desired[1] = (float)(atan2(dy, dx) * (180.0 / 3.14159265359));
+                desired[0] = (float)(atan2(-dz, hdist) * (180.0 / 3.14159265359));
+                haveTarget = true;
+            }
+            if (!haveTarget) {
+                // Fall back: face along the path direction
+                double dx = (double)(g_RadarCampathWorldEnd[0] - g_RadarCampathWorldStart[0]);
+                double dy = (double)(g_RadarCampathWorldEnd[1] - g_RadarCampathWorldStart[1]);
+                double dz = (double)(g_RadarCampathWorldEnd[2] - g_RadarCampathWorldStart[2]);
+                double hdist = sqrt(dx*dx + dy*dy);
+                desired[1] = (float)(atan2(dy, dx) * (180.0 / 3.14159265359));
+                desired[0] = (float)(atan2(-dz, hdist) * (180.0 / 3.14159265359));
+            }
+
+            // Halftime smoothing towards desired angles (like viewport smooth lock)
+            float dt = ImGui::GetIO().DeltaTime;
+            auto halfExp = [](float halftime, float dtv) -> double {
+                halftime = (halftime <= 0.0001f) ? 0.0001f : halftime;
+                return 1.0 - pow(0.5, (double)dtv / (double)halftime);
+            };
+            const double sfAngle = halfExp(g_RadarCampathAngleHalftime, dt);
+
+            auto AngleNormalize = [](double a)->double { while (a>180.0) a-=360.0; while (a<-180.0) a+=360.0; return a; };
+            auto AngleDelta = [&](double a, double b)->double { return AngleNormalize(a - b); };
+
+            g_RadarCampathCurAng[1] = (float)(g_RadarCampathCurAng[1] + AngleDelta(desired[1], g_RadarCampathCurAng[1]) * sfAngle);
+            g_RadarCampathCurAng[0] = (float)(g_RadarCampathCurAng[0] + AngleDelta(desired[0], g_RadarCampathCurAng[0]) * sfAngle);
+            g_RadarCampathCurAng[2] = 0.0f;
+
+            // Push to camera override
+            advancedfx::overlay::CameraOverride_SetPosition(pos);
+            advancedfx::overlay::CameraOverride_SetAngles(g_RadarCampathCurAng);
+            advancedfx::overlay::CameraOverride_SetEnabled(true);
+
+            // Animate FOV between configured start/end using CameraOverride
+            float fovNow = g_RadarCampathStartFov + (g_RadarCampathEndFov - g_RadarCampathStartFov) * t;
+            advancedfx::overlay::CameraOverride_SetFov(fovNow);
+
+            if (t >= 1.0f) {
+                // End of animation
+                g_RadarCampathActive = false;
+                g_RadarCampathHasLine = false; // clear line after run
+                g_RadarCampathAwaitTarget = false;
+                advancedfx::overlay::CameraOverride_SetEnabled(false);
+                // Clear FOV override
+                advancedfx::overlay::CameraOverride_ClearFov();
+            }
+        }
+
         // Check if bird camera needs spec command executed
         int specTargetIdx = advancedfx::overlay::BirdCamera_GetPendingSpecTarget();
         if (specTargetIdx >= 0) {
@@ -3298,6 +3416,69 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 drawList->AddText(font, fontSize, p0, IM_COL32(255,255,255,255), txt);
             }
 
+            // Alt+Left-drag on radar canvas: define campath (start/end in UV)
+            {
+                const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0; // Left Alt
+                const bool canvasHovered = ImGui::IsItemHovered();
+                const bool lmbClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+                const bool lmbReleased = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+
+                if (!g_RadarCampathDragging && altDown && canvasHovered && lmbClicked) {
+                    ImVec2 mp = ImGui::GetMousePos();
+                    float u = (mp.x - radarPos.x) / radarWidth;  if (u < 0) u = 0; if (u > 1) u = 1;
+                    float v = (mp.y - radarPos.y) / radarHeight; if (v < 0) v = 0; if (v > 1) v = 1;
+                    g_RadarCampathUvStart = {u, v};
+                    g_RadarCampathUvEnd   = {u, v};
+                    g_RadarCampathDragging = true;
+                    g_RadarCampathHasLine = false;
+                    g_RadarCampathAwaitTarget = false;
+                }
+                if (g_RadarCampathDragging) {
+                    ImVec2 mp = ImGui::GetMousePos();
+                    float u = (mp.x - radarPos.x) / radarWidth;  if (u < 0) u = 0; if (u > 1) u = 1;
+                    float v = (mp.y - radarPos.y) / radarHeight; if (v < 0) v = 0; if (v > 1) v = 1;
+                    g_RadarCampathUvEnd = {u, v};
+                    if (!altDown || lmbReleased) {
+                        g_RadarCampathDragging = false;
+                        g_RadarCampathHasLine = true;
+                        g_RadarCampathAwaitTarget = true; // wait for player z/target
+                    }
+                }
+
+                // Draw pending line during drag or after (while awaiting target)
+                if (g_RadarCampathDebugDraw && (g_RadarCampathDragging || g_RadarCampathHasLine)) {
+                    ImVec2 a = ImVec2(radarPos.x + g_RadarCampathUvStart.x * radarWidth,
+                                       radarPos.y + g_RadarCampathUvStart.y * radarHeight);
+                    ImVec2 b = ImVec2(radarPos.x + g_RadarCampathUvEnd.x   * radarWidth,
+                                       radarPos.y + g_RadarCampathUvEnd.y   * radarHeight);
+                    drawList->AddLine(a, b, IM_COL32(255, 200, 0, 200), 2.0f);
+                    drawList->AddCircleFilled(a, 4.0f, IM_COL32(255, 200, 0, 200));
+                    drawList->AddCircleFilled(b, 4.0f, IM_COL32(255, 200, 0, 200));
+                    if (g_RadarCampathAwaitTarget) {
+                        ImVec2 hint = ImVec2(radarPos.x + 6.0f, radarPos.y + 6.0f);
+                        drawList->AddText(hint, IM_COL32(255,255,255,230), "Click a player dot to set height/target");
+                    }
+                }
+
+                // Draw active line with progress (if any)
+                if (g_RadarCampathDebugDraw && g_RadarCampathActive) {
+                    ImVec2 a = ImVec2(radarPos.x + g_RadarCampathActiveUvStart.x * radarWidth,
+                                       radarPos.y + g_RadarCampathActiveUvStart.y * radarHeight);
+                    ImVec2 b = ImVec2(radarPos.x + g_RadarCampathActiveUvEnd.x   * radarWidth,
+                                       radarPos.y + g_RadarCampathActiveUvEnd.y   * radarHeight);
+                    // Base line (background)
+                    drawList->AddLine(a, b, IM_COL32(120, 120, 120, 200), 2.0f);
+                    // Progress
+                    double nowT = ImGui::GetTime();
+                    float tProg = (float)((nowT - g_RadarCampathStartTime) / (double)g_RadarCampathDuration);
+                    if (tProg < 0.0f) tProg = 0.0f; if (tProg > 1.0f) tProg = 1.0f;
+                    ImVec2 p = ImVec2(a.x + (b.x - a.x) * tProg, a.y + (b.y - a.y) * tProg);
+                    drawList->AddLine(a, p, IM_COL32(80, 200, 120, 230), 3.0f);
+                    drawList->AddCircleFilled(a, 3.0f, IM_COL32(80, 200, 120, 230));
+                    drawList->AddCircleFilled(b, 3.0f, IM_COL32(120, 120, 120, 200));
+                }
+            }
+
             // Handle Ctrl+Left-click on radar player dots (check after all drawing is done)
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
                 ImVec2 mousePos = ImGui::GetMousePos();
@@ -3355,6 +3536,154 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         }
                         break; // Only process one click
                     }
+                }
+            }
+
+            // If we have a defined campath line and await target: simple left click on a player dot
+            if (g_RadarCampathHasLine && g_RadarCampathAwaitTarget && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                ImVec2 mousePos = ImGui::GetMousePos();
+                float hitRadius = markerRadius + 4.0f;
+                for (const auto &p : players) {
+                    Radar::Vec2 uv = Radar::WorldToUV({ p.ent.pos.x, p.ent.pos.y, p.ent.pos.z }, g_RadarCtx.cfg);
+                    ImVec2 pt = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+                    float dx = mousePos.x - pt.x;
+                    float dy = mousePos.y - pt.y;
+                    if (dx*dx + dy*dy <= hitRadius*hitRadius) {
+                        // Resolve controller index from observer slot label mapping
+                        int controllerIdx = -1;
+                        if (p.slot >= 0) {
+                            int keyNum = (p.slot == 9) ? 0 : (p.slot + 1);
+                            auto bindIt = g_ObservingHotkeyBindings.find(keyNum);
+                            if (bindIt != g_ObservingHotkeyBindings.end()) controllerIdx = bindIt->second;
+                        }
+
+                        // Build world line from stored UV and current radar config
+                        auto uv2world = [&](const Radar::Vec2 &uv)->ImVec2{
+                            double x = g_RadarCtx.cfg.pos_x + (double)uv.x * g_RadarCtx.cfg.scale * 1024.0;
+                            double y = g_RadarCtx.cfg.pos_y + (double)uv.y * -g_RadarCtx.cfg.scale * 1024.0;
+                            return ImVec2((float)x,(float)y);
+                        };
+                        ImVec2 wA = uv2world(g_RadarCampathUvStart);
+                        ImVec2 wB = uv2world(g_RadarCampathUvEnd);
+
+                        float z = 0.0f;
+                        if (controllerIdx >= 0 && g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                            if (auto* controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, controllerIdx)) {
+                                if (controller->IsPlayerController()) {
+                                    auto pawnHandle = controller->GetPlayerPawnHandle();
+                                    if (pawnHandle.IsValid()) {
+                                        int pawnIdx = pawnHandle.GetEntryIndex();
+                                        if (auto* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIdx)) {
+                                            if (pawn->IsPlayerPawn()) {
+                                                float pos3[3] = {0,0,0};
+                                                pawn->GetRenderEyeOrigin(pos3);
+                                                z = pos3[2];
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        g_RadarCampathWorldStart[0] = wA.x; g_RadarCampathWorldStart[1] = wA.y; g_RadarCampathWorldStart[2] = z;
+                        g_RadarCampathWorldEnd[0]   = wB.x; g_RadarCampathWorldEnd[1]   = wB.y; g_RadarCampathWorldEnd[2]   = z;
+                        g_RadarCampathActiveUvStart = g_RadarCampathUvStart;
+                        g_RadarCampathActiveUvEnd   = g_RadarCampathUvEnd;
+                        g_RadarCampathTargetControllerIdx = controllerIdx;
+                        // Store last known target position
+                        g_RadarCampathHasLastTargetPos = true;
+                        {
+                            // Prefer eye origin if we resolved a controller; otherwise use radar entity position
+                            if (controllerIdx >= 0 && g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                                if (auto* controller2 = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, controllerIdx)) {
+                                    if (controller2->IsPlayerController()) {
+                                        auto ph = controller2->GetPlayerPawnHandle();
+                                        if (ph.IsValid()) {
+                                            int pi = ph.GetEntryIndex();
+                                            if (auto* pawn2 = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pi)) {
+                                                if (pawn2->IsPlayerPawn()) {
+                                                    float p3[3]; pawn2->GetRenderEyeOrigin(p3);
+                                                    g_RadarCampathLastTargetPos[0] = p3[0];
+                                                    g_RadarCampathLastTargetPos[1] = p3[1];
+                                                    g_RadarCampathLastTargetPos[2] = p3[2];
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                g_RadarCampathLastTargetPos[0] = p.ent.pos.x;
+                                g_RadarCampathLastTargetPos[1] = p.ent.pos.y;
+                                g_RadarCampathLastTargetPos[2] = p.ent.pos.z;
+                            }
+                        }
+
+                        // Initialize current angles to look at target from start
+                        {
+                            // Prefer last-known target eye position (set above), otherwise fall back to entity pos
+                            double tx = (double)g_RadarCampathLastTargetPos[0];
+                            double ty = (double)g_RadarCampathLastTargetPos[1];
+                            double tz = (double)g_RadarCampathLastTargetPos[2];
+                            if (!g_RadarCampathHasLastTargetPos) {
+                                tx = (double)p.ent.pos.x; ty = (double)p.ent.pos.y; tz = (double)p.ent.pos.z;
+                            }
+                            double dx2 = tx - (double)g_RadarCampathWorldStart[0];
+                            double dy2 = ty - (double)g_RadarCampathWorldStart[1];
+                            double dz2 = tz - (double)g_RadarCampathWorldStart[2];
+                            double hdist = sqrt(dx2*dx2 + dy2*dy2);
+                            double yawDeg = atan2(dy2, dx2) * (180.0 / 3.14159265359);
+                            double pitchDeg = atan2(-dz2, hdist) * (180.0 / 3.14159265359);
+                            g_RadarCampathCurAng[0] = (float)pitchDeg;
+                            g_RadarCampathCurAng[1] = (float)yawDeg;
+                            g_RadarCampathCurAng[2] = 0.0f;
+                        }
+
+                        // Arm playback
+                        g_RadarCampathActive = true;
+                        g_RadarCampathStartTime = ImGui::GetTime();
+                        g_RadarCampathAwaitTarget = false;
+                        g_RadarCampathDragging = false;
+                        g_RadarCampathHasLine = false;
+                        Afx_ExecClientCmd("spec_mode 4");
+                        break;
+                    }
+                }
+            }
+
+            // While campath is active, allow re-targeting by clicking a player dot (no modifiers)
+            if (g_RadarCampathActive && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) {
+                const bool altDown2 = (GetKeyState(VK_MENU) & 0x8000) != 0; // ignore Alt+click (reserved for drawing)
+                if (!altDown2) {
+                    ImVec2 mousePos = ImGui::GetMousePos();
+                    float hitRadius = markerRadius + 4.0f;
+                    for (const auto &p : players) {
+                        Radar::Vec2 uv = Radar::WorldToUV({ p.ent.pos.x, p.ent.pos.y, p.ent.pos.z }, g_RadarCtx.cfg);
+                        ImVec2 pt = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+                        float dx = mousePos.x - pt.x;
+                        float dy = mousePos.y - pt.y;
+                        if (dx*dx + dy*dy <= hitRadius*hitRadius) {
+                            int controllerIdx = -1;
+                            if (p.slot >= 0) {
+                                int keyNum = (p.slot == 9) ? 0 : (p.slot + 1);
+                                auto bindIt = g_ObservingHotkeyBindings.find(keyNum);
+                                if (bindIt != g_ObservingHotkeyBindings.end()) controllerIdx = bindIt->second;
+                            }
+                            g_RadarCampathTargetControllerIdx = controllerIdx;
+                            // Update last-known target position now
+                            g_RadarCampathHasLastTargetPos = true;
+                            g_RadarCampathLastTargetPos[0] = p.ent.pos.x;
+                            g_RadarCampathLastTargetPos[1] = p.ent.pos.y;
+                            g_RadarCampathLastTargetPos[2] = p.ent.pos.z;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Cancel pending line with right-click or Escape
+            if (g_RadarCampathHasLine && g_RadarCampathAwaitTarget) {
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                    g_RadarCampathDragging = false; g_RadarCampathHasLine = false; g_RadarCampathAwaitTarget = false;
                 }
             }
         } else {
@@ -4018,6 +4347,15 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             // ImGui::SameLine();
             // if (ImGui::SmallButton("Reset##radar_ui")) { g_RadarUiPosX = 50.0f; g_RadarUiPosY = 50.0f; g_RadarUiSize = 300.0f; }
             ImGui::SliderFloat("Dotscale", &g_RadarDotScale, 0.1f, 2.0f, "%.1f px");
+            ImGui::SeparatorText("Campath");
+            ImGui::SetNextItemWidth(200.0f);
+            ImGui::SliderFloat("Duration (s)", &g_RadarCampathDuration, 0.25f, 30.0f, "%.2f");
+            ImGui::SetNextItemWidth(200.0f);
+            ImGui::SliderFloat("Angle halftime (s)", &g_RadarCampathAngleHalftime, 0.00f, 2.00f, "%.2f");
+            ImGui::SetNextItemWidth(200.0f);
+            ImGui::SliderFloat("Start FOV", &g_RadarCampathStartFov, 1.0f, 179.0f, "%.0f");
+            ImGui::SetNextItemWidth(200.0f);
+            ImGui::SliderFloat("End FOV", &g_RadarCampathEndFov, 1.0f, 179.0f, "%.0f");
             ImGui::PopID();
         }
         ImGui::End();
@@ -4821,6 +5159,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             if (!camera.camPathFile.empty()) {
                                 std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_input end; mirv_campath select all; mirv_campath edit start";
                                 Afx_ExecClientCmd(cmd.c_str());
+                                g_RadarCampathActive = false;
                                 advancedfx::Message("Overlay: [Group '%s'] Loading camera '%s' (%s mode, idx=%d)\n",
                                                   group.name.c_str(), camera.name.c_str(),
                                                   modeLabels[(int)group.playMode], camIdx);
@@ -5107,6 +5446,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     if (dist2 <= clickThreshold * clickThreshold) {
                     std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_input end; mirv_campath select all; mirv_campath edit start";
                     Afx_ExecClientCmd(cmd.c_str());
+                    g_RadarCampathActive = false;
                     advancedfx::Message("Overlay: Loading campath '%s' from camera '%s'\n", camera.camPathFile.c_str(), camera.name.c_str());
                     g_ActiveCameraCampathPath = camera.camPathFile;
                     }
@@ -5380,6 +5720,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 if (dist2 <= clickThreshold * clickThreshold) {
                     std::string cmd = "mirv_campath clear; mirv_campath load \"" + camera.camPathFile + "\"; mirv_campath enabled 1; spec_mode 4; mirv_input end; mirv_campath select all; mirv_campath edit start";
                     Afx_ExecClientCmd(cmd.c_str());
+                    g_RadarCampathActive = false;
                     advancedfx::Message("Overlay: [Group View] Loading camera '%s'\n", camera.name.c_str());
                     g_ActiveCameraCampathPath = camera.camPathFile;
                 }
@@ -5758,6 +6099,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             }
                             char cmd[128];
                             _snprintf_s(cmd, _TRUNCATE, "spec_mode 2; spec_player %d; mirv_campath enabled 0; mirv_input end", toIdx);
+                            g_RadarCampathActive = false;
                             Afx_ExecClientCmd(cmd);
                         }
                     }
@@ -7804,6 +8146,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         char cmd[128];
                         _snprintf_s(cmd, _TRUNCATE, "spec_mode 2; spec_player %d; mirv_campath enabled 0; mirv_input end", controllerIndex);
                         Afx_ExecClientCmd(cmd);
+                        g_RadarCampathActive = false;
                         BirdCamera_Stop();
                         //advancedfx::Message("Overlay: Executing %s\n", cmd);
                     }
