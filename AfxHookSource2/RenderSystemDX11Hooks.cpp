@@ -1116,6 +1116,7 @@ private:
 
 
 IDXGISwapChain * g_pSwapChain = nullptr;
+IDXGISwapChain * g_pMainSwapChain = nullptr; // persistent handle to the game's main swapchain
 ID3D11Device * g_pDevice = nullptr;
 ID3D11DeviceContext * g_pImmediateContext = nullptr;
 ID3D11DeviceContext * g_pOtherContext = nullptr;
@@ -1183,10 +1184,10 @@ bool RenderSystemDX11_GetPreviewSourceTexture(ID3D11Texture2D** outTex)
         }
     }
 
-    // 2) Fallback to current swapchain backbuffer (post-tonemap), good for menus and simple scenes.
-    if (g_pSwapChain) {
+    // 2) Fallback to current main swapchain backbuffer (post-tonemap), good for menus and simple scenes.
+    if (g_pMainSwapChain) {
         ID3D11Texture2D* back = nullptr;
-        if (SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&back)) && back) {
+        if (SUCCEEDED(g_pMainSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&back)) && back) {
             *outTex = back; // AddRef'd by GetBuffer
             return true;
         }
@@ -1355,18 +1356,18 @@ HRESULT STDMETHODCALLTYPE New_CreateRenderTargetView(  ID3D11Device * This,
     
     HRESULT result = g_Old_CreateRenderTargetView(This, pResource, pDesc, ppRTView);
 
-    if (SUCCEEDED(result) && ppRTView && *ppRTView && g_pSwapChain) {
+    if (SUCCEEDED(result) && ppRTView && *ppRTView && g_pMainSwapChain) {
         // Avoid backbuffer probing during resize/quarantine to not disturb engine transitions.
         if (g_OverlayResizePending.load(std::memory_order_relaxed) || g_OverlayQuarantineFrames.load(std::memory_order_relaxed) > 0)
             return result;
         // Ensure the cached swapchain belongs to this device before querying its backbuffer.
         ID3D11Device* scDev = nullptr;
-        if (FAILED(g_pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&scDev))) scDev = nullptr;
+        if (FAILED(g_pMainSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&scDev))) scDev = nullptr;
         bool sameDevice = (scDev == This);
         if (scDev) scDev->Release();
 
         ID3D11Texture2D * pTexture = nullptr;
-        HRESULT result2 = sameDevice ? g_pSwapChain->GetBuffer(0,__uuidof(ID3D11Texture2D), (void**)&pTexture) : E_FAIL;
+        HRESULT result2 = sameDevice ? g_pMainSwapChain->GetBuffer(0,__uuidof(ID3D11Texture2D), (void**)&pTexture) : E_FAIL;
         if(SUCCEEDED(result2)) {
             if(pResource == pTexture/* && (g_pDevice == nullptr || This != g_pDevice)*/) {
                 if(g_pDevice) {
@@ -1916,8 +1917,12 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
         return g_OldPresent(This, SyncInterval, Flags);
 
     g_bInOwnDraw = true;
-    // Always track the latest swapchain instance being presented.
-    g_pSwapChain = reinterpret_cast<IDXGISwapChain*>(This);
+    // Track the main swapchain only (platform windows were filtered above).
+    IDXGISwapChain* sc_present = reinterpret_cast<IDXGISwapChain*>(This);
+    if (g_pMainSwapChain == nullptr)
+        g_pMainSwapChain = sc_present;
+    // Keep legacy alias in sync for code expecting g_pSwapChain to point to main.
+    g_pSwapChain = g_pMainSwapChain;
 
     // One-time present info logging to aid diagnostics
     {
@@ -1929,9 +1934,9 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
             s_prevSync = SyncInterval;
             s_prevFlags = Flags;
             advancedfx::Message("Present: SyncInterval=%u Flags=0x%X\n", SyncInterval, Flags);
-            if (g_pSwapChain) {
+            if (g_pMainSwapChain) {
                 DXGI_SWAP_CHAIN_DESC d = {};
-                if (SUCCEEDED(g_pSwapChain->GetDesc(&d))) {
+                if (SUCCEEDED(g_pMainSwapChain->GetDesc(&d))) {
                     advancedfx::Message("SwapDesc: BufferCount=%u SwapEffect=%u Flags=0x%X\n", d.BufferCount, (unsigned)d.SwapEffect, d.Flags);
                 }
             }
@@ -1967,7 +1972,7 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
         {
             IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
             DXGI_SWAP_CHAIN_DESC tmp = {};
-            if (sc && SUCCEEDED(sc->GetDesc(&tmp))) {
+            if (sc && sc == g_pMainSwapChain && SUCCEEDED(sc->GetDesc(&tmp))) {
                 auto router = overlay.GetInputRouter();
                 void* cur = router ? router->GetAttachedHwnd() : nullptr;
                 if (router && tmp.OutputWindow && cur && cur != tmp.OutputWindow) {
@@ -1988,7 +1993,7 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
         }
         if (!overlay.HasRenderer()) {
             // Try to lazily initialize the overlay renderer here as well using the actual swapchain being presented.
-            IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+            IDXGISwapChain* sc = g_pMainSwapChain ? g_pMainSwapChain : reinterpret_cast<IDXGISwapChain*>(This);
             if (sc) {
                 ID3D11Device* pDev = nullptr;
                 ID3D11DeviceContext* pCtx = nullptr;
@@ -2031,6 +2036,13 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
 	g_ReShadeAdvancedfx.ResetHasRendered();
 
     g_DepthCompositor.OnPresent();
+
+    // After the app's main Present() completed, update and present ImGui platform windows.
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible())
+            overlay.RenderPlatformWindows();
+    }
 
     // Detect transitional swapchain states (legacy DISCARD + single buffer) and enter a short quarantine.
     {
@@ -2102,7 +2114,7 @@ HRESULT STDMETHODCALLTYPE New_ResizeBuffers( void * This,
             /* [in] */ DXGI_FORMAT NewFormat,
             /* [in] */ UINT SwapChainFlags) {
     IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
-    const bool is_main_swapchain = (sc == g_pSwapChain);
+    const bool is_main_swapchain = (sc == g_pMainSwapChain);
 
     if (is_main_swapchain) {
         // Pre-release any overlay resources referencing the main backbuffer
@@ -2147,7 +2159,11 @@ HRESULT STDMETHODCALLTYPE New_CreateSwapChain( void * This,
     HRESULT result = g_OldCreateSwapChain(This, pDevice, pDesc, ppSwapChain);
 
     if(SUCCEEDED(result) && ppSwapChain && *ppSwapChain) {
-        g_pSwapChain = *ppSwapChain;
+        // Cache main swapchain once; do not overwrite with auxiliary swapchains (e.g., ImGui platform windows)
+        if (g_pMainSwapChain == nullptr)
+            g_pMainSwapChain = *ppSwapChain;
+        // Keep legacy alias in sync for code expecting g_pSwapChain to point to main.
+        g_pSwapChain = g_pMainSwapChain;
         if(nullptr == g_OldPresent) {
             void **vtable = *(void***)*ppSwapChain;
             g_OldPresent = (Present_t)vtable[8];
@@ -2163,16 +2179,16 @@ HRESULT STDMETHODCALLTYPE New_CreateSwapChain( void * This,
         // Initialize overlay DX11 renderer for the game's main swapchain (first one only).
         // Subsequent swap chains (e.g., ImGui platform windows) should not reinitialize the overlay.
         static bool s_overlayInitialized = false;
-        if (g_pSwapChain && !s_overlayInitialized) {
+        if (g_pMainSwapChain && !s_overlayInitialized) {
             auto &overlay = advancedfx::overlay::Overlay::Get();
             ID3D11Device* pDev = nullptr;
             ID3D11DeviceContext* pCtx = nullptr;
-            if (SUCCEEDED(g_pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&pDev)) && pDev) {
+            if (SUCCEEDED(g_pMainSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&pDev)) && pDev) {
                 pDev->GetImmediateContext(&pCtx);
                 DXGI_SWAP_CHAIN_DESC desc2 = {};
-                if (pCtx && SUCCEEDED(g_pSwapChain->GetDesc(&desc2))) {
+                if (pCtx && SUCCEEDED(g_pMainSwapChain->GetDesc(&desc2))) {
                     overlay.SetRenderer(std::unique_ptr<advancedfx::overlay::IOverlayRenderer>(
-                        new advancedfx::overlay::OverlayDx11(pDev, pCtx, g_pSwapChain, desc2.OutputWindow))
+                        new advancedfx::overlay::OverlayDx11(pDev, pCtx, g_pMainSwapChain, desc2.OutputWindow))
                     );
                     s_overlayInitialized = true;
                 }

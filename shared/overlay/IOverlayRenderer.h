@@ -21,6 +21,11 @@ public:
     // Render any pending ImGui draw data to the current backbuffer/RT.
     virtual void Render() = 0;
 
+    // Render Dear ImGui platform windows (multi-viewport) if supported.
+    // Default implementation is a no-op; backends that support multi-viewport
+    // may override this to call ImGui::UpdatePlatformWindows()/RenderPlatformWindowsDefault().
+    virtual void RenderPlatformWindows() {}
+
     // End the frame (submit if needed).
     virtual void EndFrame() = 0;
 
@@ -31,4 +36,3 @@ public:
 
 } // namespace overlay
 } // namespace advancedfx
-

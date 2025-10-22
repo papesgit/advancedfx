@@ -63,6 +63,7 @@
 #include <set>
 #include <thread>
 #include <limits.h>
+#include <atomic>
 
 // cs-hud radar integration
 #include "radar/Radar.h"
@@ -75,6 +76,10 @@
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+// Cross-TU flags from DX11 hooks for safe timing
+extern std::atomic<bool> g_OverlayResizePending;
+extern std::atomic<int>  g_OverlayQuarantineFrames;
 
 // Recording/Take folder accessor from streams module
 extern const wchar_t* AfxStreams_GetTakeDir();
@@ -343,6 +348,7 @@ static bool g_cvarsUnhidden = false;
 static bool g_windowActive = true;
 // Used to drop the first noisy mouse event right after we re-activate
 static bool g_dropFirstMouseAfterActivate = false;
+static int  g_SkipPlatformWindowsFrames = 0; // throttle platform window presents around activation to avoid driver stalls
 
 static std::mutex g_imguiInputMutex;
 // Queue Win32 messages coming from WndProc to feed ImGui on the render thread.
@@ -376,6 +382,7 @@ static bool   g_WorkspaceLayoutInitialized = false; // true once layout has been
 static bool   g_WorkspaceOpen = true;               // visibility of the workspace window
 static ImGuiID g_WorkspaceDockspaceId = 0;          // ID of the DockSpace inside the workspace window
 static ImGuiID g_WorkspaceViewportId = 0;           // Platform viewport ID hosting the workspace window
+static HWND   g_WorkspaceWindowHandle = nullptr;    // Cached workspace window handle (updated during safe frame points)
 
 // Separate .ini files for normal and workspace modes
 static std::string g_IniFileNormal = "imgui.ini";
@@ -433,6 +440,13 @@ static int g_GetSmoothIndex = -1;
 static float g_GetSmoothTime = 0.0f;
 static bool g_GetSmoothFirstFrame = false;
 static float g_GetSmoothFirstPos[3] = {0, 0, 0};
+// Camera lock to player
+static bool g_CameraLockActive = false;
+static int g_CameraLockTargetIndex = -1;
+static bool g_CameraLockQPressed = false;
+static float g_ViewportSmoothLockHalftimeAngle = 0.0f;  // Angle halftime when camera lock is active
+static float g_CameraLockHalftimeTransition = 0.0f;     // Current transition progress (0=normal, 1=locked)
+static float g_CameraLockHalftimeTransitionSpeed = 1.0f; // Transition duration in seconds
 // ImGui per-draw opaque blend override for viewport image
 static ID3D11BlendState* g_ViewportOpaqueBlend = nullptr;
 static ID3D11DeviceContext* g_ImguiD3DContext = nullptr;
@@ -505,6 +519,10 @@ static std::string g_MkParseError;
 static char g_MkParserPath[1024] = "x64/DemoParser.exe";  // defaults to PATH lookup
 static char g_MkDemoPath[2048] = "";
 static std::thread g_MkWorker;
+
+// Throttle platform window presents when not focused (1 = no throttle)
+static int g_PlatformWindowsBackgroundDivisor = 1;
+static unsigned int g_PlatformWindowsFrameCounter = 0;
 static std::mutex g_MkMutex; // protects g_MkEvents / g_MkParseError while worker updates
 
 // Context menu target (you already added this var earlier)
@@ -643,6 +661,85 @@ static CEntityInstance* FindEntityByHandle(int handle, int* outIndex = nullptr)
         }
     }
     return nullptr;
+}
+
+// Normalize angle to [-180, 180] range
+static double NormalizeAngle180(double angle)
+{
+    while (angle > 180.0) angle -= 360.0;
+    while (angle < -180.0) angle += 360.0;
+    return angle;
+}
+
+// Calculate shortest angular distance from current to target
+// Returns value in [-180, 180] representing the delta to add to current
+static double AngleDelta(double target, double current)
+{
+    double diff = target - current;
+    return NormalizeAngle180(diff);
+}
+
+// Find closest player pawn to camera's center view
+static int FindClosestPlayerToCameraCenter(double camX, double camY, double camZ, double camPitch, double camYaw)
+{
+    if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) return -1;
+    const int highest = GetHighestEntityIndex();
+    if (highest < 0) return -1;
+
+    // Get camera forward vector
+    double forward[3], right[3], up[3];
+    Afx::Math::MakeVectors(0.0, camPitch, camYaw, forward, right, up);
+
+    int closestIdx = -1;
+    double smallestAngle = 999999.0;
+
+    for (int idx = 0; idx <= highest; ++idx) {
+        auto* ctrl = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, idx));
+        if (!ctrl || !ctrl->IsPlayerController()) continue;
+
+        if (SafeGetObserverMode(ctrl) != 0) continue;
+        const int team = SafeGetTeam(ctrl);
+        if (!(team == 2 || team == 3)) continue;
+
+        auto pawnHandle = ctrl->GetPlayerPawnHandle();
+        if (!pawnHandle.IsValid()) continue;
+
+        int pawnIdx = pawnHandle.GetEntryIndex();
+        auto* pawn = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, pawnIdx));
+        if (!pawn || !pawn->IsPlayerPawn()) continue;
+
+        int health = pawn->GetHealth();
+        if (health = 0) continue;
+
+        float playerPos[3] = {0, 0, 0};
+        pawn->GetRenderEyeOrigin(playerPos);
+
+        // Direction from camera to player
+        double toPlayer[3] = {
+            playerPos[0] - camX,
+            playerPos[1] - camY,
+            playerPos[2] - camZ
+        };
+
+        // Normalize
+        double len = sqrt(toPlayer[0]*toPlayer[0] + toPlayer[1]*toPlayer[1] + toPlayer[2]*toPlayer[2]);
+        if (len < 0.001) continue;
+        toPlayer[0] /= len;
+        toPlayer[1] /= len;
+        toPlayer[2] /= len;
+
+        // Dot product = cos(angle)
+        double dot = forward[0]*toPlayer[0] + forward[1]*toPlayer[1] + forward[2]*toPlayer[2];
+        double angle = acos(std::clamp(dot, -1.0, 1.0));
+
+        // Only consider players in front of camera
+        if (dot > 0.0 && angle < smallestAngle) {
+            smallestAngle = angle;
+            closestIdx = pawnIdx;
+        }
+    }
+
+    return closestIdx;
 }
 
 // Attachment name/index cache for current selection
@@ -2286,6 +2383,23 @@ bool OverlayDx11::Initialize() {
     if (!ImGui_ImplDX11_Init(m_Device, m_Context)) return false;
     advancedfx::Message("Overlay: renderer=DX11\n");
 
+    // Configure Dear ImGui DX11 backend to create FLIP model swapchains for platform windows
+    // to avoid driver/engine stalls when mixing with the game's FLIP swapchain.
+    // Function is intentionally not declared in header; forward declare here.
+    {
+        extern void ImGui_ImplDX11_SetSwapChainDescs(const DXGI_SWAP_CHAIN_DESC* desc_templates, int desc_templates_count);
+        DXGI_SWAP_CHAIN_DESC sd = {};
+        sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sd.SampleDesc.Count = 1;
+        sd.SampleDesc.Quality = 0;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount = 2; // flip model requires >= 2
+        sd.Windowed = TRUE;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; // prefer FLIP for compatibility with modern engines
+        sd.Flags = 0; // could OR DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING if desired and supported
+        ImGui_ImplDX11_SetSwapChainDescs(&sd, 1);
+    }
+
     // Provide icon device + directory for HUD (resources/overlay)
     {
         Hud::SetIconDevice((void*)m_Device);
@@ -2364,6 +2478,8 @@ bool OverlayDx11::Initialize() {
                 if (msg == WM_ACTIVATEAPP) {
                     g_windowActive = (wparam != 0);
                     if (g_windowActive) g_dropFirstMouseAfterActivate = true;
+                    // Throttle platform window presents for a couple frames around activation changes.
+                    g_SkipPlatformWindowsFrames = 2;
                     // Let the game also see this; don't consume here
                     // (no return; we keep processing as usual)
                 }
@@ -2388,7 +2504,7 @@ bool OverlayDx11::Initialize() {
                     return false; // pass through, don't feed ImGui this one
                 }
                 // If overlay is visible, force an arrow cursor on WM_SETCURSOR to avoid invisible game cursor
-                if (Overlay::Get().IsVisible() && msg == WM_SETCURSOR) {
+                if (Overlay::Get().IsVisible() && msg == WM_SETCURSOR && !g_GroupIntoWorkspace) {
                     // Only force arrow when ImGui actually wants to capture the mouse
                     // to avoid fighting overlay's own RMB-preview control (which hides cursor).
                     if (ImGui::GetIO().WantCaptureMouse && !Overlay::Get().IsRmbPassthroughActive()) {
@@ -2428,7 +2544,7 @@ bool OverlayDx11::Initialize() {
 
                 bool overlayVisible = Overlay::Get().IsVisible();
                 bool wantCaptureMouse = ImGui::GetIO().WantCaptureMouse;
-                bool passThrough = overlayVisible && s_rmbDown && !wantCaptureMouse;
+                bool passThrough = overlayVisible && s_rmbDown && !wantCaptureMouse && !g_GroupIntoWorkspace;
                 static bool s_prevPassThrough = false;
                 Overlay::Get().SetRmbPassthroughActive(passThrough);
                 // If RMB passthrough just ended, make sure to release any cursor confinement
@@ -2586,14 +2702,16 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         ImGuiIO& io0 = ImGui::GetIO();
         if (io0.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
             MSG msg;
+            int msgCount = 0;
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                msgCount++;
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }
     }
 
-    // Serialize with WndProc touching ImGui’s input/event queue
+    // Serialize with WndProc touching ImGui's input/event queue
     std::lock_guard<std::mutex> lock(g_imguiInputMutex);
 
     ImGuiIO& io = ImGui::GetIO();
@@ -2617,7 +2735,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
         // NEW: keep the workspace as its own platform window from frame 1
         ImGuiWindowClass wc{};
-        wc.ViewportFlagsOverrideSet   = ImGuiViewportFlags_NoAutoMerge;      // per-window "no merge"
+        wc.ViewportFlagsOverrideSet   = ImGuiViewportFlags_NoAutoMerge
+                                      | ImGuiViewportFlags_NoRendererClear; // avoid full clear on platform window
         // Optional extras:
         // wc.ViewportFlagsOverrideSet |= ImGuiViewportFlags_NoTaskBarIcon;   // no taskbar icon
         // wc.ViewportFlagsOverrideSet |= ImGuiViewportFlags_NoDecoration;    // no OS decorations
@@ -2628,8 +2747,10 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         // ImGui::SetNextWindowSize(ImVec2(1000, 700), ImGuiCond_Appearing);
 
         if (ImGui::Begin("HLAE Workspace", &g_WorkspaceOpen, ws_flags)) {
-            if (ImGuiViewport* vp = ImGui::GetWindowViewport())
+            if (ImGuiViewport* vp = ImGui::GetWindowViewport()) {
                 g_WorkspaceViewportId = vp->ID;
+                g_WorkspaceWindowHandle = (HWND)vp->PlatformHandleRaw;
+            }
 
             g_WorkspaceDockspaceId = ImGui::GetID("HLAE_WorkspaceDockSpace");
             ImGui::DockSpace(g_WorkspaceDockspaceId, ImVec2(0, 0), ImGuiDockNodeFlags_None);
@@ -2685,6 +2806,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
     } else {
         g_WorkspaceViewportId = 0;
+        g_WorkspaceWindowHandle = nullptr;
     }
 
     {
@@ -3831,6 +3953,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 ImGui::BeginDisabled(g_GroupIntoWorkspace);
                 bool prev = g_GroupIntoWorkspace;
                 if (ImGui::Checkbox("External workspace mode", &g_GroupIntoWorkspace)) {
+                    Overlay::Get().SetWorkspaceEnabled(g_GroupIntoWorkspace);
                     if (g_GroupIntoWorkspace && !prev) {
                         // Save current .ini before switching
                         ImGui::SaveIniSettingsToDisk(g_IniFileNormal.c_str());
@@ -3868,13 +3991,13 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         ImGui::Begin("Radar Settings", &g_ShowRadarSettings);
         {
             // Position and size controls
-            ImGui::TextUnformatted("Radar Placement");
+            // ImGui::TextUnformatted("Radar Placement");
             ImGui::PushID("radar_placement");
-            ImGui::SliderFloat("Pos X", &g_RadarUiPosX, 0.0f, ImGui::GetIO().DisplaySize.x, "%.0f");
-            ImGui::SliderFloat("Pos Y", &g_RadarUiPosY, 0.0f, ImGui::GetIO().DisplaySize.y, "%.0f");
-            ImGui::SliderFloat("Size", &g_RadarUiSize, 100.0f, 1600.0f, "%.0f px");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Reset##radar_ui")) { g_RadarUiPosX = 50.0f; g_RadarUiPosY = 50.0f; g_RadarUiSize = 300.0f; }
+            // ImGui::SliderFloat("Pos X", &g_RadarUiPosX, 0.0f, ImGui::GetIO().DisplaySize.x, "%.0f");
+            // ImGui::SliderFloat("Pos Y", &g_RadarUiPosY, 0.0f, ImGui::GetIO().DisplaySize.y, "%.0f");
+            // ImGui::SliderFloat("Size", &g_RadarUiSize, 100.0f, 1600.0f, "%.0f px");
+            // ImGui::SameLine();
+            // if (ImGui::SmallButton("Reset##radar_ui")) { g_RadarUiPosX = 50.0f; g_RadarUiPosY = 50.0f; g_RadarUiSize = 300.0f; }
             ImGui::SliderFloat("Dotscale", &g_RadarDotScale, 0.1f, 2.0f, "%.1f px");
             ImGui::PopID();
         }
@@ -4424,6 +4547,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
 
         // Add Profile Modal
+        if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+            ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
         if (ImGui::BeginPopupModal("Add Profile##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::Text("Enter profile name:");
             ImGui::SetNextItemWidth(300.0f);
@@ -4451,6 +4576,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
 
         // Add Camera Modal
+        if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+            ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
         if (ImGui::BeginPopupModal("Add Camera##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::Text("Enter camera name:");
             ImGui::SetNextItemWidth(300.0f);
@@ -4530,6 +4657,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
                 // Add Group Modal
                 static char groupNameInput[256] = {0};
+                if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+                    ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
                 if (ImGui::BeginPopupModal("Add Group##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                     ImGui::Text("Enter group name:");
                     ImGui::SetNextItemWidth(200.0f);
@@ -5884,6 +6013,28 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                                 const bool spaceHeld = (GetKeyState(VK_SPACE) & 0x8000) != 0;
                                 const bool ctrlHeld = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
+                                // Q key: Toggle camera lock to player
+                                const bool qHeld = (GetKeyState('Q') & 0x8000) != 0;
+                                if (qHeld && !g_CameraLockQPressed) {
+                                    g_CameraLockQPressed = true;
+                                    if (g_CameraLockActive) {
+                                        // Disable lock
+                                        g_CameraLockActive = false;
+                                        g_CameraLockTargetIndex = -1;
+                                    } else {
+                                        // Enable lock - find closest player
+                                        int targetIdx = FindClosestPlayerToCameraCenter(
+                                            s_smoothCurrentX, s_smoothCurrentY, s_smoothCurrentZ,
+                                            s_smoothCurrentRx, s_smoothCurrentRy);
+                                        if (targetIdx != -1) {
+                                            g_CameraLockActive = true;
+                                            g_CameraLockTargetIndex = targetIdx;
+                                        }
+                                    }
+                                } else if (!qHeld) {
+                                    g_CameraLockQPressed = false;
+                                }
+
                                 // Handle scroll wheel
                                 if (wheel != 0.0f) {
                                     int clicks = (wheel > 0.f) ? (int)floorf(wheel + 0.0001f)
@@ -5906,9 +6057,50 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                                     }
                                 }
 
-                                // Update target angles from mouse movement (always allow mouse look)
-                                s_smoothTargetRy += dYaw;
-                                s_smoothTargetRx += dPitch;
+                                // Update target angles
+                                if (g_CameraLockActive) {
+                                    // Camera lock active - calculate angles to look at player
+                                    if (g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+                                        auto* pawn = static_cast<CEntityInstance*>(g_GetEntityFromIndex(*g_pEntityList, g_CameraLockTargetIndex));
+                                        if (pawn && pawn->IsPlayerPawn() && pawn->GetHealth() != 0) {
+                                            float playerPos[3] = {0, 0, 0};
+                                            pawn->GetRenderEyeOrigin(playerPos);
+
+                                            // Calculate from where camera ACTUALLY is (not where it's going)
+                                            double dx = playerPos[0] - s_smoothCurrentX;
+                                            double dy = playerPos[1] - s_smoothCurrentY;
+                                            double dz = playerPos[2] - s_smoothCurrentZ;
+
+                                            /* Player Origin Alternative:
+                                            float playerPosx = 0;
+                                            float playerPosy = 0;
+                                            float playerPosz = 0;
+                                            pawn->GetOrigin(playerPosx, playerPosy, playerPosz);
+                                            // Calculate from where camera ACTUALLY is (not where it's going)
+                                            double dx = playerPosx - s_smoothCurrentX;
+                                            double dy = playerPosy - s_smoothCurrentY;
+                                            double dz = playerPosz - s_smoothCurrentZ +50;
+                                            */
+
+                                            // Calculate desired angles
+                                            double horizontalDist = sqrt(dx*dx + dy*dy);
+                                            double desiredYaw = atan2(dy, dx) * (180.0 / 3.14159265359);
+                                            double desiredPitch = atan2(-dz, horizontalDist) * (180.0 / 3.14159265359);
+
+                                            // Add the shortest angular delta to avoid 360 spins
+                                            s_smoothTargetRy += AngleDelta(desiredYaw, s_smoothTargetRy);
+                                            s_smoothTargetRx += AngleDelta(desiredPitch, s_smoothTargetRx);
+                                        } else {
+                                            // Player no longer valid
+                                            g_CameraLockActive = false;
+                                            g_CameraLockTargetIndex = -1;
+                                        }
+                                    }
+                                } else {
+                                    // Normal mouse look
+                                    s_smoothTargetRy += dYaw;
+                                    s_smoothTargetRx += dPitch;
+                                }
 
                                 // WASD + R/F movement (camera space)
                                 double moveF = 0.0, moveR = 0.0, moveU = 0.0;
@@ -6047,9 +6239,22 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             if (camEnabled) {
                                 const float dt = ImGui::GetIO().DeltaTime;
 
+                                // Camera lock halftime transition
+                                float targetTransition = g_CameraLockActive ? 1.0f : 0.0f;
+                                float transitionSpeed = 1.0f / g_CameraLockHalftimeTransitionSpeed; // how much to change per second
+                                if (g_CameraLockHalftimeTransition < targetTransition) {
+                                    g_CameraLockHalftimeTransition = (std::min)(g_CameraLockHalftimeTransition + transitionSpeed * dt, targetTransition);
+                                } else if (g_CameraLockHalftimeTransition > targetTransition) {
+                                    g_CameraLockHalftimeTransition = (std::max)(g_CameraLockHalftimeTransition - transitionSpeed * dt, targetTransition);
+                                }
+
                                 // Apply exponential smoothing with individual halftimes
+                                // Lerp angle halftime between normal and lock values based on transition
+                                float effectiveAngleHalftime = g_ViewportSmoothHalftimeAngle * (1.0f - g_CameraLockHalftimeTransition) +
+                                                               g_ViewportSmoothLockHalftimeAngle * g_CameraLockHalftimeTransition;
+
                                 const double smoothFactorPos = 1.0 - pow(0.5, (double)dt / (double)g_ViewportSmoothHalftimePos);
-                                const double smoothFactorAngle = 1.0 - pow(0.5, (double)dt / (double)g_ViewportSmoothHalftimeAngle);
+                                const double smoothFactorAngle = 1.0 - pow(0.5, (double)dt / (double)effectiveAngleHalftime);
                                 const double smoothFactorFov = 1.0 - pow(0.5, (double)dt / (double)g_ViewportSmoothHalftimeFov);
 
                                 // Interpolate position
@@ -6117,7 +6322,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
             // Smooth camera settings window
             if (g_ViewportSmoothSettingsOpen) {
-                ImGui::SetNextWindowSize(ImVec2(380, 320), ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowSize(ImVec2(380, 360), ImGuiCond_FirstUseEver);
                 if (ImGui::Begin("Smooth Camera Settings", &g_ViewportSmoothSettingsOpen)) {
                     ImGui::Text("Halftime Settings");
                     ImGui::Separator();
@@ -6141,6 +6346,13 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     ImGui::SliderFloat("##FovHalftime", &g_ViewportSmoothHalftimeFov, 0.01f, 1.0f, "%.3f s");
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Time for FOV to move halfway to target");
+                    }
+                    ImGui::Spacing();
+
+                    ImGui::Text("Lock Angle Halftime:");
+                    ImGui::SliderFloat("##LockAngleHalftime", &g_ViewportSmoothLockHalftimeAngle, 0.0f, 1.0f, "%.3f s");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Angle halftime when camera lock is active (Q key)\n0 = instant/perfect tracking, higher = smoother/slower tracking");
                     }
                     ImGui::Spacing();
                     ImGui::Separator();
@@ -6181,6 +6393,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         g_ViewportSmoothHalftimePos = 0.15f;
                         g_ViewportSmoothHalftimeAngle = 0.10f;
                         g_ViewportSmoothHalftimeFov = 0.20f;
+                        g_ViewportSmoothLockHalftimeAngle = 0.0f;
                         g_ViewportSmoothScrollSpeedIncrement = 0.10f;
                         g_ViewportSmoothScrollFovIncrement = 2.0f;
                         g_ViewportSmoothAnalogInput = false;
@@ -7961,19 +8174,6 @@ void OverlayDx11::Render() {
     }
     } // Release mutex before platform windows to avoid deadlock
 
-    // Update and render ImGui platform windows (multi-viewport support)
-    // Must be outside mutex lock since platform window Present calls trigger our hooks.
-    // Mark scope so Present hook can skip overlay re-entrancy when these swapchains present.
-    ImGuiIO& io = ImGui::GetIO();
-    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
-        g_in_platform_windows_present = true;
-        ImGui::UpdatePlatformWindows();
-        ImGui::RenderPlatformWindowsDefault();
-        g_in_platform_windows_present = false;
-
-        // Note: do not pump Win32 messages here to avoid re-entrancy while rendering.
-    }
-
     // Restore viewport (outside mutex, but still safe - these are local variables)
     if (prevVpCount > 0)
         m_Context->RSSetViewports(1, &prevVp);
@@ -7987,6 +8187,7 @@ void OverlayDx11::Render() {
     }
     if (prevRtv) prevRtv->Release();
     if (prevDsv) prevDsv->Release();
+
 #endif
 }
 
@@ -8212,6 +8413,65 @@ void OverlayDx11::UpdateBackbufferSize() {
     m_Rtv.width = bbDesc.Width;
     m_Rtv.height = bbDesc.Height;
     backbuffer->Release();
+}
+
+}} // namespace
+#endif
+
+#ifdef _WIN32
+namespace advancedfx { namespace overlay {
+
+void OverlayDx11::RenderPlatformWindows() {
+    if (!m_Initialized) return;
+    ImGuiIO& io = ImGui::GetIO();
+    if (!(io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)) return;
+
+    // Detect foreground switch between our own windows and set throttle flag
+    HWND foregroundWindow = GetForegroundWindow();
+    {
+        static HWND s_prevForeground = nullptr;
+        if (foregroundWindow != s_prevForeground) {
+            if (foregroundWindow == m_Hwnd || foregroundWindow == g_WorkspaceWindowHandle) {
+                g_SkipPlatformWindowsFrames = 2;
+            }
+            s_prevForeground = foregroundWindow;
+        }
+    }
+
+    // Always call UpdatePlatformWindows - ImGui requires this every frame
+    ImGui::UpdatePlatformWindows();
+    bool gameWindowFocused = g_windowActive;
+    bool workspaceWindowFocused = (g_WorkspaceWindowHandle && foregroundWindow == g_WorkspaceWindowHandle);
+    bool shouldRender = gameWindowFocused || workspaceWindowFocused;
+
+    if (shouldRender) {
+        g_in_platform_windows_present = true;
+        // Avoid presenting platform windows during activation throttle or resize/quarantine frames
+        bool skipActivation = false;
+        bool skipResize = false;
+        if (g_SkipPlatformWindowsFrames > 0) { g_SkipPlatformWindowsFrames--; skipActivation = true; }
+        if (g_OverlayResizePending.load(std::memory_order_relaxed)
+            || g_OverlayQuarantineFrames.load(std::memory_order_relaxed) > 0) skipResize = true;
+
+        // Optional background throttle: reduce update rate when workspace window is not focused
+        bool skipBackground = false;
+        if (!workspaceWindowFocused && g_PlatformWindowsBackgroundDivisor > 1) {
+            g_PlatformWindowsFrameCounter++;
+            if ((g_PlatformWindowsFrameCounter % (unsigned)g_PlatformWindowsBackgroundDivisor) != 0)
+                skipBackground = true;
+        }
+
+        if (skipActivation) {
+        } else if (skipResize) {
+        } else if (skipBackground) {
+        } else {
+            // Only when there is more than one viewport (avoid useless work)
+            if (ImGui::GetPlatformIO().Viewports.Size > 1)
+                ImGui::RenderPlatformWindowsDefault();
+        }
+        g_in_platform_windows_present = false;
+    } else {
+    }
 }
 
 }} // namespace

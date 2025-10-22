@@ -28,6 +28,7 @@ public:
     // Per-frame hooks
     void BeginFrame();
     void RenderFrame();
+    void RenderPlatformWindows();
     void EndFrame();
 
     // Device/resize events
@@ -44,6 +45,11 @@ public:
 
     void RequestRmbPassthroughThisFrame();
     bool IsRmbPassthroughRequested() const { return m_RmbPassthroughRequest; }
+
+    // Workspace mode
+    void SetWorkspaceEnabled(bool v) { m_WorkspaceEnabled = v; }
+    bool IsWorkspaceEnabled() const { return m_WorkspaceEnabled; }
+
     // Query ImGui IO capture flags (valid during frames when renderer is active)
     bool WantCaptureMouse() const;
     bool WantCaptureKeyboard() const;
@@ -57,6 +63,7 @@ private:
     double m_LastTime = 0.0;
     bool m_RmbPassthrough = false;
     bool m_RmbPassthroughRequest = false;
+    bool m_WorkspaceEnabled = false;
 
     std::unique_ptr<IOverlayRenderer> m_Renderer;
     std::unique_ptr<InputRouter> m_InputRouter;

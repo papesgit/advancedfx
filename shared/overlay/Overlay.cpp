@@ -130,6 +130,11 @@ void Overlay::RenderFrame() {
     m_Renderer->Render();
 }
 
+void Overlay::RenderPlatformWindows() {
+    if (!m_Visible || !m_Renderer) return;
+    m_Renderer->RenderPlatformWindows();
+}
+
 void Overlay::EndFrame() {
     if (!m_Visible || !m_Renderer) return;
     m_Renderer->EndFrame();

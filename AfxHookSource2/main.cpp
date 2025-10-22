@@ -296,7 +296,7 @@ private:
         // but allow RMB passthrough to mirv input while overlay is open.
         bool consoleVisible = (g_pGameUIService && g_pGameUIService->Con_IsVisible());
         auto &overlay = advancedfx::overlay::Overlay::Get();
-        bool overlayBlocks = overlay.IsVisible() && !overlay.IsRmbPassthroughActive();
+        bool overlayBlocks = overlay.IsVisible() && !overlay.IsRmbPassthroughActive() && !overlay.IsWorkspaceEnabled();
         return consoleVisible || overlayBlocks;
     }
 
@@ -481,7 +481,7 @@ BOOL WINAPI new_GetCursorPos(
     // While overlay is visible and not in RMB passthrough, freeze reported cursor pos
     {
         auto &overlay = advancedfx::overlay::Overlay::Get();
-        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive() && !overlay.IsWorkspaceEnabled()) {
             if (!s_haveLockPos) { s_lockPos = *lpPoint; s_haveLockPos = true; }
             *lpPoint = s_lockPos;
             return TRUE;
@@ -507,7 +507,7 @@ BOOL WINAPI new_SetCursorPos(
 	// to forcibly re-center the cursor. Pretend success to callers.
 	{
 		auto &overlay = advancedfx::overlay::Overlay::Get();
-		if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+		if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive() && !overlay.IsWorkspaceEnabled()) {
 			return TRUE;
 		}
 	}
@@ -525,9 +525,10 @@ HCURSOR WINAPI new_SetCursor(__in_opt HCURSOR hCursor)
 //		return result;
 
     // While overlay visible (and not in RMB passthrough), force visible arrow cursor
+    // Skip this when workspace is enabled - input routing handles cursor based on focus
     {
         auto &overlay = advancedfx::overlay::Overlay::Get();
-        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive() && !overlay.IsWorkspaceEnabled()) {
             while (ShowCursor(TRUE) < 0) { /* ensure shown */ }
             return SetCursor(LoadCursor(NULL, IDC_ARROW));
         }
@@ -544,9 +545,10 @@ HWND WINAPI new_SetCapture(__in HWND hWnd)
 //		return result;
 
     // Prevent mouse capture while overlay is visible (unless RMB passthrough)
+    // Skip this when workspace is enabled - input routing handles capture based on focus
     {
         auto &overlay = advancedfx::overlay::Overlay::Get();
-        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive())
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive() && !overlay.IsWorkspaceEnabled())
             return GetCapture();
     }
 
@@ -570,8 +572,9 @@ extern CAfxImportFuncHook<BOOL(WINAPI*)(LPRECT)> g_Import_inputsystem_USER32_Cli
 BOOL WINAPI new_ClipCursor(_In_opt_ LPRECT lpRect)
 {
     auto &overlay = advancedfx::overlay::Overlay::Get();
-    if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
-        // Ensure unclipped when overlay is active
+    // Ensure unclipped when overlay is active (unless RMB passthrough or workspace mode)
+    // Skip this when workspace is enabled - input routing handles clipping based on focus
+    if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive() && !overlay.IsWorkspaceEnabled()) {
         auto fp = g_Import_SDL3_USER32_ClipCursor.GetTrueFuncValue();
         if (!fp) fp = g_Import_inputsystem_USER32_ClipCursor.GetTrueFuncValue();
         if (fp) {
@@ -594,7 +597,7 @@ extern CAfxImportFuncHook<SHORT(WINAPI*)(int)> g_Import_inputsystem_USER32_GetAs
 SHORT WINAPI new_GetAsyncKeyState(int vKey)
 {
     auto &overlay = advancedfx::overlay::Overlay::Get();
-    if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+    if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive() && !overlay.IsWorkspaceEnabled()) {
         switch (vKey) {
         case VK_LBUTTON:
         case VK_RBUTTON:
@@ -1858,7 +1861,7 @@ void  new_CS2_Client_FrameStageNotify(void* This, SOURCESDK::CS2::ClientFrameSta
 	static bool bCursorHidden = false;
 	{
 		auto &overlay = advancedfx::overlay::Overlay::Get();
-		const bool overlayBlocks = overlay.IsVisible() && !overlay.IsRmbPassthroughActive();
+		const bool overlayBlocks = overlay.IsVisible() && !overlay.IsRmbPassthroughActive() && !overlay.IsWorkspaceEnabled();
 
 		if(g_MirvInputEx.m_MirvInput->IsActive() && !overlayBlocks) {
 			HWND hWnd = GetActiveWindow();
@@ -2271,7 +2274,7 @@ New_GetRawInputBuffer(
     // Block raw input to the game when overlay is visible and not in RMB passthrough
     {
         auto &overlay = advancedfx::overlay::Overlay::Get();
-        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive() && !overlay.IsWorkspaceEnabled()) {
             if (result > 0 && pData && pcbSize && *pcbSize >= sizeof(RAWINPUTHEADER)) {
                 Afx_SanitizeRawInputs(pData, result);
             }
@@ -2306,7 +2309,7 @@ UINT WINAPI New_GetRawInputData(
     // Sanitize single RAWINPUT payload if overlay is visible
     {
         auto &overlay = advancedfx::overlay::Overlay::Get();
-        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive()) {
+        if (overlay.IsVisible() && !overlay.IsRmbPassthroughActive() && !overlay.IsWorkspaceEnabled()) {
             if (uiCommand == RID_INPUT && pData && result >= sizeof(RAWINPUTHEADER)) {
                 Afx_SanitizeRawInputs((PRAWINPUT)pData, 1);
             }
