@@ -383,6 +383,7 @@ static bool   g_WorkspaceOpen = true;               // visibility of the workspa
 static ImGuiID g_WorkspaceDockspaceId = 0;          // ID of the DockSpace inside the workspace window
 static ImGuiID g_WorkspaceViewportId = 0;           // Platform viewport ID hosting the workspace window
 static HWND   g_WorkspaceWindowHandle = nullptr;    // Cached workspace window handle (updated during safe frame points)
+static bool   g_SaveWorkspaceIniNextFrame = false;  // after building first-time layout, save ini once
 
 // Separate .ini files for normal and workspace modes
 static std::string g_IniFileNormal = "imgui.ini";
@@ -2746,6 +2747,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         // ImGui::SetNextWindowPos(ImGui::GetMainViewport()->Pos + ImVec2(80, 80), ImGuiCond_Appearing);
         // ImGui::SetNextWindowSize(ImVec2(1000, 700), ImGuiCond_Appearing);
 
+        ImGui::SetNextWindowSize(ImVec2(1280, 720), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("HLAE Workspace", &g_WorkspaceOpen, ws_flags)) {
             if (ImGuiViewport* vp = ImGui::GetWindowViewport()) {
                 g_WorkspaceViewportId = vp->ID;
@@ -2779,6 +2781,11 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                     ImGui::DockBuilderDockWindow(w, g_WorkspaceDockspaceId);
 
                 ImGui::DockBuilderFinish(g_WorkspaceDockspaceId);
+                // If requested, persist the just-built default layout to the workspace ini
+                if (g_SaveWorkspaceIniNextFrame) {
+                    ImGui::SaveIniSettingsToDisk(g_IniFileWorkspace.c_str());
+                    g_SaveWorkspaceIniNextFrame = false;
+                }
             } else if (g_WorkspaceNeedsLayout && existingNode) {
                 // Workspace was enabled but .ini already has a saved layout - use that instead
                 g_WorkspaceNeedsLayout = false;
@@ -3369,7 +3376,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
 
     // Diagnostic watermark always (when overlay visible)
-    ImGui::GetForegroundDrawList()->AddText(ImVec2(8,8), IM_COL32(255,255,255,255), "HLAE Overlay - Press F8 to toggle", nullptr);
+    if (!g_GroupIntoWorkspace) ImGui::GetForegroundDrawList()->AddText(ImVec2(8,8), IM_COL32(255,255,255,255), "HLAE Overlay - Press F8 to toggle", nullptr);
 
     // Minimal window content per requirements
     // Make window non-resizable and auto-size to its content/DPI
@@ -3952,7 +3959,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             {
                 ImGui::BeginDisabled(g_GroupIntoWorkspace);
                 bool prev = g_GroupIntoWorkspace;
-                if (ImGui::Checkbox("External workspace mode", &g_GroupIntoWorkspace)) {
+                if (ImGui::Checkbox("External workspace mode (experimental)", &g_GroupIntoWorkspace)) {
                     Overlay::Get().SetWorkspaceEnabled(g_GroupIntoWorkspace);
                     if (g_GroupIntoWorkspace && !prev) {
                         // Save current .ini before switching
@@ -3961,6 +3968,18 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         // Switch to workspace .ini
                         ImGuiIO& io = ImGui::GetIO();
                         io.IniFilename = g_IniFileWorkspace.c_str();
+                        // If no workspace ini exists yet, we will build a default layout and save it next frame
+                        bool iniExists = false;
+                        {
+                            DWORD attr = GetFileAttributesA(g_IniFileWorkspace.c_str());
+                            iniExists = (attr != INVALID_FILE_ATTRIBUTES) && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+                        }
+                        if (!iniExists) {
+                            g_WorkspaceForceRedock = true;   // force a fresh dock layout
+                            g_WorkspaceNeedsLayout = true;    // build layout next frame
+                            g_SaveWorkspaceIniNextFrame = true; // and persist it once built
+                        }
+                        // Load if present (no-op if missing)
                         ImGui::LoadIniSettingsFromDisk(g_IniFileWorkspace.c_str());
 
                         g_WorkspaceNeedsLayout = true; // build layout next frame
