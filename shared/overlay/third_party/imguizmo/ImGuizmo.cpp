@@ -765,8 +765,11 @@ namespace IMGUIZMO_NAMESPACE
       ImGuiID mEditingID = -1;
       OPERATION mOperation = OPERATION(-1);
 
-      bool mAllowAxisFlip = true;
-      float mGizmoSizeClipSpace = 0.1f;
+       bool mAllowAxisFlip = true;
+       float mGizmoSizeClipSpace = 0.1f;
+       // One-shot: arm ignoring the next hovered ImGui item for activation
+       bool    mAllowNextHoveredItem = false;
+       ImGuiID mAllowedHoveredItemId = 0;
 
       inline ImGuiID GetCurrentID()
       {
@@ -1647,14 +1650,27 @@ namespace IMGUIZMO_NAMESPACE
       }
    }
 
-   static bool CanActivate()
-   {
-      if (ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered() && !ImGui::IsAnyItemActive())
+static bool CanActivate()
+{
+      if (ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemActive())
       {
-         return true;
+         ImGuiContext& g = *GImGui;
+         ImGuiID hovered = g.HoveredId;
+         if (gContext.mAllowNextHoveredItem && hovered != 0)
+         {
+            gContext.mAllowedHoveredItemId = hovered;
+            gContext.mAllowNextHoveredItem = false;
+         }
+         const bool ignoreThisHovered = (hovered != 0 && gContext.mAllowedHoveredItemId != 0 && hovered == gContext.mAllowedHoveredItemId && IsHoveringWindow());
+         if (!ImGui::IsAnyItemHovered() || ignoreThisHovered)
+         {
+            if (ignoreThisHovered)
+               gContext.mAllowedHoveredItemId = 0;
+            return true;
+         }
       }
       return false;
-   }
+}
 
    static void HandleAndDrawLocalBounds(const float* bounds, matrix_t* matrix, const float* snapValues, OPERATION operation)
    {
@@ -2547,10 +2563,18 @@ namespace IMGUIZMO_NAMESPACE
       mat.v.position.Set(translation[0], translation[1], translation[2], 1.f);
    }
 
-   void SetAlternativeWindow(ImGuiWindow* window)
-   {
-      gContext.mAlternativeWindow = window;
-   }
+void SetAlternativeWindow(ImGuiWindow* window)
+{
+    gContext.mAlternativeWindow = window;
+}
+
+void AllowHoveredItemActivationNext() { AllowHoverNext(); }
+
+void AllowHoverNext()
+{
+    gContext.mAllowNextHoveredItem = true;
+    gContext.mAllowedHoveredItemId = 0;
+}
 
    void SetID(int id)
    {
@@ -3150,3 +3174,4 @@ namespace IMGUIZMO_NAMESPACE
       ComputeContext(svgView.m16, svgProjection.m16, gContext.mModelSource.m16, gContext.mMode);
    }
 };
+

@@ -224,6 +224,11 @@ namespace IMGUIZMO_NAMESPACE
    IMGUI_API void ViewManipulate(float* view, const float* projection, OPERATION operation, MODE mode, float* matrix, float length, ImVec2 position, ImVec2 size, ImU32 backgroundColor);
 
    IMGUI_API void SetAlternativeWindow(ImGuiWindow* window);
+   // Allow the gizmo to ignore the next hovered item for activation checks (one-shot).
+   // Call right before creating the host item (e.g. InvisibleButton) that sits under the gizmo.
+   IMGUI_API void AllowHoverNext();
+   // Compatibility alias
+   IMGUI_API void AllowHoveredItemActivationNext();
 
    [[deprecated("Use PushID/PopID instead.")]]
    IMGUI_API void SetID(int id);

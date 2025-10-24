@@ -70,9 +70,11 @@
 #include "Hud.h"
 #include "GsiHttpServer.h"
 
-// NanoSVG for grenade icon loading (implementation already in Hud.cpp)
+// NanoSVG for SVG icon loading
 #include "third_party/nanosvg/nanosvg.h"
 #include "third_party/nanosvg/nanosvgrast.h"
+// RapidXML for campath parsing
+#include "../../deps/release/rapidxml/rapidxml.hpp"
 // The official backend header intentionally comments out the WndProc declaration to avoid pulling in windows.h.
 // Forward declare it here with C++ linkage so it matches the backend definition.
 LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -429,12 +431,12 @@ static bool g_ShowBackbufferWindow = false;
 static int  g_ViewportSourceMode = 0;
 static bool g_ViewportEnableRmbControl = true;  // Enable RMB camera control in viewport by default
 static bool g_ViewportSmoothMode = false;       // Enable smooth camera movements with acceleration/deceleration
-static float g_ViewportSmoothHalftimePos = 0.15f;   // Halftime for smooth position movements (in seconds)
-static float g_ViewportSmoothHalftimeAngle = 0.10f; // Halftime for smooth angle movements (in seconds)
-static float g_ViewportSmoothHalftimeFov = 0.20f;   // Halftime for smooth FOV movements (in seconds)
+static float g_ViewportSmoothHalftimePos = 0.55f;   // Halftime for smooth position movements (in seconds)
+static float g_ViewportSmoothHalftimeAngle = 0.55f; // Halftime for smooth angle movements (in seconds)
+static float g_ViewportSmoothHalftimeFov = 0.65f;   // Halftime for smooth FOV movements (in seconds)
 static bool g_ViewportSmoothSettingsOpen = false;   // Settings window open state
-static float g_ViewportSmoothScrollSpeedIncrement = 0.10f;  // Multiplier for scroll speed adjustment (1.0 + this value)
-static float g_ViewportSmoothScrollFovIncrement = 2.0f;     // FOV change per scroll click
+static float g_ViewportSmoothScrollSpeedIncrement = 0.25f;  // Multiplier for scroll speed adjustment (1.0 + this value)
+static float g_ViewportSmoothScrollFovIncrement = 3.0f;     // FOV change per scroll click
 static bool g_ViewportSmoothAnalogInput = false;    // Enable analog keyboard input (Wooting, etc.)
 static bool g_GetSmoothPass = false;
 static int g_GetSmoothIndex = -1;
@@ -445,7 +447,7 @@ static float g_GetSmoothFirstPos[3] = {0, 0, 0};
 static bool g_CameraLockActive = false;
 static int g_CameraLockTargetIndex = -1;
 static bool g_CameraLockQPressed = false;
-static float g_ViewportSmoothLockHalftimeAngle = 0.0f;  // Angle halftime when camera lock is active
+static float g_ViewportSmoothLockHalftimeAngle = 0.1f;  // Angle halftime when camera lock is active
 static float g_CameraLockHalftimeTransition = 0.0f;     // Current transition progress (0=normal, 1=locked)
 static float g_CameraLockHalftimeTransitionSpeed = 1.0f; // Transition duration in seconds
 // Radar campath (Alt-drag on radar to draw a line, then click a player dot to pick Z/target)
@@ -459,16 +461,16 @@ static float        g_RadarCampathWorldEnd[3]   = {0,0,0};
 static int          g_RadarCampathTargetControllerIdx = -1; // Player to face during playback
 static bool         g_RadarCampathActive = false;        // Playback active
 static double       g_RadarCampathStartTime = 0.0;       // ImGui::GetTime() at start
-static float        g_RadarCampathDuration = 3.0f;       // Seconds from start to end
+static float        g_RadarCampathDuration = 12.0f;       // Seconds from start to end
 static float        g_RadarCampathCurAng[3] = {0,0,0};   // Smoothed camera angles (pitch,yaw,roll)
-static float        g_RadarCampathAngleHalftime = 0.15f; // Halftime for angle smoothing
+static float        g_RadarCampathAngleHalftime = 0.65f; // Halftime for angle smoothing
 static bool         g_RadarCampathDebugDraw = true;      // Draw line over radar while defined/active
 static Radar::Vec2  g_RadarCampathActiveUvStart = {0,0}; // UV of active path (for progress rendering)
 static Radar::Vec2  g_RadarCampathActiveUvEnd   = {0,0};
 static bool         g_RadarCampathHasLastTargetPos = false; // Keep last target position when player dies
 static float        g_RadarCampathLastTargetPos[3] = {0,0,0};
-static float        g_RadarCampathStartFov = 90.0f;     // FOV at path start
-static float        g_RadarCampathEndFov   = 90.0f;     // FOV at path end
+static float        g_RadarCampathStartFov = 65.0f;     // FOV at path start
+static float        g_RadarCampathEndFov   = 65.0f;     // FOV at path end
 // ImGui per-draw opaque blend override for viewport image
 static ID3D11BlendState* g_ViewportOpaqueBlend = nullptr;
 static ID3D11DeviceContext* g_ImguiD3DContext = nullptr;
@@ -488,6 +490,8 @@ static bool   g_PreviewRectValid = false;
 static ImVec2 g_PreviewRectMin  = ImVec2(0,0);
 static ImVec2 g_PreviewRectSize = ImVec2(0,0);
 static ImDrawList* g_PreviewDrawList = nullptr;
+// Viewport ID of the backbuffer preview window (if visible this frame)
+static ImGuiID g_BackbufferViewportId = 0;
 static std::vector<std::string> g_OverlayConsoleLog;
 static char g_OverlayConsoleInput[512] = {0};
 static bool g_OverlayConsoleScrollToBottom = false;
@@ -824,13 +828,14 @@ static void RebuildAttachmentCacheForSelected() {
 static bool g_ShowDofWindow = false;
 
 // Observing mode state
-static bool g_ObservingEnabled = false;
+static bool g_ObservingEnabled = true;
 static bool g_ShowObservingBindings = false;
 static std::map<int, int> g_ObservingHotkeyBindings; // Map from key (0-9) to controller index
 
 // Radar state for Observing tab
 static bool g_ShowRadar = false;
 static bool g_ShowRadarSettings = false;
+static bool g_ShowRadarCameraIcons = false; // Show camera profile icons on radar
 
 // cs-hud radar integration settings
 static char g_RadarsJsonPath[1024] = "";             // e.g. path to cs-hud src/themes/fennec/radars.json
@@ -839,8 +844,9 @@ static char g_RadarImagePath[1024] = "";              // e.g. .../img/radars/ing
 static float g_RadarUiPosX = 50.0f;
 static float g_RadarUiPosY = 50.0f;
 static float g_RadarUiSize = 300.0f; // width==height in pixels
-static float g_RadarDotScale = 1.0f;
-static char g_RadarMapName[128] = "de_mirage";        // default example
+static float g_RadarDotScale = 0.7f;
+static float g_RadarZoom = 1.0f; // Radar zoom/scale (centered in window)
+static char g_RadarMapName[128] = "Waiting...";        // default example
 static bool g_RadarAssetsLoaded = false;
 static Radar::Context g_RadarCtx;                     // holds cfg, texture SRV, smoothers
 static bool g_ShowHud = false;                        // draw native HUD in viewport
@@ -860,13 +866,13 @@ struct SmokeTracker {
 };
 static std::map<int, SmokeTracker> g_SmokeTrackers; // Key: hash of position for identification
 
-// Grenade icon cache
-struct GrenadeIconTex {
+// Svg icon cache
+struct SvgIconTex {
     ID3D11ShaderResourceView* srv = nullptr;
     int w = 0;
     int h = 0;
 };
-static std::unordered_map<std::string, GrenadeIconTex> g_GrenadeIconCache;
+static std::unordered_map<std::string, SvgIconTex> g_SvgIconCache;
 
 // Bird camera context menu
 static bool g_BirdContextMenuOpen = false;
@@ -911,6 +917,37 @@ static int g_SelectedProfileIndex = -1;
 static float g_CameraRectScale = 1.0f; // UI scale for camera rectangles
 // Track which camera was loaded via rectangle click to visualize progress
 static std::string g_ActiveCameraCampathPath;
+
+// Camera position data from first campath point (for radar display)
+struct CampathFirstPoint {
+    bool valid = false;
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float yaw = 0.0f; // rz in campath (Quake coordinates)
+};
+
+// Campath keyframe for trajectory drawing
+struct CampathKeyframe {
+    double t = 0.0;      // time
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    // Raw tangent data for Hermite interpolation (custom mode, Free mode only)
+    float tx_in = 0.0f, tx_out = 0.0f;
+    float ty_in = 0.0f, ty_out = 0.0f;
+    float tz_in = 0.0f, tz_out = 0.0f;
+    // Tangent modes: 0=Auto, 1=Flat, 2=Linear, 3=Free
+    unsigned char tx_mode_in = 0, tx_mode_out = 0;
+    unsigned char ty_mode_in = 0, ty_mode_out = 0;
+    unsigned char tz_mode_in = 0, tz_mode_out = 0;
+};
+
+// Campath trajectory data for radar display
+struct CampathTrajectory {
+    std::string interpMode = "default"; // "linear", "cubic", "default", "custom"
+    std::vector<CampathKeyframe> keyframes;
+};
 
 // Camera groups (per profile)
 static std::vector<CameraGroup> g_CameraGroups;
@@ -1950,9 +1987,14 @@ static void CameraGroups_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, 
     }
 }
 
-// Helper function to load grenade icon SVG using NanoSVG
-static GrenadeIconTex LoadGrenadeIcon(ID3D11Device* device, const std::wstring& svgPath) {
-    GrenadeIconTex result{};
+// Helper function to load SVG icon using NanoSVG
+// Parameters:
+//   - device: D3D11 device for texture creation
+//   - svgPath: path to the SVG file
+//   - rasterSize: target size for rasterization (default 64.0f)
+//   - invertColors: if true, inverts RGB colors (black->white, white->black) while preserving alpha
+static SvgIconTex LoadSvgIcon(ID3D11Device* device, const std::wstring& svgPath, float rasterSize = 64.0f, bool invertColors = false) {
+    SvgIconTex result{};
     if (!device) return result;
 
     // Check if file exists
@@ -1981,8 +2023,7 @@ static GrenadeIconTex LoadGrenadeIcon(ID3D11Device* device, const std::wstring& 
 
     // Calculate raster size
     float maxDim = (img->width > img->height) ? img->width : img->height;
-    float target = 64.0f; // base raster size for grenade icons
-    float scale = (maxDim > 0.0f) ? (target / maxDim) : 1.0f;
+    float scale = (maxDim > 0.0f) ? (rasterSize / maxDim) : 1.0f;
     int rw = (int)ceilf(img->width * scale);
     int rh = (int)ceilf(img->height * scale);
     if (rw < 1) rw = 1;
@@ -1996,6 +2037,16 @@ static GrenadeIconTex LoadGrenadeIcon(ID3D11Device* device, const std::wstring& 
     nsvgRasterize(rast, img, 0.0f, 0.0f, scale, rgba.data(), rw, rh, rw * 4);
     nsvgDeleteRasterizer(rast);
     nsvgDelete(img);
+
+    // Optionally invert colors (black to white) while preserving alpha
+    if (invertColors) {
+        for (size_t i = 0; i < rgba.size(); i += 4) {
+            rgba[i + 0] = 255 - rgba[i + 0]; // R
+            rgba[i + 1] = 255 - rgba[i + 1]; // G
+            rgba[i + 2] = 255 - rgba[i + 2]; // B
+            // rgba[i + 3] = alpha, keep unchanged
+        }
+    }
 
     // Create D3D11 texture
     D3D11_TEXTURE2D_DESC desc{};
@@ -2033,23 +2084,514 @@ static GrenadeIconTex LoadGrenadeIcon(ID3D11Device* device, const std::wstring& 
 }
 
 // Get or load grenade icon from cache
-static GrenadeIconTex GetGrenadeIcon(ID3D11Device* device, const char* iconName) {
-    auto it = g_GrenadeIconCache.find(iconName);
-    if (it != g_GrenadeIconCache.end()) return it->second;
+static SvgIconTex GetGrenadeIcon(ID3D11Device* device, const char* iconName) {
+    auto it = g_SvgIconCache.find(iconName);
+    if (it != g_SvgIconCache.end()) return it->second;
 
-    GrenadeIconTex tex{};
-    if (!device) { g_GrenadeIconCache[iconName] = tex; return tex; }
+    SvgIconTex tex{};
+    if (!device) { g_SvgIconCache[iconName] = tex; return tex; }
 
     // Build path: {hlaeFolder}resources/overlay/weapons/{iconName}.svg
     const wchar_t* hf = GetHlaeFolderW();
-    if (!hf || !*hf) { g_GrenadeIconCache[iconName] = tex; return tex; }
+    if (!hf || !*hf) { g_SvgIconCache[iconName] = tex; return tex; }
 
     std::wstring svgPath = std::wstring(hf) + L"resources\\overlay\\weapons\\" +
                            std::wstring(iconName, iconName + strlen(iconName)) + L".svg";
 
-    tex = LoadGrenadeIcon(device, svgPath);
-    g_GrenadeIconCache[iconName] = tex;
+    tex = LoadSvgIcon(device, svgPath, 64.0f, false);
+    g_SvgIconCache[iconName] = tex;
     return tex;
+}
+
+// Get or load camera icon from cache
+static SvgIconTex GetCameraIcon(ID3D11Device* device) {
+    const char* iconName = "camera";
+    auto it = g_SvgIconCache.find(iconName);
+    if (it != g_SvgIconCache.end()) return it->second;
+
+    SvgIconTex tex{};
+    if (!device) { g_SvgIconCache[iconName] = tex; return tex; }
+
+    // Build path: {hlaeFolder}resources/overlay/icons/camera.svg
+    const wchar_t* hf = GetHlaeFolderW();
+    if (!hf || !*hf) { g_SvgIconCache[iconName] = tex; return tex; }
+
+    std::wstring svgPath = std::wstring(hf) + L"resources\\overlay\\icons\\camera.svg";
+
+    // Load with higher resolution and color inversion (black to white)
+    tex = LoadSvgIcon(device, svgPath, 128.0f, true);
+    g_SvgIconCache[iconName] = tex;
+    return tex;
+}
+
+// Parse first point from campath file for radar display
+// Returns the position and yaw (rz) of the first keyframe
+static CampathFirstPoint ParseCampathFirstPoint(const std::string& campathFilePath) {
+    CampathFirstPoint result{};
+
+    // Convert to wide string for file opening
+    std::wstring wPath(campathFilePath.begin(), campathFilePath.end());
+
+    FILE* pFile = nullptr;
+    _wfopen_s(&pFile, wPath.c_str(), L"rb");
+    if (!pFile) return result;
+
+    // Read file
+    fseek(pFile, 0, SEEK_END);
+    size_t fileSize = ftell(pFile);
+    rewind(pFile);
+
+    std::vector<char> data(fileSize + 1);
+    data[fileSize] = '\0';
+
+    size_t readSize = fread(data.data(), sizeof(char), fileSize, pFile);
+    fclose(pFile);
+
+    if (readSize != fileSize) return result;
+
+    try {
+        // Parse XML
+        rapidxml::xml_document<> doc;
+        doc.parse<0>(data.data());
+
+        // Navigate to first point: <campath><points><p>
+        rapidxml::xml_node<>* campathNode = doc.first_node("campath");
+        if (!campathNode) return result;
+
+        rapidxml::xml_node<>* pointsNode = campathNode->first_node("points");
+        if (!pointsNode) return result;
+
+        rapidxml::xml_node<>* firstPoint = pointsNode->first_node("p");
+        if (!firstPoint) return result;
+
+        // Read position (x, y, z) and rotation (rz = yaw)
+        rapidxml::xml_attribute<>* xA = firstPoint->first_attribute("x");
+        rapidxml::xml_attribute<>* yA = firstPoint->first_attribute("y");
+        rapidxml::xml_attribute<>* zA = firstPoint->first_attribute("z");
+        rapidxml::xml_attribute<>* rzA = firstPoint->first_attribute("rz");
+
+        if (xA && yA && zA) {
+            result.x = (float)atof(xA->value());
+            result.y = (float)atof(yA->value());
+            result.z = (float)atof(zA->value());
+            result.yaw = rzA ? (float)atof(rzA->value()) : 0.0f;
+            result.valid = true;
+        }
+    } catch (...) {
+        // XML parsing failed
+        result.valid = false;
+    }
+
+    return result;
+}
+
+// Parse all points from campath file for drawing trajectory
+static CampathTrajectory ParseCampathTrajectory(const std::string& campathFilePath) {
+    CampathTrajectory trajectory;
+
+    // Convert to wide string for file opening
+    std::wstring wPath(campathFilePath.begin(), campathFilePath.end());
+
+    FILE* pFile = nullptr;
+    _wfopen_s(&pFile, wPath.c_str(), L"rb");
+    if (!pFile) return trajectory;
+
+    // Read file
+    fseek(pFile, 0, SEEK_END);
+    size_t fileSize = ftell(pFile);
+    rewind(pFile);
+
+    std::vector<char> data(fileSize + 1);
+    data[fileSize] = '\0';
+
+    size_t readSize = fread(data.data(), sizeof(char), fileSize, pFile);
+    fclose(pFile);
+
+    if (readSize != fileSize) return trajectory;
+
+    try {
+        // Parse XML
+        rapidxml::xml_document<> doc;
+        doc.parse<0>(data.data());
+
+        // Navigate to <campath>
+        rapidxml::xml_node<>* campathNode = doc.first_node("campath");
+        if (!campathNode) return trajectory;
+
+        // Parse interpolation mode from positionInterp attribute
+        rapidxml::xml_attribute<>* posInterpAttr = campathNode->first_attribute("positionInterp");
+        if (posInterpAttr) {
+            trajectory.interpMode = posInterpAttr->value();
+        } else {
+            trajectory.interpMode = "default"; // Default to cubic
+        }
+
+        // Navigate to points: <campath><points>
+        rapidxml::xml_node<>* pointsNode = campathNode->first_node("points");
+        if (!pointsNode) return trajectory;
+
+        // Iterate through all <p> elements
+        for (rapidxml::xml_node<>* pNode = pointsNode->first_node("p");
+             pNode;
+             pNode = pNode->next_sibling("p")) {
+
+            rapidxml::xml_attribute<>* tA = pNode->first_attribute("t");
+            rapidxml::xml_attribute<>* xA = pNode->first_attribute("x");
+            rapidxml::xml_attribute<>* yA = pNode->first_attribute("y");
+            rapidxml::xml_attribute<>* zA = pNode->first_attribute("z");
+
+            if (tA && xA && yA && zA) {
+                CampathKeyframe kf;
+                kf.t = atof(tA->value());
+                kf.x = (float)atof(xA->value());
+                kf.y = (float)atof(yA->value());
+                kf.z = (float)atof(zA->value());
+
+                // Parse tangent data for custom mode
+                rapidxml::xml_attribute<>* tx_in_A = pNode->first_attribute("tx_in");
+                rapidxml::xml_attribute<>* tx_out_A = pNode->first_attribute("tx_out");
+                rapidxml::xml_attribute<>* ty_in_A = pNode->first_attribute("ty_in");
+                rapidxml::xml_attribute<>* ty_out_A = pNode->first_attribute("ty_out");
+                rapidxml::xml_attribute<>* tz_in_A = pNode->first_attribute("tz_in");
+                rapidxml::xml_attribute<>* tz_out_A = pNode->first_attribute("tz_out");
+
+                if (tx_in_A) kf.tx_in = (float)atof(tx_in_A->value());
+                if (tx_out_A) kf.tx_out = (float)atof(tx_out_A->value());
+                if (ty_in_A) kf.ty_in = (float)atof(ty_in_A->value());
+                if (ty_out_A) kf.ty_out = (float)atof(ty_out_A->value());
+                if (tz_in_A) kf.tz_in = (float)atof(tz_in_A->value());
+                if (tz_out_A) kf.tz_out = (float)atof(tz_out_A->value());
+
+                // Parse tangent modes
+                auto parseTangentMode = [](const char* str) -> unsigned char {
+                    if (!str) return 0; // Default to Auto
+                    if (!_stricmp(str, "auto")) return 0;
+                    if (!_stricmp(str, "flat")) return 1;
+                    if (!_stricmp(str, "linear")) return 2;
+                    if (!_stricmp(str, "free")) return 3;
+                    return 0; // Default to Auto
+                };
+
+                rapidxml::xml_attribute<>* tx_mode_in_A = pNode->first_attribute("tx_mode_in");
+                rapidxml::xml_attribute<>* tx_mode_out_A = pNode->first_attribute("tx_mode_out");
+                rapidxml::xml_attribute<>* ty_mode_in_A = pNode->first_attribute("ty_mode_in");
+                rapidxml::xml_attribute<>* ty_mode_out_A = pNode->first_attribute("ty_mode_out");
+                rapidxml::xml_attribute<>* tz_mode_in_A = pNode->first_attribute("tz_mode_in");
+                rapidxml::xml_attribute<>* tz_mode_out_A = pNode->first_attribute("tz_mode_out");
+
+                kf.tx_mode_in = parseTangentMode(tx_mode_in_A ? tx_mode_in_A->value() : nullptr);
+                kf.tx_mode_out = parseTangentMode(tx_mode_out_A ? tx_mode_out_A->value() : nullptr);
+                kf.ty_mode_in = parseTangentMode(ty_mode_in_A ? ty_mode_in_A->value() : nullptr);
+                kf.ty_mode_out = parseTangentMode(ty_mode_out_A ? ty_mode_out_A->value() : nullptr);
+                kf.tz_mode_in = parseTangentMode(tz_mode_in_A ? tz_mode_in_A->value() : nullptr);
+                kf.tz_mode_out = parseTangentMode(tz_mode_out_A ? tz_mode_out_A->value() : nullptr);
+
+                trajectory.keyframes.push_back(kf);
+            }
+        }
+    } catch (...) {
+        // XML parsing failed, return empty trajectory
+        trajectory.keyframes.clear();
+    }
+
+    return trajectory;
+}
+
+// Generate interpolated points for campath trajectory based on interpolation mode
+static std::vector<ImVec2> GenerateInterpolatedTrajectory(const CampathTrajectory& trajectory) {
+    std::vector<ImVec2> points;
+
+    if (trajectory.keyframes.size() < 2) {
+        return points; // Need at least 2 keyframes
+    }
+
+    // For linear mode or if we have less than 4 keyframes (cubic requires 4+),
+    // just return the keyframe positions
+    if (trajectory.interpMode == "linear" || trajectory.keyframes.size() < 4) {
+        for (const auto& kf : trajectory.keyframes) {
+            points.push_back(ImVec2(kf.x, kf.y));
+        }
+        return points;
+    }
+
+    // For cubic/default mode: Use cubic spline interpolation
+    if (trajectory.interpMode == "cubic" || trajectory.interpMode == "default") {
+        int n = (int)trajectory.keyframes.size();
+
+        // Prepare data arrays for spline calculation
+        std::vector<double> T(n), X(n), Y(n);
+        std::vector<double> X2(n), Y2(n); // Second derivatives
+
+        for (int i = 0; i < n; ++i) {
+            T[i] = trajectory.keyframes[i].t;
+            X[i] = trajectory.keyframes[i].x;
+            Y[i] = trajectory.keyframes[i].y;
+        }
+
+        // Compute second derivatives using natural cubic spline (from AfxMath)
+        // This is a simplified version using the spline function from the codebase
+        Afx::Math::spline(T.data(), X.data(), n, false, 0.0, false, 0.0, X2.data());
+        Afx::Math::spline(T.data(), Y.data(), n, false, 0.0, false, 0.0, Y2.data());
+
+        // Generate interpolated points
+        double tStart = T[0];
+        double tEnd = T[n - 1];
+        double duration = tEnd - tStart;
+
+        // Generate points at regular intervals (about 50 points total)
+        int numPoints = 50;
+        for (int i = 0; i <= numPoints; ++i) {
+            double t = tStart + (duration * i) / numPoints;
+
+            double x, y;
+            Afx::Math::splint(T.data(), X.data(), X2.data(), n, t, &x);
+            Afx::Math::splint(T.data(), Y.data(), Y2.data(), n, t, &y);
+
+            points.push_back(ImVec2((float)x, (float)y));
+        }
+
+        return points;
+    }
+
+    // For custom mode: Use Hermite interpolation with tangent data
+    if (trajectory.interpMode == "custom") {
+        int n = (int)trajectory.keyframes.size();
+
+        // Prepare data arrays
+        std::vector<double> T(n), X(n), Y(n);
+        std::vector<double> X2(n), Y2(n); // Second derivatives for auto mode
+
+        for (int i = 0; i < n; ++i) {
+            T[i] = trajectory.keyframes[i].t;
+            X[i] = trajectory.keyframes[i].x;
+            Y[i] = trajectory.keyframes[i].y;
+        }
+
+        // Compute auto tangents using cubic spline (for Auto mode)
+        Afx::Math::spline(T.data(), X.data(), n, false, 0.0, false, 0.0, X2.data());
+        Afx::Math::spline(T.data(), Y.data(), n, false, 0.0, false, 0.0, Y2.data());
+
+        std::vector<double> autoX_in(n, 0.0), autoX_out(n, 0.0);
+        std::vector<double> autoY_in(n, 0.0), autoY_out(n, 0.0);
+
+        for (int i = 0; i + 1 < n; ++i) {
+            double h = T[i + 1] - T[i];
+            if (h <= 0.0) continue;
+
+            double secX = (X[i + 1] - X[i]) / h;
+            double secY = (Y[i + 1] - Y[i]) / h;
+
+            // Derivatives from cubic spline
+            autoX_out[i] = secX - h * (2.0 * X2[i] + X2[i + 1]) / 6.0;
+            autoX_in[i + 1] = secX + h * (2.0 * X2[i + 1] + X2[i]) / 6.0;
+
+            autoY_out[i] = secY - h * (2.0 * Y2[i] + Y2[i + 1]) / 6.0;
+            autoY_in[i + 1] = secY + h * (2.0 * Y2[i + 1] + Y2[i]) / 6.0;
+        }
+
+        // Resolve tangents for each keyframe based on mode
+        std::vector<double> resolvedX_in(n), resolvedX_out(n);
+        std::vector<double> resolvedY_in(n), resolvedY_out(n);
+
+        for (int k = 0; k < n; ++k) {
+            const CampathKeyframe& kf = trajectory.keyframes[k];
+            bool hasPrev = k > 0;
+            bool hasNext = k + 1 < n;
+
+            // Resolve X tangents
+            // In tangent
+            if (kf.tx_mode_in == 1) { // Flat
+                resolvedX_in[k] = 0.0;
+            } else if (kf.tx_mode_in == 2) { // Linear
+                if (hasPrev) {
+                    double h = T[k] - T[k - 1];
+                    resolvedX_in[k] = (h > 0.0) ? (X[k] - X[k - 1]) / h : 0.0;
+                } else if (hasNext) {
+                    double h = T[k + 1] - T[k];
+                    resolvedX_in[k] = (h > 0.0) ? (X[k + 1] - X[k]) / h : 0.0;
+                } else {
+                    resolvedX_in[k] = 0.0;
+                }
+            } else if (kf.tx_mode_in == 3) { // Free
+                resolvedX_in[k] = kf.tx_in;
+            } else { // Auto (0)
+                resolvedX_in[k] = autoX_in[k];
+            }
+
+            // Out tangent
+            if (kf.tx_mode_out == 1) { // Flat
+                resolvedX_out[k] = 0.0;
+            } else if (kf.tx_mode_out == 2) { // Linear
+                if (hasNext) {
+                    double h = T[k + 1] - T[k];
+                    resolvedX_out[k] = (h > 0.0) ? (X[k + 1] - X[k]) / h : 0.0;
+                } else if (hasPrev) {
+                    double h = T[k] - T[k - 1];
+                    resolvedX_out[k] = (h > 0.0) ? (X[k] - X[k - 1]) / h : 0.0;
+                } else {
+                    resolvedX_out[k] = 0.0;
+                }
+            } else if (kf.tx_mode_out == 3) { // Free
+                resolvedX_out[k] = kf.tx_out;
+            } else { // Auto (0)
+                resolvedX_out[k] = autoX_out[k];
+            }
+
+            // Resolve Y tangents (same logic)
+            // In tangent
+            if (kf.ty_mode_in == 1) { // Flat
+                resolvedY_in[k] = 0.0;
+            } else if (kf.ty_mode_in == 2) { // Linear
+                if (hasPrev) {
+                    double h = T[k] - T[k - 1];
+                    resolvedY_in[k] = (h > 0.0) ? (Y[k] - Y[k - 1]) / h : 0.0;
+                } else if (hasNext) {
+                    double h = T[k + 1] - T[k];
+                    resolvedY_in[k] = (h > 0.0) ? (Y[k + 1] - Y[k]) / h : 0.0;
+                } else {
+                    resolvedY_in[k] = 0.0;
+                }
+            } else if (kf.ty_mode_in == 3) { // Free
+                resolvedY_in[k] = kf.ty_in;
+            } else { // Auto (0)
+                resolvedY_in[k] = autoY_in[k];
+            }
+
+            // Out tangent
+            if (kf.ty_mode_out == 1) { // Flat
+                resolvedY_out[k] = 0.0;
+            } else if (kf.ty_mode_out == 2) { // Linear
+                if (hasNext) {
+                    double h = T[k + 1] - T[k];
+                    resolvedY_out[k] = (h > 0.0) ? (Y[k + 1] - Y[k]) / h : 0.0;
+                } else if (hasPrev) {
+                    double h = T[k] - T[k - 1];
+                    resolvedY_out[k] = (h > 0.0) ? (Y[k] - Y[k - 1]) / h : 0.0;
+                } else {
+                    resolvedY_out[k] = 0.0;
+                }
+            } else if (kf.ty_mode_out == 3) { // Free
+                resolvedY_out[k] = kf.ty_out;
+            } else { // Auto (0)
+                resolvedY_out[k] = autoY_out[k];
+            }
+        }
+
+        // Generate interpolated points between each pair of keyframes
+        for (int i = 0; i + 1 < n; ++i) {
+            double t0 = T[i];
+            double t1 = T[i + 1];
+            double h = t1 - t0;
+
+            if (h <= 0.0) continue; // Skip invalid segments
+
+            double x0 = X[i], x1 = X[i + 1];
+            double y0 = Y[i], y1 = Y[i + 1];
+            double mx0 = resolvedX_out[i], mx1 = resolvedX_in[i + 1];
+            double my0 = resolvedY_out[i], my1 = resolvedY_in[i + 1];
+
+            // Number of points to generate for this segment
+            int segmentPoints = 10;
+
+            for (int j = 0; j < segmentPoints; ++j) {
+                double u = (double)j / segmentPoints; // Normalized parameter [0, 1]
+                double u2 = u * u;
+                double u3 = u2 * u;
+
+                // Hermite basis functions
+                double h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+                double h10 = u3 - 2.0 * u2 + u;
+                double h01 = -2.0 * u3 + 3.0 * u2;
+                double h11 = u3 - u2;
+
+                // Interpolate X and Y
+                double x = h00 * x0 + h * h10 * mx0 + h01 * x1 + h * h11 * mx1;
+                double y = h00 * y0 + h * h10 * my0 + h01 * y1 + h * h11 * my1;
+
+                points.push_back(ImVec2((float)x, (float)y));
+            }
+        }
+
+        // Add the last keyframe
+        if (n > 0) {
+            points.push_back(ImVec2((float)X[n - 1], (float)Y[n - 1]));
+        }
+
+        return points;
+    }
+
+    // Fallback: Return keyframes as-is
+    for (const auto& kf : trajectory.keyframes) {
+        points.push_back(ImVec2(kf.x, kf.y));
+    }
+
+    return points;
+}
+
+// Helper function to draw a rotated image using ImDrawList
+static void DrawImageRotated(ImDrawList* drawList, ImTextureID tex, ImVec2 center, ImVec2 size, float angleDegrees, float alpha = 1.0f) {
+    if (!tex || !drawList) return;
+
+    float angleRad = angleDegrees * 3.14159265359f / 180.0f;
+    float cosA = cosf(angleRad);
+    float sinA = sinf(angleRad);
+
+    // Half-extents
+    float hx = size.x * 0.5f;
+    float hy = size.y * 0.5f;
+
+    // Four corners of the quad (relative to center, before rotation)
+    ImVec2 corners[4] = {
+        ImVec2(-hx, -hy), // Top-left
+        ImVec2( hx, -hy), // Top-right
+        ImVec2( hx,  hy), // Bottom-right
+        ImVec2(-hx,  hy)  // Bottom-left
+    };
+
+    // Rotate and translate corners
+    ImVec2 rotatedCorners[4];
+    for (int i = 0; i < 4; ++i) {
+        float x = corners[i].x;
+        float y = corners[i].y;
+        rotatedCorners[i].x = center.x + (x * cosA - y * sinA);
+        rotatedCorners[i].y = center.y + (x * sinA + y * cosA);
+    }
+
+    // UV coordinates (standard)
+    ImVec2 uvs[4] = {
+        ImVec2(0, 0), // Top-left
+        ImVec2(1, 0), // Top-right
+        ImVec2(1, 1), // Bottom-right
+        ImVec2(0, 1)  // Bottom-left
+    };
+
+    // Push texture ID so the draw command uses the correct texture
+    drawList->PushTextureID(tex);
+
+    // Reserve space for 2 triangles (6 indices, 4 vertices)
+    drawList->PrimReserve(6, 4);
+
+    // Get current vertex index
+    ImDrawIdx vtxIdx = (ImDrawIdx)drawList->_VtxCurrentIdx;
+
+    // Write vertices with white color and specified alpha
+    ImU32 alphaValue = (ImU32)(alpha * 255.0f);
+    ImU32 col = IM_COL32(255, 255, 255, alphaValue);
+    drawList->PrimWriteVtx(rotatedCorners[0], uvs[0], col);
+    drawList->PrimWriteVtx(rotatedCorners[1], uvs[1], col);
+    drawList->PrimWriteVtx(rotatedCorners[2], uvs[2], col);
+    drawList->PrimWriteVtx(rotatedCorners[3], uvs[3], col);
+
+    // Write indices for two triangles (0,1,2) and (0,2,3)
+    drawList->PrimWriteIdx(vtxIdx + 0);
+    drawList->PrimWriteIdx(vtxIdx + 1);
+    drawList->PrimWriteIdx(vtxIdx + 2);
+    drawList->PrimWriteIdx(vtxIdx + 0);
+    drawList->PrimWriteIdx(vtxIdx + 2);
+    drawList->PrimWriteIdx(vtxIdx + 3);
+
+    // Pop texture ID
+    drawList->PopTextureID();
 }
 
 // Helper function to load image from file using WIC and create D3D11 texture
@@ -2752,6 +3294,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
     if (g_GroupIntoWorkspace) {
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;  // Enable multi-viewport / platform windows
+        io.ConfigViewportsNoAutoMerge = true;
 
         ImGuiWindowFlags ws_flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking;
 
@@ -2992,6 +3535,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             // Animate FOV between configured start/end using CameraOverride
             float fovNow = g_RadarCampathStartFov + (g_RadarCampathEndFov - g_RadarCampathStartFov) * t;
             advancedfx::overlay::CameraOverride_SetFov(fovNow);
+            if (g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
 
             if (t >= 1.0f) {
                 // End of animation
@@ -3097,14 +3641,20 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
         // Radar canvas inside the window (square that fits available content)
         ImVec2 avail = ImGui::GetContentRegionAvail();
-        float side = (std::min)(avail.x, avail.y);
-        if (side < 64.0f) side = 64.0f;
+        float canvasSide = (std::min)(avail.x, avail.y);
+        if (canvasSide < 64.0f) canvasSide = 64.0f;
         ImVec2 canvasMin = ImGui::GetCursorScreenPos();
-        ImGui::InvisibleButton("##radar_canvas", ImVec2(side, side), ImGuiButtonFlags_AllowOverlap);
+        ImGui::InvisibleButton("##radar_canvas", ImVec2(canvasSide, canvasSide), ImGuiButtonFlags_AllowOverlap);
         ImDrawList* drawList = ImGui::GetWindowDrawList();
-        ImVec2 radarPos = canvasMin;
-        float radarWidth = side;
-        float radarHeight = side;
+
+        // Apply zoom and center the radar within the canvas
+        float radarWidth = canvasSide * g_RadarZoom;
+        float radarHeight = canvasSide * g_RadarZoom;
+        // Center the zoomed radar within the canvas
+        ImVec2 radarPos = ImVec2(
+            canvasMin.x + (canvasSide - radarWidth) * 0.5f,
+            canvasMin.y + (canvasSide - radarHeight) * 0.5f
+        );
 
         // If assets are loaded and we have a valid config, render it
         if (g_RadarAssetsLoaded && (g_RadarCtx.cfg.scale != 0.0)) {
@@ -3235,7 +3785,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
 
                     // Helper lambda to draw grenade icon
                     auto drawGrenadeIcon = [&](const char* iconName, ImVec2 center, float height) {
-                        GrenadeIconTex icon = GetGrenadeIcon(m_Device, iconName);
+                        SvgIconTex icon = GetGrenadeIcon(m_Device, iconName);
                         if (icon.srv && icon.h > 0) {
                             float w = height * (float)icon.w / (float)icon.h;
                             ImVec2 tl = ImVec2(center.x - w * 0.5f, center.y - height * 0.5f);
@@ -3348,6 +3898,192 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                         float thick = (std::max)(1.5f, 1.5f * scale);
                         drawList->AddCircle(pt, markerRadius + thick*0.75f, IM_COL32(255,255,255,255), 0, thick);
                         break;
+                    }
+                }
+            }
+
+            // Draw camera icon when not spectating a player
+            {
+                auto hopt = g_GsiServer.TryGetHudState();
+                if (hopt.has_value() && hopt->focusedPlayerId == -1) {
+                    // Get current camera position and angles
+                    double camX, camY, camZ, camPitch, camYaw, camRoll;
+                    float camFov;
+                    Afx_GetLastCameraData(camX, camY, camZ, camPitch, camYaw, camRoll, camFov);
+
+                    // Convert camera position to radar UV coordinates
+                    Radar::Vec2 uv = Radar::WorldToUV({ (float)camX, (float)camY, (float)camZ }, g_RadarCtx.cfg);
+                    ImVec2 camPos = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+
+                    // Load camera icon
+                    SvgIconTex cameraIcon = GetCameraIcon(m_Device);
+                    if (cameraIcon.srv && cameraIcon.h > 0) {
+                        // Calculate icon size (similar to grenade icons)
+                        const float cameraIconHeight = (20.0f / 1024.0f) * radarWidth; // Slightly larger than grenades
+                        float iconWidth = cameraIconHeight * (float)cameraIcon.w / (float)cameraIcon.h;
+
+                        // The camera SVG faces right (0 degrees), so we need to rotate it based on yaw
+                        // In CS:GO, yaw of 0 points along positive X axis (east/right on radar)
+                        // We need to negate the yaw because screen Y coordinates are inverted
+                        // (turning right in-game should rotate the icon clockwise)
+                        float rotationAngle = -(float)camYaw;
+
+                        // Draw the rotated camera icon
+                        DrawImageRotated(drawList, (ImTextureID)cameraIcon.srv, camPos,
+                                       ImVec2(iconWidth, cameraIconHeight), rotationAngle);
+                    }
+                }
+            }
+
+            // Draw camera profile icons on radar (if toggle is enabled)
+            if (g_ShowRadarCameraIcons && g_SelectedProfileIndex >= 0 && g_SelectedProfileIndex < (int)g_CameraProfiles.size()) {
+                const CameraProfile& profile = g_CameraProfiles[g_SelectedProfileIndex];
+
+                SvgIconTex cameraIcon = GetCameraIcon(m_Device);
+                if (cameraIcon.srv && cameraIcon.h > 0) {
+                    const float iconHeight = (18.0f / 1024.0f) * radarWidth;
+                    float iconWidth = iconHeight * (float)cameraIcon.w / (float)cameraIcon.h;
+
+                    // Track camera icon positions and indices for click detection
+                    struct CameraIconRect {
+                        ImVec2 min, max;
+                        int cameraIndex;
+                        std::string campathPath;
+                    };
+                    static std::vector<CameraIconRect> cameraIconRects;
+                    cameraIconRects.clear();
+
+                    // Draw each camera from the profile
+                    for (int i = 0; i < (int)profile.cameras.size(); ++i) {
+                        const CameraItem& camera = profile.cameras[i];
+                        if (camera.camPathFile.empty()) continue;
+
+                        // Parse first point from campath
+                        CampathFirstPoint pt = ParseCampathFirstPoint(camera.camPathFile);
+                        if (!pt.valid) continue;
+
+                        // Convert to radar UV coordinates
+                        Radar::Vec2 uv = Radar::WorldToUV({ pt.x, pt.y, pt.z }, g_RadarCtx.cfg);
+                        ImVec2 iconPos = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+
+                        // Rotate based on yaw (negated for screen coordinates)
+                        float rotationAngle = -pt.yaw;
+
+                        // Draw the camera profile icon with 70% alpha to differentiate from active camera
+                        DrawImageRotated(drawList, (ImTextureID)cameraIcon.srv, iconPos,
+                                        ImVec2(iconWidth, iconHeight), rotationAngle, 0.7f);
+
+                        // Store bounding box for click detection
+                        CameraIconRect rect;
+                        rect.min = ImVec2(iconPos.x - iconWidth * 0.5f, iconPos.y - iconHeight * 0.5f);
+                        rect.max = ImVec2(iconPos.x + iconWidth * 0.5f, iconPos.y + iconHeight * 0.5f);
+                        rect.cameraIndex = i;
+                        rect.campathPath = camera.camPathFile;
+                        cameraIconRects.push_back(rect);
+                    }
+
+                    // Draw active campath trajectory (while playing)
+                    if (!g_ActiveCameraCampathPath.empty()) {
+                        // Check if campath is still playing
+                        extern CamPath g_CamPath;
+
+                        bool campathPlaying = false;
+                        if (g_CamPath.Enabled_get() && g_CamPath.GetSize() > 0) {
+                            // Check if current time is within campath bounds
+                            double currentTime = g_MirvTime.curtime_get() - g_CamPath.GetOffset();
+                            double endTime = g_CamPath.GetUpperBound();
+                            campathPlaying = (currentTime <= endTime);
+                        }
+
+                        if (campathPlaying && !g_RadarCampathActive) {
+                            // Parse and draw the active campath trajectory
+                            CampathTrajectory trajectory = ParseCampathTrajectory(g_ActiveCameraCampathPath);
+                            std::vector<ImVec2> worldPoints = GenerateInterpolatedTrajectory(trajectory);
+
+                            if (worldPoints.size() >= 2) {
+                                // Convert world positions to radar screen positions
+                                std::vector<ImVec2> screenPoints;
+                                for (const auto& wp : worldPoints) {
+                                    Radar::Vec2 uv = Radar::WorldToUV({ wp.x, wp.y, 0.0f }, g_RadarCtx.cfg);
+                                    ImVec2 sp = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+                                    screenPoints.push_back(sp);
+                                }
+
+                                // Draw the interpolated campath as a smooth polyline (green for active)
+                                drawList->AddPolyline(screenPoints.data(), (int)screenPoints.size(),
+                                                        IM_COL32(0, 255, 0, 200), // Green with transparency
+                                                        ImDrawFlags_None, 2.5f); // 2.5px line thickness
+
+                                // Draw keyframe positions as dots
+                                for (const auto& kf : trajectory.keyframes) {
+                                    Radar::Vec2 uv = Radar::WorldToUV({ kf.x, kf.y, kf.z }, g_RadarCtx.cfg);
+                                    ImVec2 kfPos = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+                                    drawList->AddCircleFilled(kfPos, 3.5f, IM_COL32(0, 255, 0, 255)); // Green dots at keyframes
+                                }
+                            }
+                        } else {
+                            // Campath finished, clear the active path
+                            g_ActiveCameraCampathPath.clear();
+                        }
+                    }
+
+                    // Check for hover and draw campath trajectory
+                    ImVec2 mousePos = ImGui::GetMousePos();
+                    std::string hoveredCampathPath;
+                    for (const auto& rect : cameraIconRects) {
+                        if (mousePos.x >= rect.min.x && mousePos.x <= rect.max.x &&
+                            mousePos.y >= rect.min.y && mousePos.y <= rect.max.y) {
+                            hoveredCampathPath = rect.campathPath;
+                            break;
+                        }
+                    }
+
+                    // Draw campath trajectory if hovering (only if not the active one)
+                    if (!hoveredCampathPath.empty() && hoveredCampathPath != g_ActiveCameraCampathPath) {
+                        // Parse campath trajectory with interpolation mode
+                        CampathTrajectory trajectory = ParseCampathTrajectory(hoveredCampathPath);
+
+                        // Generate interpolated points based on interpolation mode
+                        std::vector<ImVec2> worldPoints = GenerateInterpolatedTrajectory(trajectory);
+
+                        if (worldPoints.size() >= 2) {
+                            // Convert world positions to radar screen positions
+                            std::vector<ImVec2> screenPoints;
+                            for (const auto& wp : worldPoints) {
+                                Radar::Vec2 uv = Radar::WorldToUV({ wp.x, wp.y, 0.0f }, g_RadarCtx.cfg);
+                                ImVec2 sp = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+                                screenPoints.push_back(sp);
+                            }
+
+                            // Draw the interpolated campath as a smooth polyline
+                            drawList->AddPolyline(screenPoints.data(), (int)screenPoints.size(),
+                                                    IM_COL32(255, 255, 0, 200), // Yellow with some transparency
+                                                    ImDrawFlags_None, 2.0f); // 2px line thickness
+
+                            // Draw keyframe positions as dots
+                            for (const auto& kf : trajectory.keyframes) {
+                                Radar::Vec2 uv = Radar::WorldToUV({ kf.x, kf.y, kf.z }, g_RadarCtx.cfg);
+                                ImVec2 kfPos = ImVec2(radarPos.x + uv.x * radarWidth, radarPos.y + uv.y * radarHeight);
+                                drawList->AddCircleFilled(kfPos, 3.0f, IM_COL32(255, 255, 0, 255)); // Yellow dots at keyframes
+                            }
+                        }
+                    }
+
+                    // Handle clicks on camera icons
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                        for (const auto& rect : cameraIconRects) {
+                            if (mousePos.x >= rect.min.x && mousePos.x <= rect.max.x &&
+                                mousePos.y >= rect.min.y && mousePos.y <= rect.max.y) {
+                                // Load the campath
+                                char cmd[1024];
+                                snprintf(cmd, sizeof(cmd), "mirv_campath clear; mirv_campath load \"%s\"; mirv_campath enabled 1; spec_mode 4; mirv_input end; mirv_campath select all; mirv_campath edit start", rect.campathPath.c_str());
+                                Afx_ExecClientCmd(cmd);
+                                g_RadarCampathActive = false;
+                                g_ActiveCameraCampathPath = rect.campathPath;
+                                advancedfx::Message("Overlay: Loaded camera profile campath: %s\n", rect.campathPath.c_str());
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -3695,6 +4431,31 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             ImVec2 textSize = ImGui::CalcTextSize(text);
             drawList->AddText(ImVec2(radarPos.x + (radarWidth - textSize.x) / 2, radarPos.y + (radarHeight - textSize.y) / 2), IM_COL32(255, 255, 255, 255), text);
         }
+
+        // Overlay toggle for showing camera profile icons (top-right corner of radar canvas)
+        {
+            // Position button in top-right corner of the radar canvas using screen coordinates
+            ImVec2 buttonPos = ImVec2(radarPos.x + radarWidth - 30.0f, radarPos.y + 5.0f);
+            ImGui::SetCursorScreenPos(buttonPos);
+
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3, 3));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.3f, 0.9f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, g_ShowRadarCameraIcons ? ImVec4(1.0f, 1.0f, 0.0f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+
+            // Small camera icon button (use text representation)
+            if (ImGui::SmallButton("CAM##cam_toggle")) {
+                g_ShowRadarCameraIcons = !g_ShowRadarCameraIcons;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Toggle camera profile icons on radar");
+            }
+
+            ImGui::PopStyleColor(4);
+            ImGui::PopStyleVar();
+        }
+
         ImGui::End();
         }
     }
@@ -4347,6 +5108,12 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             // ImGui::SameLine();
             // if (ImGui::SmallButton("Reset##radar_ui")) { g_RadarUiPosX = 50.0f; g_RadarUiPosY = 50.0f; g_RadarUiSize = 300.0f; }
             ImGui::SliderFloat("Dotscale", &g_RadarDotScale, 0.1f, 2.0f, "%.1f px");
+            ImGui::SliderFloat("Zoom", &g_RadarZoom, 0.25f, 3.0f, "%.2fx");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Zoom in/out to see cameras outside radar bounds");
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset##zoom")) { g_RadarZoom = 1.0f; }
             ImGui::SeparatorText("Campath");
             ImGui::SetNextItemWidth(200.0f);
             ImGui::SliderFloat("Duration (s)", &g_RadarCampathDuration, 0.25f, 30.0f, "%.2f");
@@ -5999,6 +6766,10 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
 
         if (viewportVisible) {
+            if (ImGuiViewport* vp = ImGui::GetWindowViewport())
+                g_BackbufferViewportId = vp->ID;
+            else
+                g_BackbufferViewportId = 0;
             UpdateViewportPlayerCache();
 
             if (!m_BackbufferPreview.srv || m_BackbufferPreview.width == 0 || m_BackbufferPreview.height == 0) {
@@ -6018,6 +6789,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 ImVec2 previewSize(srcW * fit, srcH * fit);
                 // Reserve layout space and capture item rect
                 ImVec2 pMin = ImGui::GetCursorScreenPos();
+                // Allow the gizmo to activate even though this host item will be hovered
+                ImGuizmo::AllowHoverNext();
                 // Allow items to overlap this button so controls can be placed on top
                 ImGui::InvisibleButton("##viewport_image", previewSize, ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_AllowOverlap);
                 ImVec2 imgMin = ImGui::GetItemRectMin();
@@ -6719,92 +7492,6 @@ RmbAfterControl:
                 }
             }
 
-            // Smooth camera settings window
-            if (g_ViewportSmoothSettingsOpen) {
-                ImGui::SetNextWindowSize(ImVec2(380, 360), ImGuiCond_FirstUseEver);
-                if (ImGui::Begin("Smooth Camera Settings", &g_ViewportSmoothSettingsOpen)) {
-                    ImGui::Text("Halftime Settings");
-                    ImGui::Separator();
-                    ImGui::Spacing();
-
-                    ImGui::Text("Position Halftime:");
-                    ImGui::SliderFloat("##PosHalftime", &g_ViewportSmoothHalftimePos, 0.01f, 1.0f, "%.3f s");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Time for position to move halfway to target");
-                    }
-                    ImGui::Spacing();
-
-                    ImGui::Text("Angle Halftime:");
-                    ImGui::SliderFloat("##AngleHalftime", &g_ViewportSmoothHalftimeAngle, 0.01f, 1.0f, "%.3f s");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Time for rotation to move halfway to target");
-                    }
-                    ImGui::Spacing();
-
-                    ImGui::Text("FOV Halftime:");
-                    ImGui::SliderFloat("##FovHalftime", &g_ViewportSmoothHalftimeFov, 0.01f, 1.0f, "%.3f s");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Time for FOV to move halfway to target");
-                    }
-                    ImGui::Spacing();
-
-                    ImGui::Text("Lock Angle Halftime:");
-                    ImGui::SliderFloat("##LockAngleHalftime", &g_ViewportSmoothLockHalftimeAngle, 0.0f, 1.0f, "%.3f s");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Angle halftime when camera lock is active (Q key)\n0 = instant/perfect tracking, higher = smoother/slower tracking");
-                    }
-                    ImGui::Spacing();
-                    ImGui::Separator();
-                    ImGui::Spacing();
-
-                    ImGui::Text("Scroll Increment Settings");
-                    ImGui::Separator();
-                    ImGui::Spacing();
-
-                    ImGui::Text("Movement Speed Scroll Multiplier:");
-                    ImGui::SliderFloat("##SpeedScrollInc", &g_ViewportSmoothScrollSpeedIncrement, 0.01f, 0.50f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Speed multiplier per scroll click (e.g., 0.10 = 10%% increase/decrease per click)");
-                    }
-                    ImGui::Spacing();
-
-                    ImGui::Text("FOV Scroll Increment:");
-                    ImGui::SliderFloat("##FovScrollInc", &g_ViewportSmoothScrollFovIncrement, 0.5f, 10.0f, "%.1f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("FOV change per Shift+Scroll click");
-                    }
-                    ImGui::Spacing();
-                    ImGui::Separator();
-                    ImGui::Spacing();
-
-                    ImGui::Text("Input Settings");
-                    ImGui::Separator();
-                    ImGui::Spacing();
-
-                    ImGui::Checkbox("Enable Analog Input", &g_ViewportSmoothAnalogInput);
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Enable analog keyboard input (Wooting, etc.)\nSet your analog keyboard to 'Xbox Controller' mode\nLeft Stick: WASD movement | Right Stick Up/Down: Space/Ctrl (Up/Down movement)");
-                    }
-                    ImGui::Spacing();
-                    ImGui::Separator();
-
-                    if (ImGui::Button("Reset to Defaults")) {
-                        g_ViewportSmoothHalftimePos = 0.15f;
-                        g_ViewportSmoothHalftimeAngle = 0.10f;
-                        g_ViewportSmoothHalftimeFov = 0.20f;
-                        g_ViewportSmoothLockHalftimeAngle = 0.0f;
-                        g_ViewportSmoothScrollSpeedIncrement = 0.10f;
-                        g_ViewportSmoothScrollFovIncrement = 2.0f;
-                        g_ViewportSmoothAnalogInput = false;
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Close")) {
-                        g_ViewportSmoothSettingsOpen = false;
-                    }
-                }
-                ImGui::End();
-            }
-
             if (g_ViewportPlayersMenuOpen) {
                 const float spacing_y = ImGui::GetStyle().ItemSpacing.y;
                 const float row_h     = ImGui::GetFrameHeight();      // SmallButton height
@@ -6930,6 +7617,93 @@ RmbAfterControl:
         ImGui::End();
     } else {
         g_ViewportPlayersMenuOpen = false;
+        g_BackbufferViewportId = 0;
+    }
+
+    // Smooth camera settings window
+    if (g_ViewportSmoothSettingsOpen) {
+        ImGui::SetNextWindowSize(ImVec2(380, 360), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Smooth Camera Settings", &g_ViewportSmoothSettingsOpen)) {
+            ImGui::Text("Halftime Settings");
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("Position Halftime:");
+            ImGui::SliderFloat("##PosHalftime", &g_ViewportSmoothHalftimePos, 0.01f, 1.0f, "%.3f s");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Time for position to move halfway to target");
+            }
+            ImGui::Spacing();
+
+            ImGui::Text("Angle Halftime:");
+            ImGui::SliderFloat("##AngleHalftime", &g_ViewportSmoothHalftimeAngle, 0.01f, 1.0f, "%.3f s");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Time for rotation to move halfway to target");
+            }
+            ImGui::Spacing();
+
+            ImGui::Text("FOV Halftime:");
+            ImGui::SliderFloat("##FovHalftime", &g_ViewportSmoothHalftimeFov, 0.01f, 1.0f, "%.3f s");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Time for FOV to move halfway to target");
+            }
+            ImGui::Spacing();
+
+            ImGui::Text("Lock Angle Halftime:");
+            ImGui::SliderFloat("##LockAngleHalftime", &g_ViewportSmoothLockHalftimeAngle, 0.0f, 1.0f, "%.3f s");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Angle halftime when camera lock is active (Q key)\n0 = instant/perfect tracking, higher = smoother/slower tracking");
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("Scroll Increment Settings");
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("Movement Speed Scroll Multiplier:");
+            ImGui::SliderFloat("##SpeedScrollInc", &g_ViewportSmoothScrollSpeedIncrement, 0.01f, 0.50f, "%.2f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Speed multiplier per scroll click (e.g., 0.10 = 10%% increase/decrease per click)");
+            }
+            ImGui::Spacing();
+
+            ImGui::Text("FOV Scroll Increment:");
+            ImGui::SliderFloat("##FovScrollInc", &g_ViewportSmoothScrollFovIncrement, 0.5f, 10.0f, "%.1f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("FOV change per Shift+Scroll click");
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("Input Settings");
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Checkbox("Enable Analog Input", &g_ViewportSmoothAnalogInput);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Enable analog keyboard input (Wooting, etc.)\nSet your analog keyboard to 'Xbox Controller' mode\nLeft Stick: WASD movement | Right Stick Up/Down: Space/Ctrl (Up/Down movement)");
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+
+            if (ImGui::Button("Reset to Defaults")) {
+                g_ViewportSmoothHalftimePos = 0.15f;
+                g_ViewportSmoothHalftimeAngle = 0.10f;
+                g_ViewportSmoothHalftimeFov = 0.20f;
+                g_ViewportSmoothLockHalftimeAngle = 0.0f;
+                g_ViewportSmoothScrollSpeedIncrement = 0.10f;
+                g_ViewportSmoothScrollFovIncrement = 2.0f;
+                g_ViewportSmoothAnalogInput = false;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Close")) {
+                g_ViewportSmoothSettingsOpen = false;
+            }
+        }
+        ImGui::End();
     }
 
     // Sequencer window (ImGui Neo Sequencer)
@@ -8148,7 +8922,6 @@ RmbAfterControl:
         ImGui::End();
     }
     // ---------- ImGuizmo overlay + small control panel ----------
-    ImGuizmo::BeginFrame();
 
     // Global hotkeys for gizmo mode and mirv camera
     if (ImGui::GetActiveID() == 0) {
@@ -8211,21 +8984,36 @@ RmbAfterControl:
     using advancedfx::overlay::g_LastCampathCtx;
     if (g_LastCampathCtx.active)
     {
-        // Where to draw: if preview window is active, draw into it; otherwise use full overlay
-        ImVec2 ds = ImGui::GetIO().DisplaySize;
-        // While right mouse button passthrough is active, make gizmo intangible
-        // so it doesn't steal focus or reveal the cursor while the camera is controlled.
-        ImGuizmo::Enable(!Overlay::Get().IsRmbPassthroughActive());
-        ImGuizmo::SetOrthographic(false);
-        if (g_ShowBackbufferWindow && g_PreviewRectValid && g_PreviewDrawList) {
-            ImGuizmo::SetDrawlist(g_PreviewDrawList);
-            ImGuizmo::SetRect(g_PreviewRectMin.x, g_PreviewRectMin.y, g_PreviewRectSize.x, g_PreviewRectSize.y);
+        const bool haveBackbuffer = (g_ShowBackbufferWindow && g_PreviewRectValid && g_PreviewDrawList);
+        const bool workspaceMode = g_GroupIntoWorkspace;
+        // In workspace mode, only render the gizmo in the backbuffer preview window.
+        if (workspaceMode && !haveBackbuffer) {
+            // Skip gizmo entirely when workspace mode is active but no backbuffer window is shown
         } else {
-            ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList()); // draw on top
-            // Use main viewport rect for ImGuizmo normalization (accounts for viewport offset/DPI)
-            ImGuizmo::SetRect(0.0f, 0.0f, ds.x, ds.y);
+            // Anchor ImGuizmo's internal overlay window to the backbuffer viewport (prevents spawning a platform window)
+            if (workspaceMode && g_BackbufferViewportId != 0)
+                ImGui::SetNextWindowViewport(g_BackbufferViewportId);
+
+            // Initialize ImGuizmo for this frame only when we are going to draw it
+            ImGuizmo::BeginFrame();
+
+            // Where to draw: if preview window is active, draw into it; otherwise use full overlay
+            ImVec2 ds = ImGui::GetIO().DisplaySize;
+            // While right mouse button passthrough is active, make gizmo intangible
+            // so it doesn't steal focus or reveal the cursor while the camera is controlled.
+            ImGuizmo::Enable(!Overlay::Get().IsRmbPassthroughActive());
+            ImGuizmo::SetOrthographic(false);
+            if (haveBackbuffer) {
+                ImGuizmo::SetDrawlist(g_PreviewDrawList);
+                ImGuizmo::SetRect(g_PreviewRectMin.x, g_PreviewRectMin.y, g_PreviewRectSize.x, g_PreviewRectSize.y);
+            } else {
+                ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList()); // draw on top
+                // Use main viewport rect for ImGuizmo normalization (accounts for viewport offset/DPI)
+                ImGuizmo::SetRect(0.0f, 0.0f, ds.x, ds.y);
+            }
         }
-        auto DegToRad = [](double d){ return (float)(d * 3.14159265358979323846 / 180.0); };
+        if (!(workspaceMode && !haveBackbuffer)) {
+            auto DegToRad = [](double d){ return (float)(d * 3.14159265358979323846 / 180.0); };
 
         // Helper to convert Source (X=fwd,Y=left,Z=up) vectors into DirectX style (X=right,Y=up,Z=fwd)
         auto SrcToDx = [](float x, float y, float z, float out[3]) {
@@ -8319,7 +9107,7 @@ RmbAfterControl:
         // Prefer swapchain aspect if known
         float aspect = 0.0f;
         if (m_Rtv.height > 0) aspect = (float)m_Rtv.width / (float)m_Rtv.height;
-        else if (ds.y > 0.0f) aspect = ds.x / ds.y;
+        //else if (ds.y > 0.0f) aspect = ds.x / ds.y;
         if (aspect <= 0.0f) aspect = 16.0f/9.0f;
 
         // Convert game FOV to a vertical FOV for our GL-style projection.
@@ -8503,6 +9291,7 @@ RmbAfterControl:
             }
         }
         wasUsing = usingNow;
+        }
     }
 
 #else
