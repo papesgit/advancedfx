@@ -853,6 +853,10 @@ static bool g_ShowHud = false;                        // draw native HUD in view
 static int  g_GsiPort = 31983;                        // must match CS2 cfg
 static GsiHttpServer g_GsiServer;
 static char g_FilteredPlayers[512] = "";              // comma-separated player names to filter out (e.g., coaches)
+static bool g_GsiConfigExists = false;                // GSI config file exists in CS2 cfg folder
+static bool g_GsiConfigCheckDone = false;             // Have we checked for GSI config yet?
+static bool g_ShowGsiInstallPopup = false;            // Show GSI installation success popup
+static std::string g_GsiInstallPath = "";             // Path where GSI config was installed
 
 // Smoke detonation tracking (detect when smokes become stationary)
 struct SmokeTracker {
@@ -2081,6 +2085,67 @@ static SvgIconTex LoadSvgIcon(ID3D11Device* device, const std::wstring& svgPath,
     }
 
     return result;
+}
+
+// Helper function to get CS2 cfg folder path
+// Returns empty string if path cannot be determined
+static std::wstring GetCS2CfgFolderPath() {
+    try {
+        // CS2 cfg folder is simply csgo/cfg/ relative to current working directory
+        std::filesystem::path cfgPath = std::filesystem::current_path() / ".." / ".." / "csgo" / "cfg";
+
+        // Normalize the path
+        cfgPath = std::filesystem::absolute(cfgPath);
+
+        return cfgPath.wstring();
+    } catch (...) {
+        return L"";
+    }
+}
+
+// Check if GSI config exists in CS2 cfg folder
+static bool CheckGsiConfigExists() {
+    std::wstring cfgFolder = GetCS2CfgFolderPath();
+    if (cfgFolder.empty()) return false;
+
+    std::filesystem::path gsiConfigPath = std::filesystem::path(cfgFolder) / L"gamestate_integration_drweissbrot_hud_paper.cfg";
+
+    try {
+        return std::filesystem::exists(gsiConfigPath);
+    } catch (...) {
+        return false;
+    }
+}
+
+// Install GSI config by copying from resources to CS2 cfg folder
+// Returns true on success, false on failure
+static bool InstallGsiConfig() {
+    // Get source path (from resources folder in binaries)
+    const wchar_t* hf = GetHlaeFolderW();
+    if (!hf || !*hf) return false;
+
+    std::filesystem::path sourcePath = std::filesystem::path(hf) / L"resources" / L"gamestate_integration_drweissbrot_hud_paper.cfg";
+
+    // Get destination path (CS2 cfg folder)
+    std::wstring cfgFolder = GetCS2CfgFolderPath();
+    if (cfgFolder.empty()) return false;
+
+    std::filesystem::path destPath = std::filesystem::path(cfgFolder) / L"gamestate_integration_drweissbrot_hud_paper.cfg";
+
+    try {
+        // Ensure the destination directory exists
+        std::filesystem::create_directories(destPath.parent_path());
+
+        // Copy the file
+        std::filesystem::copy_file(sourcePath, destPath, std::filesystem::copy_options::overwrite_existing);
+
+        // Store the installation path for the popup message
+        g_GsiInstallPath = destPath.parent_path().string();
+
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 // Get or load grenade icon from cache
@@ -4904,8 +4969,28 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             ImGui::SetNextItemWidth(120.0f);
             ImGui::InputInt("Port", &g_GsiPort);
             ImGui::SameLine();
-            if (ImGui::SmallButton(g_GsiServer.IsRunning() ? "Restart" : "Start")) {
-                g_GsiServer.Stop(); g_GsiServer.Start(g_GsiPort);
+
+            // Check if GSI config exists (only once per session)
+            if (!g_GsiConfigCheckDone) {
+                g_GsiConfigExists = CheckGsiConfigExists();
+                g_GsiConfigCheckDone = true;
+            }
+
+            // Show Install button if config doesn't exist, otherwise show Start/Restart
+            if (!g_GsiConfigExists) {
+                if (ImGui::SmallButton("Install")) {
+                    if (InstallGsiConfig()) {
+                        g_GsiConfigExists = true;
+                        g_ShowGsiInstallPopup = true;
+                    }
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Install GSI config file to CS2 cfg folder");
+                }
+            } else {
+                if (ImGui::SmallButton(g_GsiServer.IsRunning() ? "Restart" : "Start")) {
+                    g_GsiServer.Stop(); g_GsiServer.Start(g_GsiPort);
+                }
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("Stop")) {
@@ -5092,6 +5177,27 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         }
 
         ImGui::EndTabBar();
+    }
+
+    // GSI Installation Success Popup
+    if (g_ShowGsiInstallPopup) {
+        ImGui::OpenPopup("GSI Config Installed##modal");
+        g_ShowGsiInstallPopup = false;
+    }
+    if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+        ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
+    if (ImGui::BeginPopupModal("GSI Config Installed##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("gamestate_integration_drweissbrot_hud_paper.cfg installed in");
+        ImGui::TextWrapped("%s", g_GsiInstallPath.c_str());
+        ImGui::Separator();
+        ImGui::TextWrapped("Please restart the game to initialize the GSI.");
+        ImGui::Separator();
+
+        if (ImGui::Button("OK", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
     }
 
     ImGui::End();
