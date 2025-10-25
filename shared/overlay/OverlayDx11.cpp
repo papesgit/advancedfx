@@ -390,6 +390,9 @@ static bool   g_SaveWorkspaceIniNextFrame = false;  // after building first-time
 // Separate .ini files for normal and workspace modes
 static std::string g_IniFileNormal = "imgui.ini";
 static std::string g_IniFileWorkspace = "imgui_workspace.ini";
+static std::string g_IniFileShared = "imgui_shared.ini";  // Shared settings between modes
+static bool g_WritingSharedSectionsToSharedFile = false;  // Flag to control where shared sections are written
+static double g_LastSharedSettingsSaveTime = 0.0;  // Track when we last saved shared settings
 
 // Store window visibility settings from .ini to apply after workspace is created
 struct WorkspaceWindowSettings {
@@ -1829,6 +1832,9 @@ static void OverlayPaths_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* en
     else if (key == "DemoDir") s->demoDir = val;
 }
 static void OverlayPaths_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out_buf) {
+    // Only write to shared file, not to mode-specific .ini files
+    if (!g_WritingSharedSectionsToSharedFile) return;
+
     out_buf->appendf("[%s][%s]\n", handler->TypeName, "Paths");
     if (!g_OverlayPaths.campathDir.empty()) out_buf->appendf("CampathDir=%s\n", g_OverlayPaths.campathDir.c_str());
     if (!g_OverlayPaths.recordBrowseDir.empty()) out_buf->appendf("RecordBrowseDir=%s\n", g_OverlayPaths.recordBrowseDir.c_str());
@@ -1889,6 +1895,9 @@ static void CameraProfiles_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* 
 }
 
 static void CameraProfiles_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out_buf) {
+    // Only write to shared file, not to mode-specific .ini files
+    if (!g_WritingSharedSectionsToSharedFile) return;
+
     if (g_CameraProfiles.empty()) return; // Don't write anything if no profiles
 
     for (const auto& profile : g_CameraProfiles) {
@@ -1966,6 +1975,9 @@ static void CameraGroups_ReadLine(ImGuiContext*, ImGuiSettingsHandler*, void* en
 
 
 static void CameraGroups_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out_buf) {
+    // Only write to shared file, not to mode-specific .ini files
+    if (!g_WritingSharedSectionsToSharedFile) return;
+
     if (g_CameraGroups.empty()) return;
 
     for (const auto& group : g_CameraGroups) {
@@ -1989,6 +2001,68 @@ static void CameraGroups_WriteAll(ImGuiContext*, ImGuiSettingsHandler* handler, 
         }
         out_buf->append("\n");
     }
+}
+
+// Helper functions for shared settings (paths, profiles, groups)
+static void SaveSharedSettings() {
+    // Save only the shared sections to the shared .ini file
+    ImGuiTextBuffer buf;
+
+    // Set flag so WriteAll functions know to write to the shared file
+    g_WritingSharedSectionsToSharedFile = true;
+
+    // Write HLAEOverlayPaths
+    ImGuiSettingsHandler* pathHandler = ImGui::FindSettingsHandler("HLAEOverlayPaths");
+    if (pathHandler && pathHandler->WriteAllFn) {
+        pathHandler->WriteAllFn(ImGui::GetCurrentContext(), pathHandler, &buf);
+    }
+
+    // Write HLAECameraProfiles
+    ImGuiSettingsHandler* profileHandler = ImGui::FindSettingsHandler("HLAECameraProfiles");
+    if (profileHandler && profileHandler->WriteAllFn) {
+        profileHandler->WriteAllFn(ImGui::GetCurrentContext(), profileHandler, &buf);
+    }
+
+    // Write HLAECameraGroups
+    ImGuiSettingsHandler* groupHandler = ImGui::FindSettingsHandler("HLAECameraGroups");
+    if (groupHandler && groupHandler->WriteAllFn) {
+        groupHandler->WriteAllFn(ImGui::GetCurrentContext(), groupHandler, &buf);
+    }
+
+    // Reset flag
+    g_WritingSharedSectionsToSharedFile = false;
+
+    // Save to shared file
+    if (buf.size() > 0) {
+        FILE* f = fopen(g_IniFileShared.c_str(), "wb");
+        if (f) {
+            fwrite(buf.c_str(), 1, buf.size(), f);
+            fclose(f);
+        }
+    }
+}
+
+static void LoadSharedSettings() {
+    // Load shared sections from the shared .ini file using LoadIniSettingsFromMemory
+    // This prevents interfering with workspace layout and other ImGui state
+    FILE* f = fopen(g_IniFileShared.c_str(), "rb");
+    if (!f) return;
+
+    fseek(f, 0, SEEK_END);
+    long fileSize = ftell(f);
+    if (fileSize <= 0) {
+        fclose(f);
+        return;
+    }
+    fseek(f, 0, SEEK_SET);
+
+    std::vector<char> buffer(fileSize + 1);
+    size_t bytesRead = fread(buffer.data(), 1, fileSize, f);
+    fclose(f);
+    buffer[bytesRead] = '\0';
+
+    // Load from memory instead of disk to avoid resetting ImGui state
+    ImGui::LoadIniSettingsFromMemory(buffer.data(), bytesRead);
 }
 
 // Helper function to load SVG icon using NanoSVG
@@ -3097,6 +3171,10 @@ bool OverlayDx11::Initialize() {
             ImGui::LoadIniSettingsFromDisk(io4.IniFilename);
         }
     }
+
+    // Load shared settings (paths, profiles, groups) from shared .ini file
+    // This ensures these settings are synced between normal and workspace modes
+    LoadSharedSettings();
 
     // Route Win32 messages to ImGui when visible
     if (!Overlay::Get().GetInputRouter()) {
@@ -5135,10 +5213,28 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 ImGui::BeginDisabled(g_GroupIntoWorkspace);
                 bool prev = g_GroupIntoWorkspace;
                 if (ImGui::Checkbox("External workspace mode (experimental)", &g_GroupIntoWorkspace)) {
+                    static bool closedwindows = false;
+                    if (!closedwindows) {
+                        g_ShowAttachmentControl = false;
+                        g_ShowBackbufferWindow = false;
+                        g_ShowCameraControl = false;
+                        g_ShowDofWindow = false;
+                        g_ShowGizmo = false;
+                        g_ShowGroupViewWindow = false;
+                        g_ShowMultikillWindow = false;
+                        g_ShowObservingBindings = false;
+                        g_ShowObservingCameras = false;
+                        g_ShowOverlayConsole = false;
+                        g_ShowRadar = false;
+                        g_ShowRadarSettings = false;
+                        g_ShowSequencer = false;
+                        closedwindows = true;
+                    }
                     Overlay::Get().SetWorkspaceEnabled(g_GroupIntoWorkspace);
                     if (g_GroupIntoWorkspace && !prev) {
                         // Save current .ini before switching
                         ImGui::SaveIniSettingsToDisk(g_IniFileNormal.c_str());
+                        SaveSharedSettings();  // Save shared settings before switching
 
                         // Switch to workspace .ini
                         ImGuiIO& io = ImGui::GetIO();
@@ -5155,6 +5251,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                             g_SaveWorkspaceIniNextFrame = true; // and persist it once built
                         }
                         // Load if present (no-op if missing)
+                        LoadSharedSettings();  // Load shared settings after switching
                         ImGui::LoadIniSettingsFromDisk(g_IniFileWorkspace.c_str());
 
                         g_WorkspaceNeedsLayout = true; // build layout next frame
@@ -5772,7 +5869,8 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             ImGuiIO& io_s = ImGui::GetIO();
             if (io_s.IniFilename && io_s.IniFilename[0]) {
                 ImGui::SaveIniSettingsToDisk(io_s.IniFilename);
-                advancedfx::Message("Overlay: Saved camera profiles to '%s'\n", io_s.IniFilename);
+                SaveSharedSettings();  // Also save shared settings (paths, profiles, groups)
+                advancedfx::Message("Overlay: Saved camera profiles to '%s' and '%s'\n", io_s.IniFilename, g_IniFileShared.c_str());
             }
         }
 
@@ -9464,6 +9562,18 @@ void OverlayDx11::Render() {
             m_Context->OMSetRenderTargets(1, rtvs, nullptr);
             ImGui::Render();
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+            // Auto-save shared settings (paths, profiles, groups) when they're dirty
+            // Save at most once every 5 seconds to avoid excessive I/O
+            ImGuiContext* ctx = ImGui::GetCurrentContext();
+            if (ctx && ctx->SettingsDirtyTimer > 0.0f) {
+                double currentTime = ImGui::GetTime();
+                if (currentTime - g_LastSharedSettingsSaveTime > 5.0) {
+                    SaveSharedSettings();
+                    g_LastSharedSettingsSaveTime = currentTime;
+                }
+            }
+
             rtv->Release();
         }
         backbuffer->Release();
