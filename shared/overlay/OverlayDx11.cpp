@@ -1,4 +1,4 @@
-#include "OverlayDx11.h"
+﻿#include "OverlayDx11.h"
 #include "Overlay.h"
 #include "InputRouter.h"
 
@@ -5794,6 +5794,18 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
         static char profileNameInput[256] = {0};
         static char cameraNameInput[256] = {0};
 
+        // Rename camera modal state
+        static int  renameCameraIndex = -1;
+        static char renameCameraInput[256] = {0};
+        static bool s_RequestOpenRenamePopup = false;
+        // Folder population dialog (directory picker)
+        static ImGui::FileBrowser s_PopulateFolderDialog(
+            ImGuiFileBrowserFlags_SelectDirectory |
+            ImGuiFileBrowserFlags_CloseOnEsc |
+            ImGuiFileBrowserFlags_EditPathString
+        );
+        s_PopulateFolderDialog.SetTitle("Select Campath Folder");
+
         // Header with buttons
         if (ImGui::Button("Add Profile")) {
             profileNameInput[0] = '\0';
@@ -5808,6 +5820,12 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             cameraNameInput[0] = '\0';
             showAddCameraModal = true;
             ImGui::OpenPopup("Add Camera##modal");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Populate from Folder")) {
+            if (!g_OverlayPaths.campathDir.empty())
+                s_PopulateFolderDialog.SetDirectory(g_OverlayPaths.campathDir);
+            s_PopulateFolderDialog.Open();
         }
         ImGui::EndDisabled();
 
@@ -5929,6 +5947,63 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             }
 
             ImGui::EndPopup();
+        }
+
+        // Folder population dialog display and handling
+        if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+            ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
+        s_PopulateFolderDialog.Display();
+        if (s_PopulateFolderDialog.HasSelected()) {
+            std::filesystem::path selectedDir = s_PopulateFolderDialog.GetSelected();
+            s_PopulateFolderDialog.ClearSelected();
+            try { g_OverlayPaths.campathDir = selectedDir.string(); } catch(...) {}
+            if (g_SelectedProfileIndex >= 0 && g_SelectedProfileIndex < (int)g_CameraProfiles.size()) {
+                CameraProfile &profile = g_CameraProfiles[g_SelectedProfileIndex];
+
+                // Helper to make unique camera names within the profile
+                auto makeUniqueName = [&profile](const std::string &base) {
+                    std::string name = base;
+                    bool unique = false;
+                    int suffix = 2;
+                    while (!unique) {
+                        unique = true;
+                        for (const auto &c : profile.cameras) {
+                            if (!_stricmp(c.name.c_str(), name.c_str())) { unique = false; break; }
+                        }
+                        if (!unique) {
+                            name = base + " (" + std::to_string(suffix++) + ")";
+                        }
+                    }
+                    return name;
+                };
+
+                int added = 0;
+                try {
+                    for (const auto &entry : std::filesystem::directory_iterator(selectedDir)) {
+                        if (!entry.is_regular_file()) continue;
+                        std::string pathStr = entry.path().string();
+                        // Recognize campath by attempting to parse first point
+                        CampathFirstPoint fp = ParseCampathFirstPoint(pathStr);
+                        if (!fp.valid) continue;
+
+                        std::string baseName = entry.path().stem().string();
+                        std::string camName = makeUniqueName(baseName);
+                        CameraItem newCam;
+                        newCam.name = camName;
+                        newCam.camPathFile = pathStr;
+                        profile.cameras.push_back(std::move(newCam));
+                        added++;
+                    }
+                } catch (...) {
+                    // ignore errors during iteration
+                }
+                if (added > 0) {
+                    ImGui::MarkIniSettingsDirty();
+                    advancedfx::Message("Overlay: Added %d cameras from folder: %s\n", added, selectedDir.string().c_str());
+                } else {
+                    advancedfx::Warning("Overlay: No campath files found in folder: %s\n", selectedDir.string().c_str());
+                }
+            }
         }
 
         ImGui::Separator();
@@ -6246,8 +6321,18 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 }
                 anyButtonClicked |= ImGui::IsItemHovered();
 
-                // Browse button (below Remove)
+                // Rename button (between Remove and Browse)
                 ImGui::SetCursorScreenPos(ImVec2(itemMax.x - 60, itemMin.y + 20.0f * g_CameraRectScale));
+                if (ImGui::SmallButton("Rename")) {
+                    renameCameraIndex = (int)camIdx;
+                    _snprintf_s(renameCameraInput, _TRUNCATE, "%s", camera.name.c_str());
+                    s_RequestOpenRenamePopup = true;
+                    anyButtonClicked = true;
+                }
+                anyButtonClicked |= ImGui::IsItemHovered();
+
+                // Browse button (below Remove)
+                ImGui::SetCursorScreenPos(ImVec2(itemMax.x - 60, itemMin.y + 38.0f * g_CameraRectScale));
                 if (ImGui::SmallButton("Browse")) {
                     if (cameraFileBrowsers.find(camIdx) == cameraFileBrowsers.end()) {
                         cameraFileBrowsers[camIdx] = ImGui::FileBrowser(
@@ -6264,7 +6349,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 anyButtonClicked |= ImGui::IsItemHovered();
 
                 // Image button (below Browse)
-                ImGui::SetCursorScreenPos(ImVec2(itemMax.x - 60, itemMin.y + 38.0f * g_CameraRectScale));
+                ImGui::SetCursorScreenPos(ImVec2(itemMax.x - 60, itemMin.y + 56.0f * g_CameraRectScale));
                 if (ImGui::SmallButton("Image")) {
                     if (imageFileBrowsers.find(camIdx) == imageFileBrowsers.end()) {
                         imageFileBrowsers[camIdx] = ImGui::FileBrowser(
@@ -6282,7 +6367,7 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
                 anyButtonClicked |= ImGui::IsItemHovered();
 
                 // Screen button (below Image) - captures backbuffer and saves it
-                ImGui::SetCursorScreenPos(ImVec2(itemMax.x - 60, itemMin.y + 56.0f * g_CameraRectScale));
+                ImGui::SetCursorScreenPos(ImVec2(itemMax.x - 60, itemMin.y + 74.0f * g_CameraRectScale));
                 if (ImGui::SmallButton("Screen")) {
                     // Capture backbuffer and save it with the campath filename
                     if (m_BackbufferPreview.texture && !camera.camPathFile.empty()) {
@@ -6505,6 +6590,38 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (!ImGui::IsMouseDown(0)) { s_CameraDragActive = false; s_CameraPressedIndex = -1; }
         } else {
             ImGui::TextDisabled("No profile selected. Create or select a profile to add cameras.");
+        }
+
+        // Rename Camera Modal (opened per-camera from the list)
+        if (s_RequestOpenRenamePopup) {
+            ImGui::OpenPopup("Rename Camera##modal");
+            s_RequestOpenRenamePopup = false;
+        }
+        if (g_GroupIntoWorkspace && g_WorkspaceViewportId)
+            ImGui::SetNextWindowViewport(g_WorkspaceViewportId);
+        if (ImGui::BeginPopupModal("Rename Camera##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Enter new name:");
+            ImGui::SetNextItemWidth(300.0f);
+            ImGui::InputText("##rename_camera", renameCameraInput, sizeof(renameCameraInput));
+            ImGui::Separator();
+            if (ImGui::Button("OK", ImVec2(120, 0))) {
+                if (renameCameraInput[0] != '\0' &&
+                    g_SelectedProfileIndex >= 0 && g_SelectedProfileIndex < (int)g_CameraProfiles.size() &&
+                    renameCameraIndex >= 0 && renameCameraIndex < (int)g_CameraProfiles[g_SelectedProfileIndex].cameras.size()) {
+                    auto &cam = g_CameraProfiles[g_SelectedProfileIndex].cameras[renameCameraIndex];
+                    cam.name = renameCameraInput;
+                    advancedfx::Message("Overlay: Renamed camera to '%s'\n", renameCameraInput);
+                    ImGui::MarkIniSettingsDirty();
+                }
+                ImGui::CloseCurrentPopup();
+                renameCameraIndex = -1;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+                renameCameraIndex = -1;
+            }
+            ImGui::EndPopup();
         }
 
         ImGui::End();
