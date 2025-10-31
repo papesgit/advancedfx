@@ -6,6 +6,27 @@
 
 <release>
 <name>HLAE</name>
+<version>2.187.4</version>
+<time>2025-10-22T18:54Z</time>"
+<changes>
+<change type="updated">Included AfxHookSource2 0.37.4 (2025-10-22T18:54Z)</change>
+</changes>
+</release>
+
+
+<release>
+<name>HLAE</name>
+<version>2.187.3</version>
+<time>2025-10-15T15:55Z</time>
+<changes>
+<change type="updated">Included AfxHookSource 1.132.2 (2025-10-15T15:55Z)</change>
+<change type="updated">Included AfxHookSource2 0.37.3 (2025-10-15T15:55Z)</change>
+</changes>
+</release>
+
+
+<release>
+<name>HLAE</name>
 <version>2.187.2</version>
 <time>2025-10-02T01:00Z</time>
 <changes>
