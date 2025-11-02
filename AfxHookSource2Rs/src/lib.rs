@@ -152,6 +152,28 @@ extern "C" {
     fn afx_hook_source2_get_cur_time(outCurTime: & mut f64);
 
     fn afx_hook_source2_get_entity_ref_attachment(p_ref: * mut AfxEntityRef, attachment_name: *const c_char, pos: * mut advancedfx::math::Vector3, angs: * mut advancedfx::math::Quaternion) -> bool;
+
+    // MirvInput direct mutation (FFI exposed by AfxHookSource2Rs.cpp)
+    fn afx_hook_source2_mirv_input_set_angles(rx: f32, ry: f32, rz: f32);
+    fn afx_hook_source2_mirv_input_set_position(x: f32, y: f32, z: f32);
+    fn afx_hook_source2_mirv_input_set_fov(fov: f32);
+
+    fn afx_hook_source2_mirv_input_set_smooth_enabled(value: bool);
+    fn afx_hook_source2_mirv_input_get_smooth_enabled() -> bool;
+    fn afx_hook_source2_mirv_input_set_half_time_ang(value: f64);
+    fn afx_hook_source2_mirv_input_get_half_time_ang() -> f64;
+    fn afx_hook_source2_mirv_input_set_half_time_vec(value: f64);
+    fn afx_hook_source2_mirv_input_get_half_time_vec() -> f64;
+    fn afx_hook_source2_mirv_input_set_half_time_fov(value: f64);
+    fn afx_hook_source2_mirv_input_get_half_time_fov() -> f64;
+
+    fn afx_hook_source2_get_last_camera_data(x: & mut f32, y: & mut f32, z: & mut f32, r_x: & mut f32, r_y: & mut f32, r_z: & mut f32, fov: & mut f32);
+    fn afx_hook_source2_mirv_input_set_camera_control_mode(enable: bool);
+    fn afx_hook_source2_mirv_input_get_camera_control_mode() -> bool;
+    fn afx_hook_source2_mirv_input_get_mouse_yaw_speed() -> f64;
+    fn afx_hook_source2_mirv_input_set_mouse_yaw_speed(v: f64);
+    fn afx_hook_source2_mirv_input_get_mouse_pitch_speed() -> f64;
+    fn afx_hook_source2_mirv_input_set_mouse_pitch_speed(v: f64);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1071,6 +1093,111 @@ fn mirv_exec(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
         }
     }
     return Ok(JsValue::Undefined)
+}
+
+// --- MirvInput direct control JS bindings ---
+
+fn mirv_set_mirv_input_angles(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if args.len() >= 3 {
+        let rx = args[0].to_number(context)? as f32; // pitch
+        let ry = args[1].to_number(context)? as f32; // yaw
+        let rz = args[2].to_number(context)? as f32; // roll
+        unsafe { afx_hook_source2_mirv_input_set_angles(rx, ry, rz); }
+        return Ok(JsValue::Undefined);
+    }
+    Err(advancedfx::js::errors::error_arguments(context).into())
+}
+
+fn mirv_set_mirv_input_position(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if args.len() >= 3 {
+        let x = args[0].to_number(context)? as f32;
+        let y = args[1].to_number(context)? as f32;
+        let z = args[2].to_number(context)? as f32;
+        unsafe { afx_hook_source2_mirv_input_set_position(x, y, z); }
+        return Ok(JsValue::Undefined);
+    }
+    Err(advancedfx::js::errors::error_arguments(context).into())
+}
+
+fn mirv_set_mirv_input_fov(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if args.len() >= 1 {
+        let fov = args[0].to_number(context)? as f32;
+        unsafe { afx_hook_source2_mirv_input_set_fov(fov); }
+        return Ok(JsValue::Undefined);
+    }
+    Err(advancedfx::js::errors::error_arguments(context).into())
+}
+
+fn mirv_get_mirv_input_smooth_enabled(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    let v = unsafe { afx_hook_source2_mirv_input_get_smooth_enabled() };
+    Ok(JsValue::Boolean(v))
+}
+
+fn mirv_set_mirv_input_smooth_enabled(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if args.len() >= 1 {
+        let v = args[0].to_boolean();
+        unsafe { afx_hook_source2_mirv_input_set_smooth_enabled(v); }
+        return Ok(JsValue::Undefined);
+    }
+    Err(advancedfx::js::errors::error_arguments(context).into())
+}
+
+fn mirv_get_mirv_input_half_time_ang(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    let v = unsafe { afx_hook_source2_mirv_input_get_half_time_ang() };
+    Ok(JsValue::Rational(v))
+}
+
+fn mirv_set_mirv_input_half_time_ang(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if args.len() >= 1 {
+        let v = args[0].to_number(context)? as f64;
+        unsafe { afx_hook_source2_mirv_input_set_half_time_ang(v); }
+        return Ok(JsValue::Undefined);
+    }
+    Err(advancedfx::js::errors::error_arguments(context).into())
+}
+
+fn mirv_get_mirv_input_half_time_vec(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    let v = unsafe { afx_hook_source2_mirv_input_get_half_time_vec() };
+    Ok(JsValue::Rational(v))
+}
+
+fn mirv_set_mirv_input_half_time_vec(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if args.len() >= 1 {
+        let v = args[0].to_number(context)? as f64;
+        unsafe { afx_hook_source2_mirv_input_set_half_time_vec(v); }
+        return Ok(JsValue::Undefined);
+    }
+    Err(advancedfx::js::errors::error_arguments(context).into())
+}
+
+fn mirv_get_mirv_input_half_time_fov(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    let v = unsafe { afx_hook_source2_mirv_input_get_half_time_fov() };
+    Ok(JsValue::Rational(v))
+}
+
+fn mirv_set_mirv_input_half_time_fov(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if args.len() >= 1 {
+        let v = args[0].to_number(context)? as f64;
+        unsafe { afx_hook_source2_mirv_input_set_half_time_fov(v); }
+        return Ok(JsValue::Undefined);
+    }
+    Err(advancedfx::js::errors::error_arguments(context).into())
+}
+
+fn mirv_get_last_camera_data(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let mut x: f32 = 0.0; let mut y: f32 = 0.0; let mut z: f32 = 0.0;
+    let mut rx: f32 = 0.0; let mut ry: f32 = 0.0; let mut rz: f32 = 0.0; let mut fov: f32 = 90.0;
+    unsafe { afx_hook_source2_get_last_camera_data(&mut x, &mut y, &mut z, &mut rx, &mut ry, &mut rz, &mut fov); }
+    let obj = ObjectInitializer::new(context)
+        .property(js_string!("x"), JsValue::Rational(x.into()), Attribute::all())
+        .property(js_string!("y"), JsValue::Rational(y.into()), Attribute::all())
+        .property(js_string!("z"), JsValue::Rational(z.into()), Attribute::all())
+        .property(js_string!("rX"), JsValue::Rational(rx.into()), Attribute::all())
+        .property(js_string!("rY"), JsValue::Rational(ry.into()), Attribute::all())
+        .property(js_string!("rZ"), JsValue::Rational(rz.into()), Attribute::all())
+        .property(js_string!("fov"), JsValue::Rational(fov.into()), Attribute::all())
+        .build();
+    Ok(JsValue::Object(obj))
 }
 
 fn mirv_set_on_record_start(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -2468,6 +2595,114 @@ impl AfxHookSource2Rs {
         let fn_mirv_get_on_remove_entity = NativeFunction::from_fn_ptr(mirv_get_on_remove_entity).to_js_function(context.realm());
       
         let object = ObjectInitializer::with_native_data::<MirvStruct>(mirv, &mut context)
+        .function(
+            NativeFunction::from_fn_ptr(mirv_set_mirv_input_angles),
+            js_string!("setMirvInputAngles"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_get_last_camera_data),
+            js_string!("getLastCameraData"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_set_mirv_input_position),
+            js_string!("setMirvInputPosition"),
+            3,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_set_mirv_input_fov),
+            js_string!("setMirvInputFov"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_get_mirv_input_smooth_enabled),
+            js_string!("getMirvInputSmoothEnabled"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_set_mirv_input_smooth_enabled),
+            js_string!("setMirvInputSmoothEnabled"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_get_mirv_input_half_time_ang),
+            js_string!("getMirvInputHalfTimeAng"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_set_mirv_input_half_time_ang),
+            js_string!("setMirvInputHalfTimeAng"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_get_mirv_input_half_time_vec),
+            js_string!("getMirvInputHalfTimeVec"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_set_mirv_input_half_time_vec),
+            js_string!("setMirvInputHalfTimeVec"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_get_mirv_input_half_time_fov),
+            js_string!("getMirvInputHalfTimeFov"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_set_mirv_input_half_time_fov),
+            js_string!("setMirvInputHalfTimeFov"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_this, _args, _context| {
+                let v = unsafe { afx_hook_source2_mirv_input_get_mouse_yaw_speed() };
+                Ok(JsValue::Rational(v))
+            }),
+            js_string!("getMirvInputMouseYawSpeed"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_this, args, context| {
+                if args.len() >= 1 { let v = args[0].to_number(context)? as f64; unsafe { afx_hook_source2_mirv_input_set_mouse_yaw_speed(v); } return Ok(JsValue::Undefined); }
+                Err(advancedfx::js::errors::error_arguments(context).into())
+            }),
+            js_string!("setMirvInputMouseYawSpeed"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_this, _args, _context| {
+                let v = unsafe { afx_hook_source2_mirv_input_get_mouse_pitch_speed() };
+                Ok(JsValue::Rational(v))
+            }),
+            js_string!("getMirvInputMousePitchSpeed"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_this, args, context| {
+                if args.len() >= 1 { let v = args[0].to_number(context)? as f64; unsafe { afx_hook_source2_mirv_input_set_mouse_pitch_speed(v); } return Ok(JsValue::Undefined); }
+                Err(advancedfx::js::errors::error_arguments(context).into())
+            }),
+            js_string!("setMirvInputMousePitchSpeed"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_this, args, context| {
+                if args.len() >= 1 { let v = args[0].to_boolean(); unsafe { afx_hook_source2_mirv_input_set_camera_control_mode(v); } return Ok(JsValue::Undefined); }
+                Err(advancedfx::js::errors::error_arguments(context).into())
+            }),
+            js_string!("setMirvInputCameraControlMode"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(|_this, _args, _context| {
+                let v = unsafe { afx_hook_source2_mirv_input_get_camera_control_mode() };
+                Ok(JsValue::Boolean(v))
+            }),
+            js_string!("getMirvInputCameraControlMode"),
+            0,
+        )
         .function(
             NativeFunction::from_fn_ptr(mirv_get_cur_time),
             js_string!("getCurTime"),

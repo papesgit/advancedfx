@@ -18,6 +18,12 @@
 #include <string>
 #include <filesystem>
 
+#include "../shared/MirvInput.h"
+
+// Forward from main.cpp
+MirvInput * Afx_GetMirvInput();
+void Afx_GetLastCameraData(double & x, double & y, double & z, double & rX, double & rY, double & rZ, float & fov);
+
 extern SOURCESDK::CS2::ISource2EngineToClient * g_pEngineToClient;
 
 extern "C" void afx_hook_source2_message(const char * pszValue) {
@@ -259,6 +265,90 @@ void AfxHookSource2Rs_Engine_OnRemoveEntity(void * pEntityRef, int handle) {
     if(nullptr != g_AfxHookSource2Rs_Engine) {
         afx_hook_source2_rs_on_remove_entity(g_AfxHookSource2Rs_Engine, pEntityRef, handle);
     }
+}
+
+extern "C" void afx_hook_source2_mirv_input_set_angles(float rx, float ry, float rz) {
+    if (auto mi = Afx_GetMirvInput()) { mi->SetRx(rx); mi->SetRy(ry); mi->SetRz(rz); }
+}
+
+extern "C" void afx_hook_source2_mirv_input_set_position(float x, float y, float z) {
+    if (auto mi = Afx_GetMirvInput()) { mi->SetTx(x); mi->SetTy(y); mi->SetTz(z); }
+}
+
+extern "C" void afx_hook_source2_mirv_input_set_fov(float fov) {
+    if (auto mi = Afx_GetMirvInput()) { mi->SetFov(fov); }
+}
+
+extern "C" void afx_hook_source2_mirv_input_set_smooth_enabled(FFIBool v) {
+    if (auto mi = Afx_GetMirvInput()) { mi->SetSmoothEnabled(FFIBOOL_TO_BOOL(v)); }
+}
+
+extern "C" FFIBool afx_hook_source2_mirv_input_get_smooth_enabled() {
+    if (auto mi = Afx_GetMirvInput()) { return BOOL_TO_FFIBOOL(mi->GetSmoothEnabled()); }
+    return FFIBOOL_FALSE;
+}
+
+extern "C" void afx_hook_source2_mirv_input_set_half_time_ang(double v) {
+    if (auto mi = Afx_GetMirvInput()) { mi->SetHalfTimeAng(v); }
+}
+
+extern "C" double afx_hook_source2_mirv_input_get_half_time_ang() {
+    if (auto mi = Afx_GetMirvInput()) { return mi->GetHalfTimeAng(); }
+    return 0.0;
+}
+
+extern "C" void afx_hook_source2_mirv_input_set_half_time_vec(double v) {
+    if (auto mi = Afx_GetMirvInput()) { mi->SetHalfTimeVec(v); }
+}
+
+extern "C" double afx_hook_source2_mirv_input_get_half_time_vec() {
+    if (auto mi = Afx_GetMirvInput()) { return mi->GetHalfTimeVec(); }
+    return 0.0;
+}
+
+extern "C" void afx_hook_source2_mirv_input_set_half_time_fov(double v) {
+    if (auto mi = Afx_GetMirvInput()) { mi->SetHalfTimeFov(v); }
+}
+
+extern "C" double afx_hook_source2_mirv_input_get_half_time_fov() {
+    if (auto mi = Afx_GetMirvInput()) { return mi->GetHalfTimeFov(); }
+    return 0.0;
+}
+
+extern "C" void afx_hook_source2_get_last_camera_data(float * x, float * y, float * z, float * rX, float * rY, float * rZ, float * fov) {
+    if(!(x && y && z && rX && rY && rZ && fov)) return;
+    double dx=0, dy=0, dz=0, drx=0, dry=0, drz=0; float ffov=90.0f;
+    Afx_GetLastCameraData(dx,dy,dz,drx,dry,drz,ffov);
+    *x = (float)dx; *y = (float)dy; *z = (float)dz;
+    *rX = (float)drx; *rY = (float)dry; *rZ = (float)drz;
+    *fov = ffov;
+}
+
+extern "C" void afx_hook_source2_mirv_input_set_camera_control_mode(FFIBool enable) {
+    if (auto mi = Afx_GetMirvInput()) { mi->SetCameraControlMode(FFIBOOL_TO_BOOL(enable)); }
+}
+
+extern "C" FFIBool afx_hook_source2_mirv_input_get_camera_control_mode() {
+    if (auto mi = Afx_GetMirvInput()) { return BOOL_TO_FFIBOOL(mi->GetCameraControlMode()); }
+    return FFIBOOL_FALSE;
+}
+
+extern "C" double afx_hook_source2_mirv_input_get_mouse_yaw_speed() {
+    if (auto mi = Afx_GetMirvInput()) { return mi->MouseYawSpeed_get(); }
+    return 0.0;
+}
+
+extern "C" void afx_hook_source2_mirv_input_set_mouse_yaw_speed(double v) {
+    if (auto mi = Afx_GetMirvInput()) { mi->MouseYawSpeed_set(v); }
+}
+
+extern "C" double afx_hook_source2_mirv_input_get_mouse_pitch_speed() {
+    if (auto mi = Afx_GetMirvInput()) { return mi->MousePitchSpeed_get(); }
+    return 0.0;
+}
+
+extern "C" void afx_hook_source2_mirv_input_set_mouse_pitch_speed(double v) {
+    if (auto mi = Afx_GetMirvInput()) { mi->MousePitchSpeed_set(v); }
 }
 
 

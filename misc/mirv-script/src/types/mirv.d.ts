@@ -66,6 +66,42 @@ declare namespace mirv {
 	function exec(command: string): void;
 
 	/**
+	 * Returns last camera data used for rendering (after MirvInput and other overrides).
+	 */
+	function getLastCameraData(): { x: number; y: number; z: number; rX: number; rY: number; rZ: number; fov: number };
+
+	// Direct MirvInput control (no console exec)
+	/** Set MirvInput angles in degrees. Order is (pitch, yaw, roll). */
+	function setMirvInputAngles(pitch: number, yaw: number, roll: number): void;
+	/** Set MirvInput position. */
+	function setMirvInputPosition(x: number, y: number, z: number): void;
+	/** Set MirvInput FOV in degrees. */
+	function setMirvInputFov(fov: number): void;
+
+	/** Enable/disable MirvInput camera control mode. */
+	function setMirvInputCameraControlMode(v: boolean): void;
+	/** Query MirvInput camera control mode. */
+	function getMirvInputCameraControlMode(): boolean;
+
+	/** Mouse turn speeds (disabled by setting to 0 while locked). */
+	function getMirvInputMouseYawSpeed(): number;
+	function setMirvInputMouseYawSpeed(v: number): void;
+	function getMirvInputMousePitchSpeed(): number;
+	function setMirvInputMousePitchSpeed(v: number): void;
+
+	/** Get/Set MirvInput smoothing enabled flag. */
+	function getMirvInputSmoothEnabled(): boolean;
+	function setMirvInputSmoothEnabled(v: boolean): void;
+
+	/** Get/Set MirvInput smoothing half-times (seconds). */
+	function getMirvInputHalfTimeAng(): number;
+	function setMirvInputHalfTimeAng(v: number): void;
+	function getMirvInputHalfTimeVec(): number;
+	function setMirvInputHalfTimeVec(v: number): void;
+	function getMirvInputHalfTimeFov(): number;
+	function setMirvInputHalfTimeFov(v: number): void;
+
+	/**
 	 * Load a JavaScript module (.mjs) or execute script (.js).
 	 * @param filePath - Full path to file to load.
 	 *

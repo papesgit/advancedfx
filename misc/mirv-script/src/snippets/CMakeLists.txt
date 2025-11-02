@@ -7,6 +7,7 @@ set(AFXHOOKSOURCE2SNIPPETS_NAMES
     mirv_script_fov
     mirv_script_point
     mirv_script_voice
+    mirv_lock
     tests/observer-test
     tests/attachment-test
 	tests/cvars-test

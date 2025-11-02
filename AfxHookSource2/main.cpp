@@ -331,7 +331,22 @@ private:
 } g_MirvInputEx;
 
 float GetLastCameraFov() {
-	return (float)g_MirvInputEx.LastCameraFov;
+    return (float)g_MirvInputEx.LastCameraFov;
+}
+
+// Provide access for other translation units (e.g. Rust FFI shim)
+MirvInput * Afx_GetMirvInput() {
+    return g_MirvInputEx.m_MirvInput;
+}
+
+void Afx_GetLastCameraData(double & x, double & y, double & z, double & rX, double & rY, double & rZ, float & fov) {
+    x = g_MirvInputEx.LastCameraOrigin[0];
+    y = g_MirvInputEx.LastCameraOrigin[1];
+    z = g_MirvInputEx.LastCameraOrigin[2];
+    rX = g_MirvInputEx.LastCameraAngles[0];
+    rY = g_MirvInputEx.LastCameraAngles[1];
+    rZ = g_MirvInputEx.LastCameraAngles[2];
+    fov = (float)g_MirvInputEx.LastCameraFov;
 }
 
 CON_COMMAND(mirv_input, "Input mode configuration.")

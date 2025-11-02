@@ -199,6 +199,22 @@ public:
 
 	void ConCommand(advancedfx::ICommandArgs * args);
 
+    // Direct control and smoothing configuration accessors for scripting/FFI
+public:
+    // Smoothing enable flag
+    bool GetSmoothEnabled() const { return m_SmoothEnabled; }
+    void SetSmoothEnabled(bool v) { m_SmoothEnabled = v; }
+
+    // Smoothing half-time (seconds)
+    double GetHalfTimeVec() const { return m_HalfTimeVec; }
+    void SetHalfTimeVec(double v) { m_HalfTimeVec = v; }
+
+    double GetHalfTimeAng() const { return m_HalfTimeAng; }
+    void SetHalfTimeAng(double v) { m_HalfTimeAng = v; }
+
+    double GetHalfTimeFov() const { return m_HalfTimeFov; }
+    void SetHalfTimeFov(double v) { m_HalfTimeFov = v; }
+
 private:
 	class Mem
 	{
