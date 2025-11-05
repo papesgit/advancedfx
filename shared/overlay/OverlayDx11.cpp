@@ -4900,11 +4900,6 @@ void OverlayDx11::BeginFrame(float dtSeconds) {
             if (ImGui::Checkbox("Only Deathnotices", &s_onlyDeathnotices)) {
                 if (s_onlyDeathnotices) Afx_ExecClientCmd("cl_draw_only_deathnotices 1"); else Afx_ExecClientCmd("cl_draw_only_deathnotices 0");
             }
-            ImGui::SameLine();
-            static bool s_fixAnims = false;
-            if (ImGui::Checkbox("Fix Anims", &s_fixAnims)) {
-                if (s_fixAnims) Afx_ExecClientCmd("mirv_fix animations 1"); else Afx_ExecClientCmd("mirv_fix animations 0");
-            }
             ImGui::Separator();
             ImGui::TextUnformatted("FFmpeg profiles");
             ImGui::SameLine();
