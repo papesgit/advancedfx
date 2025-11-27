@@ -11,15 +11,101 @@
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/cs2/sdk_src/public/igameevents.h"
+#include "../deps/release/prop/cs2/sdk_src/public/tier1/utlmap.h"
 #include "../deps/release/prop/cs2/sdk_src/public/tier1/utlstring.h"
 
 #include "DeathMsg.h"
 #include "Globals.h"
 #include "ClientEntitySystem.h"
 #include "SchemaSystem.h"
-#include "MirvColors.h" //
+#include "MirvColors.h" 
 
 #include <set>
+#include <algorithm>
+#include <vector>
+
+// TODO: move panorama stuff out after addresses.cpp is done
+// decompose/change myPanoramaWrapper too
+// doing it messy way here for now because lazy
+
+// credit https://github.com/danielkrupinski/Osiris
+
+void* g_CStylePropertyOpacity_vtable = 0;
+
+typedef void(__fastcall *g_CPanelStyleSetStyleProperty_t)(void* This, void* property, bool transition);
+g_CPanelStyleSetStyleProperty_t g_CPanelStyleSetStyleProperty = nullptr;
+
+struct CPanel2D {
+	const char* getClassName() {
+		void * pClientClass = ((void * (__fastcall *)(void *)) (*(void***)this)[60]) (this);
+
+		if(pClientClass) {
+			return *(const char**)((unsigned char*)pClientClass + 0x8);
+		}
+
+		return nullptr;
+	}
+};
+
+struct StylePropertySymbolMap {
+    uint8_t findSymbol(const char* stylePropertyName) {
+        if (!symbols) return 0xFF;
+
+		for (int i = 0; i < symbols->numElements; ++i) {
+            if (std::strcmp(symbols->memory[i].key.Get(), stylePropertyName) == 0)
+                return symbols->memory[i].value;
+        }
+
+        return 0xFF;
+    }
+
+    SOURCESDK::CS2::CUtlMap<SOURCESDK::CS2::CUtlString, uint8_t>* symbols;
+} g_PanoramaStylePropertySymbols;
+
+CON_COMMAND(__mirv_panorama_dump_style_symbols, "") {
+	auto symbols = g_PanoramaStylePropertySymbols.symbols;
+
+	for (int i = 0; i < symbols->numElements; ++i) {
+		auto node = symbols->memory[i];
+		advancedfx::Message("%i: %s\n", node.value, node.key.Get());
+	}
+}
+
+struct StylePropertyOpacity {
+	void* vtable;
+	uint8_t id;
+	bool disallowTransition = false;
+	u_char pad[0x6];
+	float value;
+
+	StylePropertyOpacity() {} 
+
+	StylePropertyOpacity(void* vt, uint8_t i, float v) 
+		: vtable(vt), id(i), value(v) {}
+
+};
+
+bool makeOpacityProperty(StylePropertyOpacity* out, float value) {
+	auto id = g_PanoramaStylePropertySymbols.findSymbol("opacity");
+	if (g_CStylePropertyOpacity_vtable == nullptr || id == 0xFF) return false;
+
+	*out = StylePropertyOpacity { g_CStylePropertyOpacity_vtable, id, value};
+
+	return true;
+}
+
+struct CUIPanel {
+	bool setOpacity(float value) {
+		auto style = (u_char*)(this + CS2::PanoramaUIPanel::panelStyle);
+
+		StylePropertyOpacity styleProp;
+		if (!makeOpacityProperty(&styleProp, value)) return false;
+
+		g_CPanelStyleSetStyleProperty(style, &styleProp, true);
+
+		return true;
+	}
+};
 
 currentGameCamera g_CurrentGameCamera;
 
@@ -27,6 +113,10 @@ namespace CS2 {
 	namespace PanoramaUIPanel {
 		ptrdiff_t getAttributeString = 0;
 		ptrdiff_t setAttributeString = 0;
+	}
+
+	namespace PanoramaPanelStyle {
+		ptrdiff_t setPanelStyleProperty = 0;
 	}
 
 	namespace PanoramaUIEngine {
@@ -444,6 +534,85 @@ struct myPanoramaWrapper {
 		return result;
 	}
 
+	void printChildren(const char* parentId) {
+		auto parentPanel = ((u_char***)pHudPanel)[0][1];
+		if (!parentPanel) return;
+
+		if (strlen(parentId) > 0) {
+			auto r = findChildInLayoutFile(parentPanel, parentId);
+			if (r) {
+				parentPanel = r;
+			} else {
+				auto r2 = findChildrenInLayoutFileByClassName(parentPanel, parentId);
+				if (!r2.empty()) parentPanel = r2[0]; // could be multiple there
+			}
+		} 
+
+		auto parentPanelId = *(char**)(parentPanel + CS2::PanoramaUIPanel::panelId);
+		auto parentPanel2D = *(CPanel2D**)(parentPanel + 0x8);
+
+		advancedfx::Message("ClientClass / PanelId:\n");
+		if (0 != parentPanel2D)
+			advancedfx::Message("%s / %s\n", parentPanel2D->getClassName(), parentPanelId);
+		else 
+			advancedfx::Message("%s / %s\n", "null", parentPanelId);
+
+		const auto children = parentPanel + CS2::PanoramaUIPanel::children;
+		if (!children) {
+			advancedfx::Warning("No children found.\n");
+			return;
+		};
+
+		for (int i = 0; i < *(int*)children; ++i) {
+			const auto panel = ((u_char***)children)[1][i];
+			const auto panelId = *(char**)(panel + CS2::PanoramaUIPanel::panelId);
+			auto panel2D = *(CPanel2D**)(panel + 0x8);
+
+			if (!panelId && !panel2D) continue;
+
+			if (0 != panel2D)
+				advancedfx::Message("\t%s / %s\n", panel2D->getClassName(), panelId);
+			else 
+				advancedfx::Message("\t%s / %s\n", "null", panelId);
+		}
+
+	}
+
+	std::vector<u_char*> findChildrenInLayoutFileByClassName(u_char* parentPanel, const char* classNameToFind) {
+		std::vector<u_char*> res;
+		if (!parentPanel) return res;
+
+		const auto children = parentPanel + CS2::PanoramaUIPanel::children;
+		if (!children) return res;
+
+		for (int i = 0; i < *(int*)children; ++i) {
+			const auto panel = ((u_char***)children)[1][i];
+			auto panel2D = *(CPanel2D**)(panel + 0x8);
+			if (!panel2D) continue;
+
+			auto panelClassName = panel2D->getClassName();
+
+			if (strcmp(panelClassName, classNameToFind) == 0) {
+				res.emplace_back(panel);
+			};
+		}
+
+		for (int i = 0; i < *(int*)children; ++i) {
+			const auto panel = ((u_char***)children)[1][i];
+			const auto panelFlags = (u_char)(panel + CS2::PanoramaUIPanel::panelFlags);
+			if ((panelFlags & CS2::PanoramaUIPanel::k_EPanelFlag_HasOwnLayoutFile) == 0) {
+				auto found = findChildrenInLayoutFileByClassName(panel, classNameToFind);
+				if (!found.empty()) {
+					for (auto i : found) {
+						res.emplace_back(i);
+					}
+				}
+			}
+		}
+
+		return res;
+	}
+
 	u_char* findChildInLayoutFile(u_char* parentPanel, const char* idToFind){
 		if (!parentPanel) return nullptr;
 
@@ -507,6 +676,19 @@ struct myPanoramaWrapper {
 	*/
 
 } g_myPanoramaWrapper;
+
+CON_COMMAND(__mirv_panorama_print_children, "") {
+	const auto arg0 = args->ArgV(0);
+	int argc = args->ArgC();
+
+	if (2 <= argc)
+	{
+		const char * arg1 = args->ArgV(1);
+		g_myPanoramaWrapper.printChildren(arg1);
+	} else {
+		g_myPanoramaWrapper.printChildren("");
+	}
+}
 
 typedef u_char* (__fastcall *g_Original_hashString_t)(uint32_t* pResult, const char* string);
 g_Original_hashString_t g_Original_hashString = nullptr;
@@ -1194,6 +1376,36 @@ bool getPanoramaAddrs(HMODULE panoramaDll) {
 		g_Org_Panorama_CStylePropertyWashColor_Parse = (Panorama_CStyleProperty_Parse_t)vtable[6];
 	}		
 
+	{
+		g_CStylePropertyOpacity_vtable = (void**)Afx::BinUtils::FindClassVtable(panoramaDll,".?AVCStylePropertyOpacity@panorama@@",0,0);
+		if(nullptr == g_CStylePropertyOpacity_vtable) {
+			ErrorBox(MkErrStr(__FILE__, __LINE__));	
+			return false;
+		}
+	}		
+
+	{
+		// near "Need to increase size of static g_StylePropertyRegistrations (MAX_PANORAMA_STYLE_SYMBOLS) before registering more styles, failed on %s"
+		// after utlrbtree init we are looking for DAT in function call FUN_1800be1d0(&DAT_18050c3a8,&local_48,&local_68);
+		auto addr = getAddress(panoramaDll, "48 8D 0D ?? ?? ?? ?? 48 8D 45");
+		if (0 == addr)
+			ErrorBox(MkErrStr(__FILE__, __LINE__));	
+		else {
+			auto out = addr + 7 + *(int32_t*)(addr + 3);
+			g_PanoramaStylePropertySymbols.symbols = (SOURCESDK::CS2::CUtlMap<SOURCESDK::CS2::CUtlString, uint8_t>*)(out);
+		}
+	}
+
+	{
+		// Can be found in constructor for any CStyleProperty
+		// e.g. see 44th fn in vtable for CPanelStyle
+		auto addr = getAddress(panoramaDll, "E8 ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 89 45 ?? EB");
+		if (addr) {
+			g_CPanelStyleSetStyleProperty = (g_CPanelStyleSetStyleProperty_t)(addr + 5 + *(int32_t*)(addr + 1));
+		} else 
+			ErrorBox(MkErrStr(__FILE__, __LINE__));	
+	}
+
 	return true;
 };
 
@@ -1580,3 +1792,121 @@ CON_COMMAND(mirv_deathmsg, "controls death notification options")
 {
 	mirvDeathMsg_Console(args);
 };
+
+enum panelMatchType {
+	ID = 0,
+	CLASS_NAME
+};
+
+void applyStyleProperty_Console(IWrpCommandArgs * args) {
+	int argc = args->ArgC();
+	const char * arg0 = args->ArgV(0);
+
+	panelMatchType matchType = panelMatchType::ID;
+	std::string panelId = "";
+	// TODO: match by property type, when add new ones
+	bool didMatchProperty = false;
+	float opacity = 0;
+
+	for (int i = 1; i < argc; ++i)
+	{
+		const char * argI = args->ArgV(i);
+		if (StringIBeginsWith(argI, "panelId="))
+		{
+			panelId = argI + strlen("panelId=");
+			matchType = panelMatchType::ID;
+		}
+		else if (StringIBeginsWith(argI, "panelClassName="))
+		{
+			panelId = argI + strlen("panelClassName=");
+			matchType = panelMatchType::CLASS_NAME;
+		}
+		else if (StringIBeginsWith(argI, "opacity="))
+		{
+			opacity = float(atof(argI + strlen("opacity=")));
+			didMatchProperty = true;
+		}
+	}
+
+	if (panelId.empty()) {
+		advancedfx::Warning("PanelId cannot be empty.\n");
+		return;
+	}
+
+	if (!didMatchProperty) {
+		advancedfx::Warning("Did not match any style property.\n");
+		return;
+	}
+
+	auto parentPanel = ((u_char***)g_myPanoramaWrapper.pHudPanel)[0][1];
+	if (!parentPanel) {
+		advancedfx::Warning("Root panel is 0\n");
+		return;
+	}
+
+
+	if (matchType == panelMatchType::ID) {
+		u_char* targetPanel = g_myPanoramaWrapper.findChildInLayoutFile(parentPanel, panelId.c_str());
+
+		if (0 == targetPanel) {
+			advancedfx::Warning("Could not find panel %s\n", panelId.c_str());
+			return;
+		}
+
+		auto res = ((CUIPanel*)targetPanel)->setOpacity(std::clamp(opacity, 0.0f, 1.0f));
+		if (!res) {
+			advancedfx::Warning("Could not set opacity property for %s\n", panelId.c_str());
+		}
+	} else if (matchType == panelMatchType::CLASS_NAME) {
+		auto foundPanels = g_myPanoramaWrapper.findChildrenInLayoutFileByClassName(parentPanel, panelId.c_str());
+		if (foundPanels.empty()) {
+			advancedfx::Warning("Could not find panels with className %s\n", panelId.c_str());
+		} else {
+			for (auto panel : foundPanels) {
+				((CUIPanel*)panel)->setOpacity(std::clamp(opacity, 0.0f, 1.0f));
+			}
+		}
+	}
+}
+
+CON_COMMAND(mirv_panorama, "")
+{
+	const auto arg0 = args->ArgV(0);
+	int argc = args->ArgC();
+
+	if (2 <= argc)
+	{
+		const char * arg1 = args->ArgV(1);
+
+		if (0 == _stricmp("panelStyle", arg1)) {
+			if (3 <= argc) {
+				CSubWrpCommandArgs subArgs(args, 2);
+				applyStyleProperty_Console(&subArgs);
+			} else {
+				advancedfx::Message(
+					"%s %s panelStyle <option> <option>\n"
+					"Where <option> at least 2 arguments are required: panelId or class and property to set.\n"
+					"%s %s:\n"
+					"\tpanelId=<str>\n"
+					"\tpanelClassName=<str>\n"
+					"\topacity=<fValue>\n"
+					"Example:\n"
+					"%s %s panelId=trueview_row opacity=0\n"
+					"%s %s panelClassName=HudPerfStatsBasics opacity=0\n"
+					"Warning: if matching by className the style would be applied to all instances.\n"
+					, arg0, arg1
+					, arg0, arg1
+					, arg0, arg1
+					, arg0, arg1
+				);
+			}
+			return;
+		}
+	}
+
+	advancedfx::Message(
+		"%s panelStyle [...] - Set style for specific panorama panel.\n"
+		, arg0
+	);
+}
+
