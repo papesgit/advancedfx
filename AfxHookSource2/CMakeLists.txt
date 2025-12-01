@@ -90,6 +90,7 @@ target_link_options(${PROJECT_NAME} PRIVATE
 target_include_directories(${PROJECT_NAME} PRIVATE
     ./
     ${AFX_OPENEXR_INCLUDE_DIRECTORIES}
+    ${AFX_NVCODEC_INCLUDE_DIRECTORIES}
 )
 
 target_link_directories(${PROJECT_NAME} PRIVATE
@@ -98,8 +99,10 @@ target_link_directories(${PROJECT_NAME} PRIVATE
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ${AFX_OPENEXR_LINK_LIBRARIES}
+    ${AFX_NVCODEC_LINK_LIBRARIES}
     afx_hook_source2_rs
 	dxguid.lib
+    d3dcompiler.lib
     bcrypt.lib # corrosion fails to detect this
     $<$<CONFIG:Debug>:msvcrtd.lib> # corrision messes this up in latest rust version
 )
@@ -267,13 +270,20 @@ target_sources(${PROJECT_NAME} PRIVATE
 
     StreamSettings.h
 
+    NvencStream.cpp
+    NvencStream.h
+
     WrpConsole.cpp
     WrpConsole.h
+
+    ${AFX_NVCODEC_SAMPLE_SOURCES}
 )
 
 # This is far form proper, but it will do for now:
 source_group("deps/release/Detours" REGULAR_EXPRESSION "/deps/release/Detours/")
 source_group("deps/release/Detours/src" REGULAR_EXPRESSION "/deps/release/Detours/src/")
+source_group("deps/release/nvcodec/samples/NvEncoder" REGULAR_EXPRESSION "/deps/release/nvcodec/samples/NvEncoder/")
+source_group("deps/release/nvcodec/samples/Utils" REGULAR_EXPRESSION "/deps/release/nvcodec/samples/Utils/")
 source_group("deps/release/prop" REGULAR_EXPRESSION "/deps/release/prop/")
 source_group("deps/release/prop/AfxHookSource" REGULAR_EXPRESSION "/deps/release/prop/AfxHookSource")
 source_group("deps/release/prop/cs2" REGULAR_EXPRESSION "/deps/release/prop/cs2/")

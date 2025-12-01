@@ -1,5 +1,6 @@
 #include "stdafx.h"
 
+#include "NvencStream.h"
 #include "RenderSystemDX11Hooks.h"
 
 #include "CampathDrawer.h"
@@ -55,6 +56,7 @@ extern SOURCESDK::CS2::ISource2EngineToClient * g_pEngineToClient;
 extern SOURCESDK::CS2::ICvar * SOURCESDK::CS2::g_pCVar;
 
 CRenderCommands g_RenderCommands;
+CNvencStream g_NvencStream;
 
 bool g_bEnableReShade = true;
 bool g_bReShadeCompositeSmoke = true;
@@ -1757,9 +1759,18 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
     {
         if(!pRenderPassCommands->BeforePresent.Empty()) {
             ID3D11Texture2D * pTexture = nullptr;
-            if(g_pSwapChain) g_pSwapChain->GetBuffer(0,__uuidof(ID3D11Texture2D), (void**)&pTexture);            
+            if(g_pSwapChain) g_pSwapChain->GetBuffer(0,__uuidof(ID3D11Texture2D), (void**)&pTexture);
             pRenderPassCommands->OnBeforePresent(pTexture);
             if(pTexture) pTexture->Release();
+        }
+    }
+
+    // NVENC encoding (separate from recording)
+    if (g_NvencStream.IsActive() && g_pSwapChain && g_pImmediateContext) {
+        ID3D11Texture2D* pBackBuffer = nullptr;
+        if (SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer))) {
+            g_NvencStream.EncodeFrame(g_pImmediateContext, pBackBuffer);
+            pBackBuffer->Release();
         }
     }
 
@@ -3982,6 +3993,171 @@ CON_COMMAND(mirv_streams, "Access to streams system.")
 	advancedfx::Message(
 		"mirv_streams settings [...] - Recording settings.\n"
     );
+}
+
+CON_COMMAND(mirv_nvenc, "NVIDIA NVENC hardware encoding (experimental).")
+{
+	int argc = args->ArgC();
+	const char* cmd0 = args->ArgV(0);
+
+	if (2 <= argc)
+	{
+		const char* cmd1 = args->ArgV(1);
+
+		if (0 == _stricmp(cmd1, "start"))
+		{
+			if (!g_pDevice) {
+				advancedfx::Warning("AFXERROR: D3D11 device not available.\n");
+				return;
+			}
+
+			if (g_NvencStream.IsActive()) {
+				advancedfx::Warning("NVENC stream is already active.\n");
+				return;
+			}
+
+			// Get backbuffer dimensions
+			uint32_t width = 0, height = 0;
+			if (g_pSwapChain) {
+				ID3D11Texture2D* pBackBuffer = nullptr;
+				if (SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer))) {
+					D3D11_TEXTURE2D_DESC desc;
+					pBackBuffer->GetDesc(&desc);
+					width = desc.Width;
+					height = desc.Height;
+					pBackBuffer->Release();
+				}
+			}
+
+			if (width == 0 || height == 0) {
+				advancedfx::Warning("AFXERROR: Could not determine backbuffer dimensions.\n");
+				return;
+			}
+
+			// Optional output file path for testing
+			const char* outputPath = nullptr;
+			if (3 <= argc) {
+				outputPath = args->ArgV(2);
+			}
+
+			if (g_NvencStream.Start(g_pDevice, width, height, outputPath)) {
+				advancedfx::Message("NVENC stream started: %dx%d\n", width, height);
+				if (outputPath) {
+					advancedfx::Message("  Output file: %s\n", outputPath);
+				}
+			}
+			else {
+				advancedfx::Warning("AFXERROR: Failed to start NVENC stream. Make sure you have an NVIDIA GPU with NVENC support.\n");
+			}
+			return;
+		}
+		else if (0 == _stricmp(cmd1, "stop"))
+		{
+			if (!g_NvencStream.IsActive()) {
+				advancedfx::Warning("NVENC stream is not active.\n");
+				return;
+			}
+
+			g_NvencStream.Stop();
+			advancedfx::Message("NVENC stream stopped.\n");
+			return;
+		}
+		else if (0 == _stricmp(cmd1, "status"))
+		{
+			if (g_NvencStream.IsActive()) {
+				advancedfx::Message("NVENC stream: ACTIVE\n");
+				advancedfx::Message("  Encoded frames: %u\n", g_NvencStream.GetEncodedFrameCount());
+				advancedfx::Message("  Dropped frames: %u\n", g_NvencStream.GetDroppedFrameCount());
+
+				// Show format info
+				DXGI_FORMAT srcFmt = g_NvencStream.GetSourceFormat();
+				DXGI_FORMAT encFmt = g_NvencStream.GetEncoderFormat();
+				if (srcFmt != DXGI_FORMAT_UNKNOWN) {
+					advancedfx::Message("  Source format: %u ", srcFmt);
+					if (srcFmt == 87) advancedfx::Message("(BGRA)\n");
+					else if (srcFmt == 28) advancedfx::Message("(RGBA)\n");
+					else advancedfx::Message("(Unknown)\n");
+				}
+				if (encFmt != DXGI_FORMAT_UNKNOWN) {
+					advancedfx::Message("  Encoder format: %u ", encFmt);
+					if (encFmt == 87) advancedfx::Message("(BGRA)\n");
+					else if (encFmt == 28) advancedfx::Message("(RGBA)\n");
+					else advancedfx::Message("(Unknown)\n");
+				}
+
+				// Warn if formats don't match
+				if (srcFmt != DXGI_FORMAT_UNKNOWN && encFmt != DXGI_FORMAT_UNKNOWN) {
+					if (srcFmt == encFmt) {
+						advancedfx::Message("  Status: Formats match OK\n");
+					}
+					else {
+						advancedfx::Warning("  WARNING: Format mismatch detected!\n");
+						advancedfx::Warning("  This will result in black/corrupted video!\n");
+					}
+				}
+
+				advancedfx::Message("  Check nvenc_debug.txt for detailed logs\n");
+			}
+			else {
+				advancedfx::Message("NVENC stream: INACTIVE\n");
+			}
+			return;
+		}
+		else if (0 == _stricmp(cmd1, "stream"))
+		{
+			if (3 <= argc) {
+				const char* cmd2 = args->ArgV(2);
+
+				if (0 == _stricmp(cmd2, "enable") || 0 == _stricmp(cmd2, "enabled"))
+				{
+					if (5 <= argc) {
+						const char* ipAddress = args->ArgV(3);
+						uint16_t port = static_cast<uint16_t>(atoi(args->ArgV(4)));
+
+						if (g_NvencStream.EnableStreaming(ipAddress, port)) {
+							advancedfx::Message("Network streaming enabled: %s:%u\n", ipAddress, port);
+							advancedfx::Message("SDP written to nvenc_stream.sdp (open this file in VLC if needed).\n");
+							advancedfx::Message("VLC without file: Media -> Open Network Stream -> rtp://@:%u :demux=h264\n", port);
+						}
+						else {
+							advancedfx::Warning("AFXERROR: Failed to enable network streaming.\n");
+						}
+					}
+					else {
+						advancedfx::Message("Usage: %s stream enable <ipAddress> <port>\n", cmd0);
+						advancedfx::Message("Example: %s stream enable 127.0.0.1 5000\n", cmd0);
+					}
+					return;
+				}
+				else if (0 == _stricmp(cmd2, "disable"))
+				{
+					g_NvencStream.DisableStreaming();
+					advancedfx::Message("Network streaming disabled.\n");
+					return;
+				}
+			}
+
+			advancedfx::Message(
+				"%s stream enable <ipAddress> <port> - Enable RTP streaming to IP:port\n"
+				"%s stream disable - Disable network streaming\n"
+				"Example: %s stream enable 127.0.0.1 5000\n"
+				"To receive with VLC: Open Network Stream -> rtp://@:5000\n",
+				cmd0, cmd0, cmd0
+			);
+			return;
+		}
+	}
+
+	advancedfx::Message(
+		"%s start [<outputFile>] - Start NVENC encoding. Optional output file for testing.\n"
+		"%s stop - Stop NVENC encoding.\n"
+		"%s status - Show encoding status and statistics.\n"
+		"%s stream enable <ip> <port> - Enable RTP network streaming (writes nvenc_stream.sdp to open in VLC).\n"
+		"%s stream disable - Disable network streaming.\n"
+		"Example: %s start test.h264\n"
+		"Example: %s stream enable 127.0.0.1 5000\n",
+		cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0
+	);
 }
 
 CON_COMMAND(mirv_reshade, "Control ReShade_advancedfx ReShade addon.")
