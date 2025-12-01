@@ -109,6 +109,7 @@ CNvencStream::CNvencStream()
     , m_RtpTimestamp(0)
     , m_RtpSsrc(0x12345678) // Random SSRC
     , m_bSentKeyframe(false)
+    , m_TargetFrameTime(std::chrono::microseconds(16667)) // 60fps = 16.667ms per frame
 {
     // Initialize WinSock
     WSADATA wsaData;
@@ -141,6 +142,7 @@ bool CNvencStream::Start(ID3D11Device* pDevice, uint32_t nWidth, uint32_t nHeigh
     m_bSentKeyframe = false;
     m_RtpStartTime = std::chrono::steady_clock::now();
     m_LastIdrTime = m_RtpStartTime;
+    m_LastEncodeTime = m_RtpStartTime;
 
     // Create debug log file
     m_pDebugLog = std::make_unique<std::ofstream>("nvenc_debug.txt", std::ios::out | std::ios::trunc);
@@ -320,8 +322,8 @@ bool CNvencStream::InitializeEncoder(ID3D11Device* pDevice, uint32_t nWidth, uin
 
         // Rate control
         encodeConfig.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;  // Constant bitrate for streaming
-        encodeConfig.rcParams.averageBitRate = 5000000;  // 5 Mbps
-        encodeConfig.rcParams.maxBitRate = 5000000;
+        encodeConfig.rcParams.averageBitRate = 8000000;  // 8 Mbps (higher quality for 60fps)
+        encodeConfig.rcParams.maxBitRate = 8000000;
 
         // Create the encoder
         m_pEncoder->CreateEncoder(&initializeParams);
@@ -477,6 +479,15 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
     if (!m_bActive || !m_pEncoder || !pTexture) {
         return;
     }
+
+    // Frame rate limiting: only encode at 60fps
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = now - m_LastEncodeTime;
+    if (elapsed < m_TargetFrameTime) {
+        // Too soon, skip this frame
+        return;
+    }
+    m_LastEncodeTime = now;
 
     std::lock_guard<std::mutex> lock(m_Mutex);
 

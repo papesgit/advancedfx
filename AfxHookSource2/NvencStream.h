@@ -112,4 +112,8 @@ private:
     bool m_bSentKeyframe;
     std::chrono::steady_clock::time_point m_RtpStartTime;
     std::chrono::steady_clock::time_point m_LastIdrTime;
+
+    // Frame rate limiting
+    std::chrono::steady_clock::time_point m_LastEncodeTime;
+    std::chrono::microseconds m_TargetFrameTime;
 };
