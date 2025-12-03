@@ -49,6 +49,7 @@
 #include "../deps/release/Detours/src/detours.h"
 
 #include <vector>
+#include <map>
 #include <algorithm>
 
 #define _USE_MATH_DEFINES
@@ -56,6 +57,10 @@
 
 #include <stdlib.h>
 #include <sstream>
+#include <fstream>
+#include <string>
+#include <cstring>
+#include <cstdint>
 #include <mutex>
 
 HMODULE g_h_engine2Dll = 0;
@@ -1295,6 +1300,266 @@ int new_CCS2_Client_Connect(void* This, SOURCESDK::CreateInterfaceFn appSystemFa
 	}
 
 	return old_CCS2_Client_Connect(This, appSystemFactory);
+}
+
+static void StringReplace(std::string& data, const std::string& toSearch, const std::string& replaceStr)
+{
+	size_t pos = data.find(toSearch);
+	while (pos != std::string::npos)
+	{
+		data.replace(pos, toSearch.size(), replaceStr);
+		pos = data.find(toSearch, pos + replaceStr.size());
+	}
+}
+
+struct ConEntry_t
+{
+	ConEntry_t() : pszName(nullptr), defaultValue(nullptr), conVarType(SOURCESDK::CS2::EConVarType_Invalid), flags(0), pszDescription(nullptr)
+	{
+	}
+
+	ConEntry_t(const char* pszName, const SOURCESDK::CS2::CVValue_t* defaultValue, SOURCESDK::CS2::EConVarType conVarType, SOURCESDK::int64 flags, const char* pszDescription)
+		: pszName(pszName), defaultValue(defaultValue), conVarType(conVarType), flags(flags), pszDescription(pszDescription)
+	{
+	}
+
+	const char* pszName;
+	const SOURCESDK::CS2::CVValue_t* defaultValue;
+	SOURCESDK::CS2::EConVarType conVarType;
+	SOURCESDK::int64 flags;
+	const char* pszDescription;
+};
+
+static std::string FormatCVValue(const SOURCESDK::CS2::CVValue_t& value, SOURCESDK::CS2::EConVarType type) {
+	std::ostringstream oss;
+
+	switch (type) {
+	case SOURCESDK::CS2::EConVarType_Bool:
+		return value.m_bValue ? "true" : "false";
+	case SOURCESDK::CS2::EConVarType_Int16:
+		oss << value.m_i16Value;
+		break;
+	case SOURCESDK::CS2::EConVarType_UInt16:
+		oss << value.m_u16Value;
+		break;
+	case SOURCESDK::CS2::EConVarType_Int32:
+		oss << value.m_i32Value;
+		break;
+	case SOURCESDK::CS2::EConVarType_UInt32:
+		oss << value.m_u32Value;
+		break;
+	case SOURCESDK::CS2::EConVarType_Int64:
+		oss << value.m_i64Value;
+		break;
+	case SOURCESDK::CS2::EConVarType_UInt64:
+		oss << value.m_u64Value;
+		break;
+	case SOURCESDK::CS2::EConVarType_Float32:
+		oss << value.m_flValue;
+		break;
+	case SOURCESDK::CS2::EConVarType_Float64:
+		oss << value.m_dbValue;
+		break;
+	case SOURCESDK::CS2::EConVarType_String:
+		oss << (value.m_szValue.Get() ? value.m_szValue.Get() : "");
+		break;
+	case SOURCESDK::CS2::EConVarType_Color:
+		oss << value.m_clrValue.r() << " " << value.m_clrValue.g() << " "
+			<< value.m_clrValue.b() << " " << value.m_clrValue.a();
+		break;
+	case SOURCESDK::CS2::EConVarType_Vector2:
+		oss << value.m_vec2Value.x << " " << value.m_vec2Value.y;
+		break;
+	case SOURCESDK::CS2::EConVarType_Vector3:
+		oss << value.m_vec3Value.x << " " << value.m_vec3Value.y << " " << value.m_vec3Value.z;
+		break;
+	case SOURCESDK::CS2::EConVarType_Vector4:
+		oss << value.m_vec4Value.x << " " << value.m_vec4Value.y << " " << value.m_vec4Value.z
+			<< " " << value.m_vec4Value.w;
+		break;
+	case SOURCESDK::CS2::EConVarType_Qangle:
+		oss << value.m_angValue.x << " " << value.m_angValue.y << " " << value.m_angValue.z;
+		break;
+	default:
+		return "(unknown type)";
+	}
+
+	return oss.str();
+}
+
+static std::string ConvarFlagsString(SOURCESDK::int64 unFlags)
+{
+	std::vector<std::string> flags;
+
+	if (unFlags & SOURCESDK_CS2_FCVAR_DEVELOPMENTONLY)
+		flags.push_back("devonly");
+	if (unFlags & SOURCESDK_CS2_FCVAR_GAMEDLL)
+		flags.push_back("sv");
+	if (unFlags & SOURCESDK_CS2_FCVAR_CLIENTDLL)
+		flags.push_back("cl");
+	if (unFlags & SOURCESDK_CS2_FCVAR_HIDDEN)
+		flags.push_back("hidden");
+	if (unFlags & SOURCESDK_CS2_FCVAR_PROTECTED)
+		flags.push_back("prot");
+	if (unFlags & SOURCESDK_CS2_FCVAR_SPONLY)
+		flags.push_back("sp");
+	if (unFlags & SOURCESDK_CS2_FCVAR_ARCHIVE)
+		flags.push_back("a");
+	if (unFlags & SOURCESDK_CS2_FCVAR_NOTIFY)
+		flags.push_back("nf");
+	if (unFlags & SOURCESDK_CS2_FCVAR_USERINFO)
+		flags.push_back("user");
+	if (unFlags & SOURCESDK_CS2_FCVAR_UNLOGGED)
+		flags.push_back("unlogged");
+	if (unFlags & SOURCESDK_CS2_FCVAR_REPLICATED)
+		flags.push_back("rep");
+	if (unFlags & SOURCESDK_CS2_FCVAR_CHEAT)
+		flags.push_back("cheat");
+	if (unFlags & SOURCESDK_CS2_FCVAR_DEMO)
+		flags.push_back("demo");
+	if (unFlags & SOURCESDK_CS2_FCVAR_DONTRECORD)
+		flags.push_back("norecord");
+	if (unFlags & SOURCESDK_CS2_FCVAR_RELEASE)
+		flags.push_back("release");
+	if (unFlags & SOURCESDK_CS2_FCVAR_NOT_CONNECTED)
+		flags.push_back("notconnected");
+	if (unFlags & SOURCESDK_CS2_FCVAR_SERVER_CAN_EXECUTE)
+		flags.push_back("server_can_execute");
+	if (unFlags & SOURCESDK_CS2_FCVAR_SERVER_CANNOT_QUERY)
+		flags.push_back("server_cannot_query");
+	if (unFlags & SOURCESDK_CS2_FCVAR_CLIENTCMD_CAN_EXECUTE)
+		flags.push_back("clientcmd_can_execute");
+
+	std::string result;
+	bool bFirst = true;
+
+	for (auto& flag : flags)
+	{
+		if (bFirst)
+			bFirst = false;
+		else
+			result += ", ";
+
+		result += flag;
+	}
+
+	return result;
+}
+
+static std::string MarkdownEscape(const std::string& str)
+{
+	std::string escaped{ str };
+
+	StringReplace(escaped, "\\", "\\\\");
+	StringReplace(escaped, "<", "&lt;");
+	StringReplace(escaped, ">", "&gt;");
+	StringReplace(escaped, "[", "\\[");
+	StringReplace(escaped, "]", "\\]");
+	StringReplace(escaped, "\n", "<br>");
+	StringReplace(escaped, "|", "\\|");
+
+	return escaped;
+}
+
+static std::string GetGameDirectoryPath()
+{
+	char path[MAX_PATH] = {};
+	if (g_H_ClientDll && 0 != GetModuleFileNameA(g_H_ClientDll, path, MAX_PATH))
+	{
+		std::string gamePath(path);
+		for (int i = 0; i < 3; ++i)
+		{
+			auto pos = gamePath.find_last_of("\\/");
+			if (pos == std::string::npos) break;
+			gamePath.erase(pos);
+		}
+		return gamePath;
+	}
+
+	if (0 != GetModuleFileNameA(nullptr, path, MAX_PATH))
+	{
+		std::string exePath(path);
+		auto pos = exePath.find_last_of("\\/");
+		if (pos != std::string::npos)
+			exePath.erase(pos);
+		return exePath;
+	}
+
+	return ".";
+}
+
+CON_COMMAND(cvarlist_md, "List all convars/concmds in Markdown format. Format: [hidden]")
+{
+	if (!SOURCESDK::CS2::g_pCVar)
+	{
+		advancedfx::Warning("cvarlist_md: ICvar not available.\n");
+		return;
+	}
+
+	std::map<std::string, ConEntry_t> allEntries;
+
+	for (size_t i = 0; i < 65536; ++i)
+	{
+		SOURCESDK::CS2::CCmd* cmd = SOURCESDK::CS2::g_pCVar->GetCmd(i);
+		if (nullptr == cmd) break;
+
+		SOURCESDK::int64 nFlags = cmd->GetFlags();
+		if (nFlags == 0x400) break;
+
+		allEntries[cmd->GetName()] = ConEntry_t(cmd->GetName(), nullptr, SOURCESDK::CS2::EConVarType_Invalid, nFlags, cmd->GetHelpString());
+	}
+
+	for (size_t i = 0; i < 65536; ++i)
+	{
+		SOURCESDK::CS2::Cvar_s* cvar = SOURCESDK::CS2::g_pCVar->GetCvar(i);
+		if (nullptr == cvar) break;
+
+		allEntries[cvar->m_pszName] = ConEntry_t(cvar->m_pszName, cvar->m_defaultValue, cvar->m_eVarType, cvar->m_nFlags, cvar->m_pszHelpString);
+	}
+
+	bool bShowHidden = args->ArgC() > 1 && 0 == _stricmp(args->ArgV(1), "hidden");
+
+	std::string outputPath = GetGameDirectoryPath();
+	outputPath.append("\\cvarlist.md");
+
+	std::ofstream file(outputPath, std::ios::trunc);
+	if (!file.is_open())
+	{
+		advancedfx::Warning("cvarlist_md: could not open %s for writing.\n", outputPath.c_str());
+		return;
+	}
+
+	file << "Name | Flags | Description\n";
+	file << "---- | ----- | -----------\n";
+
+	int nWritten = 0;
+	for (auto& pair : allEntries)
+	{
+		const std::string& name = pair.first;
+		const auto& cmd = pair.second;
+
+		if (!bShowHidden && (cmd.flags & (SOURCESDK_CS2_FCVAR_DEVELOPMENTONLY | SOURCESDK_CS2_FCVAR_HIDDEN)))
+			continue;
+
+		auto flagsStr = ConvarFlagsString(cmd.flags);
+		std::string helpText = cmd.pszDescription ? cmd.pszDescription : "";
+		helpText = MarkdownEscape(helpText);
+
+		file << name << " | " << flagsStr << " | ";
+
+		if (cmd.defaultValue != nullptr && cmd.conVarType != SOURCESDK::CS2::EConVarType_Invalid)
+		{
+			auto defaultValue = MarkdownEscape(FormatCVValue(*cmd.defaultValue, cmd.conVarType));
+			file << "Default: " << defaultValue << "<br>";
+		}
+
+		file << helpText << "\n";
+		nWritten++;
+	}
+
+	file.close();
+
+	advancedfx::Message("cvarlist_md wrote %d entries to %s\n", nWritten, outputPath.c_str());
 }
 
 CON_COMMAND(mirv_cvar_unhide_all, "Unlocks cmds and cvars.") {
