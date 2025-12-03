@@ -19,6 +19,9 @@
 #include "MirvColors.h"
 #include "MirvFix.h"
 #include "MirvTime.h"
+#include "ObsWebSocketServer.h"
+#include "ObsInputReceiver.h"
+#include "FreecamController.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/AfxHookSource/SourceInterfaces.h"
@@ -44,6 +47,9 @@
 #include "../shared/MirvSkip.h"
 
 #include "../deps/release/Detours/src/detours.h"
+
+#include <vector>
+#include <algorithm>
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -94,6 +100,11 @@ void PrintInfo() {
 }
 
 void * g_pGameResourceService = nullptr;
+
+// Observer tools for remote control
+CObsWebSocketServer* g_pObsWebSocket = nullptr;
+CObsInputReceiver* g_pObsInput = nullptr;
+CFreecamController* g_pFreecam = nullptr;
 
 /*typedef void (*Unknown_ExecuteClientCommandFromNetChan_t)(void * Ecx, void * Edx, void *R8);
 Unknown_ExecuteClientCommandFromNetChan_t g_Old_Unknown_ExecuteClientCommandFromNetChan = nullptr;
@@ -337,6 +348,30 @@ float GetLastCameraFov() {
 CON_COMMAND(mirv_input, "Input mode configuration.")
 {
 	g_MirvInputEx.m_MirvInput->ConCommand(args);
+}
+
+CON_COMMAND(mirv_udpdebug, "Enable/disable UDP input debug logging (mirv_udpdebug 0|1).")
+{
+	if (args->ArgC() < 2)
+	{
+		advancedfx::Message("mirv_udpdebug <0|1> - Current: %s\n",
+			(g_pObsInput ? (g_pObsInput->GetPacketLoss(), "unknown") : "disabled"));
+		advancedfx::Message("Usage: mirv_udpdebug 0 (off) or 1 (on)\n");
+		return;
+	}
+
+	int value = atoi(args->ArgV(1));
+	bool enable = value != 0;
+
+	if (g_pObsInput)
+	{
+		g_pObsInput->SetDebug(enable);
+		advancedfx::Message("mirv_udpdebug: %s\n", enable ? "ON" : "OFF");
+	}
+	else
+	{
+		advancedfx::Message("mirv_udpdebug: UDP input receiver not initialized.\n");
+	}
 }
 
 WNDPROC g_NextWindProc;
@@ -589,6 +624,10 @@ CON_COMMAND(mirv_camio, "New camera motion data import / export.") {
 	g_S2CamIO.Console_CamIO(args);
 }
 
+// Global spectator key bindings: number keys 1-0 map to controller indices
+// -1 = no player mapped to this key
+static int g_SpectatorBindings[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+static bool g_LastNumberKeyState[10] = {false};
 
 static bool g_bViewOverriden = false;
 static float g_fFovOverride = 90.0f;
@@ -691,6 +730,50 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	if(MirvFovOverride(Fov)) originOrAnglesOverriden = true;
 
 	if(g_MirvInputEx.m_MirvInput->Override(g_MirvInputEx.LastFrameTime, Tx,Ty,Tz,Rx,Ry,Rz,Fov)) originOrAnglesOverriden = true;
+
+	// Observer input handling (freecam + spectator switching)
+	InputState input = {};
+	if (g_pObsInput) {
+		g_pObsInput->GetInputState(input);
+	}
+
+	// Handle number key presses for spectator switching (keys 1-0)
+	if (g_pEngineToClient) {
+		bool currentNumberKeys[10] = {
+			input.key1, input.key2, input.key3, input.key4, input.key5,
+			input.key6, input.key7, input.key8, input.key9, input.key0
+		};
+
+		for (int i = 0; i < 10; ++i) {
+			// Detect key press (transition from false to true)
+			if (currentNumberKeys[i] && !g_LastNumberKeyState[i]) {
+				// Check if this key is mapped to a player
+				if (g_SpectatorBindings[i] != -1) {
+					std::string specCmd = "spec_mode 2; spec_player " + std::to_string(g_SpectatorBindings[i]);
+					g_pEngineToClient->ExecuteClientCmd(0, specCmd.c_str(), true);
+					if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(0);
+				}
+			}
+			g_LastNumberKeyState[i] = currentNumberKeys[i];
+		}
+	}
+
+	// Freecam controller for remote observing
+	if (g_pFreecam && g_pFreecam->IsEnabled()) {
+		// Update freecam every frame for smooth movement
+		float deltaTime = (float)g_MirvInputEx.LastFrameTime;
+		g_pFreecam->Update(input, deltaTime);
+
+		const CameraTransform& cam = g_pFreecam->GetTransform();
+		Tx = cam.x;
+		Ty = cam.y;
+		Tz = cam.z;
+		Rx = cam.pitch;
+		Ry = cam.yaw;
+		Rz = cam.roll;
+		Fov = cam.fov;
+		originOrAnglesOverriden = true;
+	}
 
 	if(g_b_on_c_view_render_setup_view) {
 		AfxHookSourceRsView currentView = {Tx,Ty,Tz,Rx,Ry,Rz,Fov};
@@ -1297,6 +1380,103 @@ CON_COMMAND(mirv_cvar_unlock_sv_cheats, "Unlocks sv_cheats on client (as much as
 	advancedfx::Message("==== Cvars total: %i (Cvars unlocked: %i) ====\n",total,nUnhidden);
 }
 
+
+
+// Refresh spectator bindings for number keys 1-0
+void RefreshSpectatorBindings() {
+	if (!g_pEntityList || !g_GetEntityFromIndex || !g_GetHighestEntityIndex) {
+		advancedfx::Warning("Cannot refresh bindings: Engine not ready\n");
+		return;
+	}
+
+	// Collect all player controllers with their indices
+	std::vector<int> ctControllers;
+	std::vector<int> tControllers;
+
+	int highestIndex = g_GetHighestEntityIndex(*g_pEntityList, false);
+	for (int i = 0; i <= highestIndex; ++i) {
+		CEntityInstance* ent = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, i);
+		if (!ent) continue;
+
+		// Check if it's a player controller (not pawn)
+		if (!ent->IsPlayerController()) continue;
+
+		// Get team (2 = T, 3 = CT)
+		int team = ent->GetTeam();
+		if (team != 2 && team != 3) continue;
+
+		// Controller index is the entity index itself
+		int controllerIndex = i;
+
+		// Add to appropriate team list
+		if (team == 3) {
+			ctControllers.push_back(controllerIndex);
+		} else if (team == 2) {
+			tControllers.push_back(controllerIndex);
+		}
+	}
+
+	// Sort controller indices (lowest to highest)
+	std::sort(ctControllers.begin(), ctControllers.end());
+	std::sort(tControllers.begin(), tControllers.end());
+
+	// Clear all bindings first
+	for (int i = 0; i < 10; ++i) {
+		g_SpectatorBindings[i] = -1;
+	}
+
+	// Map CT players to keys 1-5 (index 0-4)
+	for (size_t i = 0; i < ctControllers.size() && i < 5; ++i) {
+		g_SpectatorBindings[i] = ctControllers[i];
+		advancedfx::Message("Key %d -> CT controller %d\n", i+1, ctControllers[i]);
+	}
+
+	// Map T players to keys 6-0 (index 5-9)
+	for (size_t i = 0; i < tControllers.size() && i < 5; ++i) {
+		g_SpectatorBindings[i + 5] = tControllers[i];
+		advancedfx::Message("Key %d -> T controller %d\n", (i+6) % 10, tControllers[i]);
+	}
+
+	advancedfx::Message("Spectator bindings refreshed: %zu CT, %zu T\n", ctControllers.size(), tControllers.size());
+}
+
+void HandleObsWebSocketCommand(const std::string& json) {
+	// Simple command parsing (in production, use rapidjson or nlohmann::json)
+	if (json.find("\"freecam_enable\"") != std::string::npos) {
+		if (g_pFreecam) {
+			// Initialize freecam with current game camera position if not initialized
+			if (!g_pFreecam->IsEnabled()) {
+				CameraTransform initTransform;
+				initTransform.x = (float)g_MirvInputEx.GameCameraOrigin[0];
+				initTransform.y = (float)g_MirvInputEx.GameCameraOrigin[1];
+				initTransform.z = (float)g_MirvInputEx.GameCameraOrigin[2];
+				initTransform.pitch = (float)g_MirvInputEx.GameCameraAngles[0];
+				initTransform.yaw = (float)g_MirvInputEx.GameCameraAngles[1];
+				initTransform.roll = (float)g_MirvInputEx.GameCameraAngles[2];
+				initTransform.fov = (float)g_MirvInputEx.GameCameraFov;
+				g_pFreecam->Reset(initTransform);
+			}
+			g_pFreecam->SetInputEnabled(true);
+			g_pFreecam->SetEnabled(true);
+			if(g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
+			advancedfx::Message("Freecam enabled\n");
+		}
+	}
+	else if (json.find("\"freecam_disable\"") != std::string::npos) {
+		if (g_pFreecam) {
+			// Only disable input, keep freecam active until player switch
+			g_pFreecam->SetInputEnabled(false);
+			advancedfx::Message("Freecam input disabled (camera locked until player switch)\n");
+		}
+	}
+	else if (json.find("\"refresh_binds\"") != std::string::npos) {
+		RefreshSpectatorBindings();
+	}
+	else {
+		advancedfx::Message("Unknown WebSocket command: %s\n", json.c_str());
+	}
+}
+
 typedef int(* CCS2_Client_Init_t)(void* This);
 CCS2_Client_Init_t old_CCS2_Client_Init;
 int new_CCS2_Client_Init(void* This) {
@@ -1310,6 +1490,38 @@ int new_CCS2_Client_Init(void* This) {
 	WrpRegisterCommands();
 
 	AfxHookSource2Rs_Engine_Init();
+
+	// Initialize observer tools for remote control (safe to create threads here)
+	advancedfx::Message("DEBUG: Starting observer tools initialization...\n");
+
+	// Initialize Winsock for observer tools (required before creating sockets)
+	WSADATA wsaData;
+	int wsaResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+	if (wsaResult != 0) {
+		advancedfx::Message("WSAStartup failed for observer tools: %d\n", wsaResult);
+	} else {
+		advancedfx::Message("WSAStartup succeeded\n");
+	}
+
+	// Initialize observer tools for remote control
+	advancedfx::Message("DEBUG: Creating WebSocket server...\n");
+	g_pObsWebSocket = new CObsWebSocketServer();
+	if (g_pObsWebSocket->Start(31338)) {
+		advancedfx::Message("Observer WebSocket server started on port 31338\n");
+		g_pObsWebSocket->SetCommandCallback(HandleObsWebSocketCommand);
+	} else {
+		advancedfx::Message("Failed to start Observer WebSocket server\n");
+	}
+
+	g_pObsInput = new CObsInputReceiver();
+	if (g_pObsInput->Start(31339)) {
+		advancedfx::Message("Observer UDP input receiver started on port 31339\n");
+	} else {
+		advancedfx::Message("Failed to start Observer UDP input receiver\n");
+	}
+
+	g_pFreecam = new CFreecamController();
+	advancedfx::Message("Freecam controller initialized\n");
 
 	PrintInfo();
 
@@ -2253,6 +2465,24 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 			g_CampathDrawer.End();
 
 			g_S2CamIO.ShutDown();
+
+			// Cleanup observer tools
+			if (g_pFreecam) {
+				delete g_pFreecam;
+				g_pFreecam = nullptr;
+			}
+
+			if (g_pObsInput) {
+				g_pObsInput->Stop();
+				delete g_pObsInput;
+				g_pObsInput = nullptr;
+			}
+
+			if (g_pObsWebSocket) {
+				g_pObsWebSocket->Stop();
+				delete g_pObsWebSocket;
+				g_pObsWebSocket = nullptr;
+			}
 
 			delete g_ConsolePrinter;
 

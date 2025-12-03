@@ -309,7 +309,7 @@ namespace ImageTransformer {
 						pOut[0] = (unsigned char)(((int)entBlack_b + (int)entWhite_b) / 2);
 						pOut[1] = (unsigned char)(((int)entBlack_g + (int)entWhite_g) / 2);
 						pOut[2] = (unsigned char)(((int)entBlack_r + (int)entWhite_r) / 2);
-						pOut[3] = (unsigned char)std::min(std::max((255l - (int)entWhite_b + (int)entBlack_b + 255l - (int)entWhite_g + (int)entBlack_g + 255l - (int)entWhite_r + (int)entBlack_r) / 3l, 0l), 255l);
+						pOut[3] = (unsigned char)(std::min)((std::max)((255l - (int)entWhite_b + (int)entBlack_b + 255l - (int)entWhite_g + (int)entBlack_g + 255l - (int)entWhite_r + (int)entBlack_r) / 3l, 0l), 255l);
 
 					}
 				}
@@ -794,7 +794,7 @@ namespace ImageTransformer {
 class ICapture* Transform(class CThreadPool * threadPool, class IImageBufferPool * imageBufferPool, class ITransform* transform) {
     if (class CAfxImageBufferCapture* pOutCapture = transform->CreateOutput(imageBufferPool)) {
         size_t outTaskSize = transform->GetTaskSize();
-        size_t thread_count = std::min(threadPool->GetThreadCount() + 1, outTaskSize);
+        size_t thread_count = (std::min)(threadPool->GetThreadCount() + 1, outTaskSize);
         size_t lines_per_task = outTaskSize / thread_count;
         size_t lines_per_task_remainder = outTaskSize % thread_count;
         std::atomic_int task_counter(0);

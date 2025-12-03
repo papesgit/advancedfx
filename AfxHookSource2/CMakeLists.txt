@@ -100,10 +100,13 @@ target_link_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ${AFX_OPENEXR_LINK_LIBRARIES}
     ${AFX_NVCODEC_LINK_LIBRARIES}
+    ixwebsocket
     afx_hook_source2_rs
 	dxguid.lib
     d3dcompiler.lib
     bcrypt.lib # corrosion fails to detect this
+    ws2_32.lib # Winsock for WebSocket and UDP
+    crypt32.lib # SHA-1 hashing for WebSocket handshake
     $<$<CONFIG:Debug>:msvcrtd.lib> # corrision messes this up in latest rust version
 )
 
@@ -272,6 +275,15 @@ target_sources(${PROJECT_NAME} PRIVATE
 
     NvencStream.cpp
     NvencStream.h
+
+    ObsWebSocketServer.cpp
+    ObsWebSocketServer.h
+
+    ObsInputReceiver.cpp
+    ObsInputReceiver.h
+
+    FreecamController.cpp
+    FreecamController.h
 
     WrpConsole.cpp
     WrpConsole.h

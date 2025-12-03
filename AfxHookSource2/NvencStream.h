@@ -79,7 +79,10 @@ private:
     ID3D11PixelShader* m_pConvertShader;
     ID3D11VertexShader* m_pFullscreenVS;
     ID3D11SamplerState* m_pSamplerState;
-
+    ID3D11BlendState*         m_pNoBlendState       = nullptr;
+    ID3D11DepthStencilState*  m_pNoDepthState       = nullptr;
+    ID3D11RasterizerState*    m_pFullscreenRS       = nullptr;
+    
     // Frame size
     uint32_t m_nWidth;
     uint32_t m_nHeight;

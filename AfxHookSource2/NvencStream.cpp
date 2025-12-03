@@ -461,6 +461,45 @@ bool CNvencStream::InitializeEncoder(ID3D11Device* pDevice, uint32_t nWidth, uin
             *m_pDebugLog << "Shaders compiled and created successfully" << std::endl;
             m_pDebugLog->flush();
         }
+        // After m_pDevice is valid
+        if (!m_pNoDepthState) {
+            D3D11_DEPTH_STENCIL_DESC dsDesc = {};
+            dsDesc.DepthEnable = FALSE;
+            dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+            dsDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+            dsDesc.StencilEnable = FALSE;
+            m_pDevice->CreateDepthStencilState(&dsDesc, &m_pNoDepthState);
+        }
+
+        if (!m_pFullscreenRS) {
+            D3D11_RASTERIZER_DESC rsDesc = {};
+            rsDesc.FillMode = D3D11_FILL_SOLID;
+            rsDesc.CullMode = D3D11_CULL_NONE;
+            rsDesc.FrontCounterClockwise = FALSE;
+            rsDesc.DepthClipEnable = TRUE;
+            rsDesc.ScissorEnable = FALSE;
+            rsDesc.MultisampleEnable = FALSE;
+            rsDesc.AntialiasedLineEnable = FALSE;
+            m_pDevice->CreateRasterizerState(&rsDesc, &m_pFullscreenRS);
+        }
+
+        if (!m_pNoBlendState) {
+            D3D11_BLEND_DESC bsDesc = {};
+            bsDesc.AlphaToCoverageEnable = FALSE;
+            bsDesc.IndependentBlendEnable = FALSE;
+
+            D3D11_RENDER_TARGET_BLEND_DESC& rt = bsDesc.RenderTarget[0];
+            rt.BlendEnable = FALSE;  // <- THIS is the important bit: ignore src alpha & game blend.
+            rt.SrcBlend = D3D11_BLEND_ONE;
+            rt.DestBlend = D3D11_BLEND_ZERO;
+            rt.BlendOp = D3D11_BLEND_OP_ADD;
+            rt.SrcBlendAlpha = D3D11_BLEND_ONE;
+            rt.DestBlendAlpha = D3D11_BLEND_ZERO;
+            rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            rt.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+
+            m_pDevice->CreateBlendState(&bsDesc, &m_pNoBlendState);
+        }
 
         return true;
     }
@@ -598,32 +637,69 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
             ID3D11DepthStencilView* oldDSV = nullptr;
             pContext->OMGetRenderTargets(1, &oldRTV, &oldDSV);
 
-            // Set up render state for format conversion
+            // Save old blend / depth-stencil / rasterizer state too
+            ID3D11BlendState*        oldBlendState = nullptr;
+            FLOAT                    oldBlendFactor[4] = { 0,0,0,0 };
+            UINT                     oldSampleMask = 0xffffffff;
+            pContext->OMGetBlendState(&oldBlendState, oldBlendFactor, &oldSampleMask);
+
+            ID3D11DepthStencilState* oldDepthState = nullptr;
+            UINT                     oldStencilRef = 0;
+            pContext->OMGetDepthStencilState(&oldDepthState, &oldStencilRef);
+
+            ID3D11RasterizerState*   oldRSState = nullptr;
+            pContext->RSGetState(&oldRSState);
+
+            // Set up our own clean render state for conversion
             pContext->OMSetRenderTargets(1, &m_pStagingRTV, nullptr);
 
             D3D11_VIEWPORT viewport = {};
-            viewport.Width = static_cast<float>(m_nWidth);
+            viewport.TopLeftX = 0.0f;
+            viewport.TopLeftY = 0.0f;
+            viewport.Width  = static_cast<float>(m_nWidth);
             viewport.Height = static_cast<float>(m_nHeight);
+            viewport.MinDepth = 0.0f;
             viewport.MaxDepth = 1.0f;
             pContext->RSSetViewports(1, &viewport);
+
+            if (m_pNoBlendState) {
+                FLOAT blendFactor[4] = { 0,0,0,0 };
+                pContext->OMSetBlendState(m_pNoBlendState, blendFactor, 0xffffffff);
+            }
+            if (m_pNoDepthState) {
+                pContext->OMSetDepthStencilState(m_pNoDepthState, 0);
+            }
+            if (m_pFullscreenRS) {
+                pContext->RSSetState(m_pFullscreenRS);
+            }
 
             pContext->VSSetShader(m_pFullscreenVS, nullptr, 0);
             pContext->PSSetShader(m_pConvertShader, nullptr, 0);
             pContext->PSSetShaderResources(0, 1, &m_pSourceSRV);
             pContext->PSSetSamplers(0, 1, &m_pSamplerState);
 
-            // Draw fullscreen triangle (3 vertices, no input layout needed)
             pContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             pContext->Draw(3, 0);
 
-            // Restore render state
+            // Restore render targets
             pContext->OMSetRenderTargets(1, &oldRTV, oldDSV);
-            if (oldRTV) oldRTV->Release();
-            if (oldDSV) oldDSV->Release();
 
-            // Unbind SRV to avoid warnings
-            ID3D11ShaderResourceView* nullSRV = nullptr;
-            pContext->PSSetShaderResources(0, 1, &nullSRV);
+            // Restore previous states
+            pContext->OMSetBlendState(oldBlendState, oldBlendFactor, oldSampleMask);
+            pContext->OMSetDepthStencilState(oldDepthState, oldStencilRef);
+            pContext->RSSetState(oldRSState);
+
+            // Release our references
+            if (oldRTV)       oldRTV->Release();
+            if (oldDSV)       oldDSV->Release();
+            if (oldBlendState) oldBlendState->Release();
+            if (oldDepthState) oldDepthState->Release();
+            if (oldRSState)    oldRSState->Release();
+
+            // Unbind SRV
+            ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
+            pContext->PSSetShaderResources(0, 1, nullSRV);
+
 
             // Now copy the converted staging texture (BGRA) to encoder input (BGRA) - formats match!
             pContext->CopyResource(pInputTexture, m_pStagingTexture);
@@ -935,6 +1011,10 @@ void CNvencStream::Cleanup()
         m_pStagingTexture->Release();
         m_pStagingTexture = nullptr;
     }
+
+    if (m_pNoBlendState)      { m_pNoBlendState->Release();      m_pNoBlendState = nullptr; }
+    if (m_pNoDepthState)      { m_pNoDepthState->Release();      m_pNoDepthState = nullptr; }
+    if (m_pFullscreenRS)      { m_pFullscreenRS->Release();      m_pFullscreenRS = nullptr; }
 
     m_pEncoder.reset();
 
