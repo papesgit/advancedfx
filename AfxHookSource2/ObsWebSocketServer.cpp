@@ -6,6 +6,7 @@
 #include <ixwebsocket/IXWebSocketServer.h>
 
 #include <set>
+#include <utility>
 
 CObsWebSocketServer::CObsWebSocketServer()
     : m_bActive(false)
@@ -34,7 +35,7 @@ bool CObsWebSocketServer::Start(uint16_t port)
 
     server->setOnClientMessageCallback(
         [this](std::shared_ptr<ix::ConnectionState> /*connectionState*/,
-               ix::WebSocket& /*webSocket*/,
+               ix::WebSocket& webSocket,
                const ix::WebSocketMessagePtr& msg)
         {
             if (!m_CommandCallback)
@@ -42,7 +43,10 @@ bool CObsWebSocketServer::Start(uint16_t port)
 
             if (msg->type == ix::WebSocketMessageType::Message)
             {
-                m_CommandCallback(msg->str);
+                auto responder = [&webSocket](const std::string& json) {
+                    webSocket.sendText(json);
+                };
+                m_CommandCallback(msg->str, responder);
             }
         });
 
@@ -111,7 +115,7 @@ void CObsWebSocketServer::BroadcastJson(const std::string& json)
     }
 }
 
-void CObsWebSocketServer::SetCommandCallback(std::function<void(const std::string&)> callback)
+void CObsWebSocketServer::SetCommandCallback(CommandCallback callback)
 {
     m_CommandCallback = std::move(callback);
 }

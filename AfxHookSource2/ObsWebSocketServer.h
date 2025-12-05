@@ -14,6 +14,9 @@ namespace ix {
 /// Handles JSON commands from GUI and broadcasts game state/events
 class CObsWebSocketServer {
 public:
+    using ResponseSender = std::function<void(const std::string&)>;
+    using CommandCallback = std::function<void(const std::string&, const ResponseSender&)>;
+
     CObsWebSocketServer();
     ~CObsWebSocketServer();
 
@@ -37,11 +40,11 @@ public:
 
     /// Set callback for received commands
     /// @param callback Function to call when command received
-    void SetCommandCallback(std::function<void(const std::string&)> callback);
+    void SetCommandCallback(CommandCallback callback);
 
 private:
     std::atomic<bool> m_bActive;
     std::shared_ptr<ix::WebSocketServer> m_Server;
-    std::function<void(const std::string&)> m_CommandCallback;
+    CommandCallback m_CommandCallback;
     mutable std::mutex m_ServerMutex;
 };

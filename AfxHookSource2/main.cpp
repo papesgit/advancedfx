@@ -20,6 +20,7 @@
 #include "MirvFix.h"
 #include "MirvTime.h"
 #include "ObsWebSocketServer.h"
+#include "ObsWebSocketProtocol.h"
 #include "ObsInputReceiver.h"
 #include "FreecamController.h"
 
@@ -62,6 +63,8 @@
 #include <cstring>
 #include <cstdint>
 #include <mutex>
+
+using json = nlohmann::json;
 
 HMODULE g_h_engine2Dll = 0;
 HMODULE g_H_ClientDll = 0;
@@ -108,6 +111,7 @@ void * g_pGameResourceService = nullptr;
 
 // Observer tools for remote control
 CObsWebSocketServer* g_pObsWebSocket = nullptr;
+CObsWebSocketProtocol g_ObsWebSocketProtocol;
 CObsInputReceiver* g_pObsInput = nullptr;
 CFreecamController* g_pFreecam = nullptr;
 
@@ -756,6 +760,7 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 				if (g_SpectatorBindings[i] != -1) {
 					std::string specCmd = "spec_mode 2; spec_player " + std::to_string(g_SpectatorBindings[i]);
 					g_pEngineToClient->ExecuteClientCmd(0, specCmd.c_str(), true);
+					if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
 					if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(0);
 				}
 			}
@@ -1705,41 +1710,150 @@ void RefreshSpectatorBindings() {
 	advancedfx::Message("Spectator bindings refreshed: %zu CT, %zu T\n", ctControllers.size(), tControllers.size());
 }
 
-void HandleObsWebSocketCommand(const std::string& json) {
-	// Simple command parsing (in production, use rapidjson or nlohmann::json)
-	if (json.find("\"freecam_enable\"") != std::string::npos) {
-		if (g_pFreecam) {
-			// Initialize freecam with current game camera position if not initialized
-			if (!g_pFreecam->IsEnabled()) {
-				CameraTransform initTransform;
-				initTransform.x = (float)g_MirvInputEx.GameCameraOrigin[0];
-				initTransform.y = (float)g_MirvInputEx.GameCameraOrigin[1];
-				initTransform.z = (float)g_MirvInputEx.GameCameraOrigin[2];
-				initTransform.pitch = (float)g_MirvInputEx.GameCameraAngles[0];
-				initTransform.yaw = (float)g_MirvInputEx.GameCameraAngles[1];
-				initTransform.roll = (float)g_MirvInputEx.GameCameraAngles[2];
-				initTransform.fov = (float)g_MirvInputEx.GameCameraFov;
-				g_pFreecam->Reset(initTransform);
-			}
-			g_pFreecam->SetInputEnabled(true);
-			g_pFreecam->SetEnabled(true);
-			if(g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
-			advancedfx::Message("Freecam enabled\n");
-		}
+static json MakeCommandResult(const std::string& command, bool ok, const std::string& message = std::string()) {
+	json result{
+		{"type", "command_result"},
+		{"command", command},
+		{"ok", ok}
+	};
+
+	if (!message.empty()) {
+		if (ok) result["message"] = message;
+		else result["error"] = message;
 	}
-	else if (json.find("\"freecam_disable\"") != std::string::npos) {
-		if (g_pFreecam) {
-			// Only disable input, keep freecam active until player switch
-			g_pFreecam->SetInputEnabled(false);
-			advancedfx::Message("Freecam input disabled (camera locked until player switch)\n");
-		}
+
+	return result;
+}
+
+static json MakeExecCmdResult(const std::string& cmd, bool ok, const std::string& message = std::string(), const json& output = json::array()) {
+	json result{
+		{"type", "exec_cmd_result"},
+		{"cmd", cmd},
+		{"ok", ok},
+		{"output", output.is_array() ? output : json::array()}
+	};
+
+	if (!message.empty()) {
+		if (ok) result["message"] = message;
+		else result["error"] = message;
 	}
-	else if (json.find("\"refresh_binds\"") != std::string::npos) {
+
+	return result;
+}
+
+static json MakeCampathPlayResult(const std::string& cmd, bool ok, const std::string& message = std::string()) {
+	json result{
+		{"type", "campath_play_result"},
+		{"cmd", cmd},
+		{"ok", ok}
+	};
+
+	if (!message.empty()) {
+		if (ok) result["message"] = message;
+		else result["error"] = message;
+	}
+
+	return result;
+}
+
+static std::string EscapeQuotes(const std::string& value) {
+	std::string escaped = value;
+	size_t pos = 0;
+	while ((pos = escaped.find('\"', pos)) != std::string::npos) {
+		escaped.replace(pos, 1, "\\\"");
+		pos += 2;
+	}
+	return escaped;
+}
+
+static void RegisterObsWebSocketHandlers() {
+	static bool initialized = false;
+	if (initialized) return;
+	initialized = true;
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_enable", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!g_pFreecam) {
+			respond(MakeCommandResult("freecam_enable", false, "Freecam controller not ready"));
+			return;
+		}
+
+		// Initialize freecam with current game camera position if not initialized
+		if (!g_pFreecam->IsEnabled()) {
+			CameraTransform initTransform;
+			initTransform.x = (float)g_MirvInputEx.GameCameraOrigin[0];
+			initTransform.y = (float)g_MirvInputEx.GameCameraOrigin[1];
+			initTransform.z = (float)g_MirvInputEx.GameCameraOrigin[2];
+			initTransform.pitch = (float)g_MirvInputEx.GameCameraAngles[0];
+			initTransform.yaw = (float)g_MirvInputEx.GameCameraAngles[1];
+			initTransform.roll = (float)g_MirvInputEx.GameCameraAngles[2];
+			initTransform.fov = (float)g_MirvInputEx.GameCameraFov;
+			g_pFreecam->Reset(initTransform);
+		}
+
+		g_pFreecam->SetInputEnabled(true);
+		g_pFreecam->SetEnabled(true);
+		if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
+		advancedfx::Message("Freecam enabled\n");
+		respond(MakeCommandResult("freecam_enable", true, "Freecam enabled"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_disable", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!g_pFreecam) {
+			respond(MakeCommandResult("freecam_disable", false, "Freecam controller not ready"));
+			return;
+		}
+
+		// Only disable input, keep freecam active until player switch
+		g_pFreecam->SetInputEnabled(false);
+		advancedfx::Message("Freecam input disabled (camera locked until player switch)\n");
+		respond(MakeCommandResult("freecam_disable", true, "Freecam input disabled (camera locked until player switch)"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("refresh_binds", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
 		RefreshSpectatorBindings();
-	}
-	else {
-		advancedfx::Message("Unknown WebSocket command: %s\n", json.c_str());
-	}
+		respond(MakeCommandResult("refresh_binds", true, "Spectator bindings refreshed"));
+	});
+
+	g_ObsWebSocketProtocol.SetExecCommandHandler([](const std::string& cmd, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (cmd.empty()) {
+			respond(MakeExecCmdResult(cmd, false, "Command string is empty"));
+			return;
+		}
+
+		if (!g_pEngineToClient) {
+			respond(MakeExecCmdResult(cmd, false, "Engine not ready for commands"));
+			return;
+		}
+
+		g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
+
+		json output = json::array();
+		output.push_back(cmd + " executed");
+		respond(MakeExecCmdResult(cmd, true, "Command executed", output));
+	});
+
+	g_ObsWebSocketProtocol.SetCampathPlayHandler([](const std::string& cmd, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (cmd.empty()) {
+			respond(MakeCampathPlayResult(cmd, false, "Campath path is empty"));
+			return;
+		}
+
+		if (!g_pEngineToClient) {
+			respond(MakeCampathPlayResult(cmd, false, "Engine not ready for campath playback"));
+			return;
+		}
+
+		std::ostringstream oss;
+		oss << "mirv_campath load \"" << EscapeQuotes(cmd) << "\"; mirv_campath edit start; mirv_campath enabled 1; spec_mode 4";
+		g_pEngineToClient->ExecuteClientCmd(0, oss.str().c_str(), true);
+		g_pFreecam->SetEnabled(false);
+
+		respond(MakeCampathPlayResult(cmd, true, "Campath playback started"));
+	});
+}
+
+void HandleObsWebSocketCommand(const std::string& jsonMessage, const CObsWebSocketProtocol::ResponseSender& respond) {
+	g_ObsWebSocketProtocol.HandleMessage(jsonMessage, respond);
 }
 
 typedef int(* CCS2_Client_Init_t)(void* This);
@@ -1767,6 +1881,8 @@ int new_CCS2_Client_Init(void* This) {
 	} else {
 		advancedfx::Message("WSAStartup succeeded\n");
 	}
+
+	RegisterObsWebSocketHandlers();
 
 	// Initialize observer tools for remote control
 	advancedfx::Message("DEBUG: Creating WebSocket server...\n");
