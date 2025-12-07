@@ -7,56 +7,63 @@
 #include <thread>
 #include <mutex>
 #include <functional>
+#include <array>
+#include <initializer_list>
 
-/// Binary input packet format (26 bytes) for ultra-low latency
+/// Binary input packet format (50 bytes) for ultra-low latency
 #pragma pack(push, 1)
 struct InputPacket {
     uint32_t sequence;      // Packet sequence number
     int16_t mouseDx;        // Mouse delta X
     int16_t mouseDy;        // Mouse delta Y
     int8_t mouseWheel;      // Mouse wheel delta
-    uint8_t mouseButtons;   // Button flags (L=1, R=2, M=4)
-    uint64_t keysDown;      // Bitmask of keys currently down
+    uint8_t mouseButtons;   // Button flags (L=1, R=2, M=4, X1=8, X2=16)
+    uint8_t keyBitmap[32];  // 256-bit virtual-key bitmap (VK code -> bit)
     uint64_t timestamp;     // Microsecond timestamp
 };
 #pragma pack(pop)
 
 /// Input state decoded from packets
 struct InputState {
+    static constexpr size_t kKeyBitmapSize = 32; // 256 bits
+
     int16_t mouseDx;
     int16_t mouseDy;
     int8_t mouseWheel;
     bool mouseLeft;
     bool mouseRight;
     bool mouseMiddle;
+    bool mouseButton4;
+    bool mouseButton5;
 
-    // Key states (common keys for freecam)
-    bool keyW;
-    bool keyA;
-    bool keyS;
-    bool keyD;
-    bool keySpace;
-    bool keyCtrl;
-    bool keyShift;
-    bool keyQ;
-    bool keyE;
-
-    // Number keys for player switching
-    bool key1, key2, key3, key4, key5;
-    bool key6, key7, key8, key9, key0;
-
+    std::array<uint8_t, kKeyBitmapSize> keyBitmap;
     uint64_t timestamp;
 
     InputState()
         : mouseDx(0), mouseDy(0), mouseWheel(0)
         , mouseLeft(false), mouseRight(false), mouseMiddle(false)
-        , keyW(false), keyA(false), keyS(false), keyD(false)
-        , keySpace(false), keyCtrl(false), keyShift(false)
-        , keyQ(false), keyE(false)
-        , key1(false), key2(false), key3(false), key4(false), key5(false)
-        , key6(false), key7(false), key8(false), key9(false), key0(false)
+        , mouseButton4(false), mouseButton5(false)
+        , keyBitmap{}
         , timestamp(0)
     {}
+
+    bool IsKeyDown(uint8_t virtualKey) const {
+        if (virtualKey >= 256) {
+            return false;
+        }
+        const size_t byteIndex = virtualKey >> 3;
+        const uint8_t mask = static_cast<uint8_t>(1u << (virtualKey & 0x07));
+        return (keyBitmap[byteIndex] & mask) != 0;
+    }
+
+    bool IsAnyKeyDown(std::initializer_list<uint8_t> virtualKeys) const {
+        for (uint8_t vk : virtualKeys) {
+            if (IsKeyDown(vk)) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 /// UDP input receiver for low-latency freecam control

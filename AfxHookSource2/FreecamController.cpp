@@ -6,12 +6,41 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+namespace {
+constexpr uint8_t kVkCtrl       = 0x11;
+constexpr uint8_t kVkLeftCtrl   = 0xA2;
+constexpr uint8_t kVkRightCtrl  = 0xA3;
+
+constexpr uint8_t kVkShift      = 0x10;
+constexpr uint8_t kVkLeftShift  = 0xA0;
+constexpr uint8_t kVkRightShift = 0xA1;
+
+constexpr uint8_t kVkAlt        = 0x12;  // VK_MENU
+constexpr uint8_t kVkLeftAlt    = 0xA4;  // VK_LMENU
+constexpr uint8_t kVkRightAlt   = 0xA5;  // VK_RMENU
+
+bool IsCtrlDown(const InputState& input) {
+    return input.IsAnyKeyDown({kVkLeftCtrl, kVkRightCtrl, kVkCtrl});
+}
+
+bool IsShiftDown(const InputState& input) {
+    return input.IsAnyKeyDown({kVkLeftShift, kVkRightShift, kVkShift});
+}
+
+bool IsAltDown(const InputState& input) {
+    return input.IsAnyKeyDown({kVkLeftAlt, kVkRightAlt, kVkAlt});
+}
+}
+
 CFreecamController::CFreecamController()
     : m_bEnabled(false)
     , m_bInputEnabled(false)
     , m_bInitialized(false)
     , m_VelocityX(0), m_VelocityY(0), m_VelocityZ(0)
     , m_MouseVelocityX(0), m_MouseVelocityY(0)
+    , m_SpeedScalar(1.0f), m_SpeedDirty(false)
+    , m_LastMouseButton4(false), m_LastMouseButton5(false)
+    , m_MouseButton4Hold(0.0f), m_MouseButton5Hold(0.0f)
     , m_TargetRoll(0), m_CurrentRoll(0)
 {
     m_LastUpdateTime = std::chrono::steady_clock::now();
@@ -35,6 +64,7 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_MouseVelocityX = m_MouseVelocityY = 0;
         m_TargetRoll = m_CurrentRoll = 0;
         m_Transform.fov = m_Config.defaultFov;
+        ResetSpeed();
         m_LastUpdateTime = std::chrono::steady_clock::now();
     }
 }
@@ -45,6 +75,7 @@ void CFreecamController::Reset(const CameraTransform& transform) {
     m_VelocityX = m_VelocityY = m_VelocityZ = 0;
     m_MouseVelocityX = m_MouseVelocityY = 0;
     m_TargetRoll = m_CurrentRoll = transform.roll;
+    ResetSpeed();
     m_bInitialized = true;
 }
 
@@ -64,6 +95,7 @@ void CFreecamController::Update(const InputState& input, float deltaTime) {
 
     // Only process input if input is enabled (gated when right-click released)
     if (m_bInputEnabled) {
+        UpdateSpeed(input, deltaTime);
         UpdateMouseLook(input, deltaTime);
         UpdateMovement(input, deltaTime);
         UpdateRoll(input, deltaTime);
@@ -109,13 +141,13 @@ void CFreecamController::UpdateMouseLook(const InputState& input, float deltaTim
 
 void CFreecamController::UpdateMovement(const InputState& input, float deltaTime) {
     // Calculate movement speed
-    float moveSpeed = m_Config.moveSpeed;
-    if (input.keyShift) {
+    float moveSpeed = GetCurrentMoveSpeed();
+    if (IsShiftDown(input)) {
         moveSpeed *= m_Config.sprintMultiplier;
     }
 
-    float verticalSpeed = m_Config.verticalSpeed;
-    if (input.keyShift) {
+    float verticalSpeed = GetCurrentVerticalSpeed();
+    if (IsShiftDown(input)) {
         verticalSpeed *= m_Config.sprintMultiplier;
     }
 
@@ -133,34 +165,34 @@ void CFreecamController::UpdateMovement(const InputState& input, float deltaTime
     float desiredVelX = 0, desiredVelY = 0, desiredVelZ = 0;
 
     // Forward/backward (W/S)
-    if (input.keyW) {
+    if (input.IsKeyDown('W')) {
         desiredVelX += forwardX * moveSpeed;
         desiredVelY += forwardY * moveSpeed;
         desiredVelZ += forwardZ * moveSpeed;
     }
-    if (input.keyS) {
+    if (input.IsKeyDown('S')) {
         desiredVelX -= forwardX * moveSpeed;
         desiredVelY -= forwardY * moveSpeed;
         desiredVelZ -= forwardZ * moveSpeed;
     }
 
     // Strafe (A/D)
-    if (input.keyA) {
+    if (input.IsKeyDown('A')) {
         desiredVelX -= rightX * moveSpeed;
         desiredVelY -= rightY * moveSpeed;
     }
-    if (input.keyD) {
+    if (input.IsKeyDown('D')) {
         desiredVelX += rightX * moveSpeed;
         desiredVelY += rightY * moveSpeed;
     }
 
     // Vertical (Space/Ctrl)
-    if (input.keySpace) {
+    if (input.IsKeyDown(' ')) {
         desiredVelX += upX * verticalSpeed;
         desiredVelY += upY * verticalSpeed;
         desiredVelZ += upZ * verticalSpeed;
     }
-    if (input.keyCtrl) {
+    if (IsCtrlDown(input)) {
         desiredVelX -= upX * verticalSpeed;
         desiredVelY -= upY * verticalSpeed;
         desiredVelZ -= upZ * verticalSpeed;
@@ -173,7 +205,7 @@ void CFreecamController::UpdateMovement(const InputState& input, float deltaTime
 
     // Determine max speed based on what keys are pressed
     float maxSpeed = moveSpeed;
-    if (input.keySpace || input.keyCtrl) {
+    if (input.IsKeyDown(' ') || IsCtrlDown(input)) {
         // If vertical movement, use the larger of the two speeds
         maxSpeed = (verticalSpeed > moveSpeed) ? verticalSpeed : moveSpeed;
     }
@@ -201,10 +233,10 @@ void CFreecamController::UpdateMovement(const InputState& input, float deltaTime
 void CFreecamController::UpdateRoll(const InputState& input, float deltaTime) {
     // Manual roll (Q/E) only when smoothing disabled
     if (!m_Config.smoothEnabled) {
-        if (input.keyQ) {
+        if (input.IsKeyDown('Q')) {
             m_TargetRoll += m_Config.rollSpeed * deltaTime;
         }
-        if (input.keyE) {
+        if (input.IsKeyDown('E')) {
             m_TargetRoll -= m_Config.rollSpeed * deltaTime;
         }
     } else {
@@ -254,10 +286,80 @@ void CFreecamController::UpdateRoll(const InputState& input, float deltaTime) {
 }
 
 void CFreecamController::UpdateFOV(const InputState& input) {
-    if (input.mouseWheel != 0) {
+    if (input.mouseWheel != 0 && !IsAltDown(input)) {
         m_Transform.fov += input.mouseWheel * m_Config.fovStep;
         m_Transform.fov = Clamp(m_Transform.fov, m_Config.fovMin, m_Config.fovMax);
     }
+}
+
+void CFreecamController::UpdateSpeed(const InputState& input, float deltaTime) {
+    if (deltaTime <= 0.0f) {
+        return;
+    }
+
+    const float clickWindow = 0.12f; // seconds that count as a single tap
+    bool held4 = input.mouseButton4;
+    bool held5 = input.mouseButton5;
+
+    // If both are held, cancel out adjustments and reset hold accumulators.
+    if (held4 && held5) {
+        m_MouseButton4Hold = 0.0f;
+        m_MouseButton5Hold = 0.0f;
+        m_LastMouseButton4 = held4;
+        m_LastMouseButton5 = held5;
+        return;
+    }
+
+    float prevHold4 = m_MouseButton4Hold;
+    float prevHold5 = m_MouseButton5Hold;
+    if (held4) m_MouseButton4Hold += deltaTime; else m_MouseButton4Hold = 0.0f;
+    if (held5) m_MouseButton5Hold += deltaTime; else m_MouseButton5Hold = 0.0f;
+
+    auto extraTime = [clickWindow](float prevHold, float curHold) {
+        float prevOver = (prevHold > clickWindow) ? (prevHold - clickWindow) : 0.0f;
+        float curOver = (curHold > clickWindow) ? (curHold - clickWindow) : 0.0f;
+        float deltaOver = curOver - prevOver;
+        return (deltaOver > 0.0f) ? deltaOver : 0.0f;
+    };
+
+    float adjustment = 0.0f;
+    if (held5) {
+        if (!m_LastMouseButton5) {
+            // Initial tap: one step
+            adjustment += m_Config.speedAdjustRate * clickWindow;
+        }
+        // Continuous hold past the click window
+        adjustment += m_Config.speedAdjustRate * extraTime(prevHold5, m_MouseButton5Hold);
+    } else if (held4) {
+        if (!m_LastMouseButton4) {
+            adjustment -= m_Config.speedAdjustRate * clickWindow;
+        }
+        adjustment -= m_Config.speedAdjustRate * extraTime(prevHold4, m_MouseButton4Hold);
+    }
+    if (IsAltDown(input) && input.mouseWheel != 0) {
+        adjustment += input.mouseWheel * 0.05;
+    }
+
+    m_LastMouseButton4 = held4;
+    m_LastMouseButton5 = held5;
+
+    if (adjustment != 0.0f) {
+        float newScalar = m_SpeedScalar + adjustment;
+        newScalar = Clamp(newScalar, m_Config.speedMinMultiplier, m_Config.speedMaxMultiplier);
+        if (fabsf(newScalar - m_SpeedScalar) > 0.0001f) {
+            m_SpeedScalar = newScalar;
+            m_SpeedDirty = true;
+        }
+    }
+}
+
+void CFreecamController::ResetSpeed() {
+    m_SpeedScalar = Clamp(1.0f, m_Config.speedMinMultiplier, m_Config.speedMaxMultiplier);
+    m_SpeedDirty = true;
+    m_LastMouseButton4 = false;
+    m_LastMouseButton5 = false;
+    m_MouseButton4Hold = 0.0f;
+    m_MouseButton5Hold = 0.0f;
 }
 
 void CFreecamController::ApplySmoothing(float deltaTime) {

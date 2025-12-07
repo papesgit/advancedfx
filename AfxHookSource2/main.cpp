@@ -63,6 +63,7 @@
 #include <cstring>
 #include <cstdint>
 #include <mutex>
+#include <chrono>
 
 using json = nlohmann::json;
 
@@ -633,6 +634,37 @@ CON_COMMAND(mirv_camio, "New camera motion data import / export.") {
 	g_S2CamIO.Console_CamIO(args);
 }
 
+static std::chrono::steady_clock::time_point g_LastFreecamSpeedBroadcast = (std::chrono::steady_clock::time_point::min)();
+static const std::chrono::milliseconds g_FreecamSpeedBroadcastInterval(150); // ~6-7 Hz
+
+static void BroadcastFreecamSpeedIfNeeded() {
+	if (!g_pFreecam || !g_pObsWebSocket) {
+		return;
+	}
+
+	if (!g_pFreecam->IsEnabled() || !g_pObsWebSocket->IsActive()) {
+		return;
+	}
+
+	if (!g_pFreecam->IsSpeedDirty()) {
+		return;
+	}
+
+	auto now = std::chrono::steady_clock::now();
+	if (g_LastFreecamSpeedBroadcast == (std::chrono::steady_clock::time_point::min)() ||
+		now - g_LastFreecamSpeedBroadcast >= g_FreecamSpeedBroadcastInterval) {
+
+		json payload{
+			{"type", "freecam_speed"},
+			{"speed", g_pFreecam->GetCurrentMoveSpeed()}
+		};
+
+		g_pObsWebSocket->BroadcastJson(payload.dump());
+		g_LastFreecamSpeedBroadcast = now;
+		g_pFreecam->ClearSpeedDirtyFlag();
+	}
+}
+
 // Global spectator key bindings: number keys 1-0 map to controller indices
 // -1 = no player mapped to this key
 static int g_SpectatorBindings[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
@@ -748,12 +780,12 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 
 	// Handle number key presses for spectator switching (keys 1-0)
 	if (g_pEngineToClient) {
-		bool currentNumberKeys[10] = {
-			input.key1, input.key2, input.key3, input.key4, input.key5,
-			input.key6, input.key7, input.key8, input.key9, input.key0
-		};
+		const uint8_t numberKeyVks[10] = { '1','2','3','4','5','6','7','8','9','0' };
+		bool currentNumberKeys[10] = {};
 
 		for (int i = 0; i < 10; ++i) {
+			currentNumberKeys[i] = input.IsKeyDown(numberKeyVks[i]);
+
 			// Detect key press (transition from false to true)
 			if (currentNumberKeys[i] && !g_LastNumberKeyState[i]) {
 				// Check if this key is mapped to a player
@@ -784,6 +816,8 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 		Fov = cam.fov;
 		originOrAnglesOverriden = true;
 	}
+
+	BroadcastFreecamSpeedIfNeeded();
 
 	if(g_b_on_c_view_render_setup_view) {
 		AfxHookSourceRsView currentView = {Tx,Ty,Tz,Rx,Ry,Rz,Fov};
@@ -1780,13 +1814,13 @@ static void RegisterObsWebSocketHandlers() {
 		// Initialize freecam with current game camera position if not initialized
 		if (!g_pFreecam->IsEnabled()) {
 			CameraTransform initTransform;
-			initTransform.x = (float)g_MirvInputEx.GameCameraOrigin[0];
-			initTransform.y = (float)g_MirvInputEx.GameCameraOrigin[1];
-			initTransform.z = (float)g_MirvInputEx.GameCameraOrigin[2];
-			initTransform.pitch = (float)g_MirvInputEx.GameCameraAngles[0];
-			initTransform.yaw = (float)g_MirvInputEx.GameCameraAngles[1];
-			initTransform.roll = (float)g_MirvInputEx.GameCameraAngles[2];
-			initTransform.fov = (float)g_MirvInputEx.GameCameraFov;
+			initTransform.x = (float)g_MirvInputEx.LastCameraOrigin[0];
+			initTransform.y = (float)g_MirvInputEx.LastCameraOrigin[1];
+			initTransform.z = (float)g_MirvInputEx.LastCameraOrigin[2];
+			initTransform.pitch = (float)g_MirvInputEx.LastCameraAngles[0];
+			initTransform.yaw = (float)g_MirvInputEx.LastCameraAngles[1];
+			initTransform.roll = (float)g_MirvInputEx.LastCameraAngles[2];
+			initTransform.fov = (float)g_MirvInputEx.LastCameraFov;
 			g_pFreecam->Reset(initTransform);
 		}
 

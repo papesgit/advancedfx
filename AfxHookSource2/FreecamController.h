@@ -27,6 +27,9 @@ struct FreecamConfig {
     float moveSpeed;
     float sprintMultiplier;
     float verticalSpeed;
+    float speedAdjustRate;     // Multiplier delta per second when holding mouse4/5
+    float speedMinMultiplier;  // Lower clamp for speed scaling
+    float speedMaxMultiplier;  // Upper clamp for speed scaling
 
     // Roll
     float rollSpeed;
@@ -49,15 +52,18 @@ struct FreecamConfig {
         : mouseSensitivity(0.12f)
         , mouseAcceleration(30.0f)
         , mouseSmoothing(0.7f)
-        , moveSpeed(250.0f)         // Increased from 320 for faster movement
+        , moveSpeed(200.0f)         // Increased from 320 for faster movement
         , sprintMultiplier(2.5f)
-        , verticalSpeed(250.0f)     // Increased from 320 for faster vertical
+        , verticalSpeed(200.0f)     // Increased from 320 for faster vertical
+        , speedAdjustRate(1.1f)
+        , speedMinMultiplier(0.05f)
+        , speedMaxMultiplier(5.0f)
         , rollSpeed(45.0f)
         , rollSmoothing(0.8f)
         , leanStrength(1.0f)
-        , fovMin(20.0f)
+        , fovMin(10.0f)
         , fovMax(150.0f)
-        , fovStep(3.0f)
+        , fovStep(2.0f)
         , defaultFov(90.0f)
         , smoothEnabled(true)
         , halfVec(0.5f)             // Exponential half-time for position
@@ -92,6 +98,14 @@ public:
     /// Get current camera transform
     const CameraTransform& GetTransform() const { return m_SmoothedTransform; }
 
+    float GetCurrentMoveSpeed() const { return m_Config.moveSpeed * m_SpeedScalar; }
+    float GetCurrentVerticalSpeed() const { return m_Config.verticalSpeed * m_SpeedScalar; }
+    float GetSpeedMultiplier() const { return m_SpeedScalar; }
+    float GetMinMoveSpeed() const { return m_Config.moveSpeed * m_Config.speedMinMultiplier; }
+    float GetMaxMoveSpeed() const { return m_Config.moveSpeed * m_Config.speedMaxMultiplier; }
+    bool IsSpeedDirty() const { return m_SpeedDirty; }
+    void ClearSpeedDirtyFlag() { m_SpeedDirty = false; }
+
     /// Reset camera to specified position/rotation
     void Reset(const CameraTransform& transform);
 
@@ -103,6 +117,8 @@ private:
     void UpdateMovement(const InputState& input, float deltaTime);
     void UpdateRoll(const InputState& input, float deltaTime);
     void UpdateFOV(const InputState& input);
+    void UpdateSpeed(const InputState& input, float deltaTime);
+    void ResetSpeed();
     void ApplySmoothing(float deltaTime);
 
     // Math helpers
@@ -126,6 +142,13 @@ private:
 
     // Mouse state
     float m_MouseVelocityX, m_MouseVelocityY;
+
+    float m_SpeedScalar;
+    bool m_SpeedDirty;
+    bool m_LastMouseButton4;
+    bool m_LastMouseButton5;
+    float m_MouseButton4Hold;
+    float m_MouseButton5Hold;
 
     // Roll state
     float m_TargetRoll;

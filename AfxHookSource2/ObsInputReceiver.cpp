@@ -1,27 +1,17 @@
 #include "ObsInputReceiver.h"
 #include <chrono>
 #include "../shared/AfxConsole.h"
+#include <algorithm>
 
-// Key bit positions in keysDown bitmask
-#define KEY_W     0
-#define KEY_A     1
-#define KEY_S     2
-#define KEY_D     3
-#define KEY_SPACE 4
-#define KEY_CTRL  5
-#define KEY_SHIFT 6
-#define KEY_Q     7
-#define KEY_E     8
-#define KEY_1     9
-#define KEY_2     10
-#define KEY_3     11
-#define KEY_4     12
-#define KEY_5     13
-#define KEY_6     14
-#define KEY_7     15
-#define KEY_8     16
-#define KEY_9     17
-#define KEY_0     18
+namespace {
+constexpr uint8_t kVkSpace = 0x20;
+constexpr uint8_t kVkCtrl = 0x11;
+constexpr uint8_t kVkShift = 0x10;
+constexpr uint8_t kVkLeftCtrl = 0xA2;
+constexpr uint8_t kVkRightCtrl = 0xA3;
+constexpr uint8_t kVkLeftShift = 0xA0;
+constexpr uint8_t kVkRightShift = 0xA1;
+}
 
 CObsInputReceiver::CObsInputReceiver()
     : m_bActive(false)
@@ -154,35 +144,26 @@ void CObsInputReceiver::ReceiveThread() {
                 m_CurrentState.mouseLeft = packetState.mouseLeft;
                 m_CurrentState.mouseRight = packetState.mouseRight;
                 m_CurrentState.mouseMiddle = packetState.mouseMiddle;
+                m_CurrentState.mouseButton4 = packetState.mouseButton4;
+                m_CurrentState.mouseButton5 = packetState.mouseButton5;
 
-                // Latest key state
-                m_CurrentState.keyW = packetState.keyW;
-                m_CurrentState.keyA = packetState.keyA;
-                m_CurrentState.keyS = packetState.keyS;
-                m_CurrentState.keyD = packetState.keyD;
-                m_CurrentState.keySpace = packetState.keySpace;
-                m_CurrentState.keyCtrl = packetState.keyCtrl;
-                m_CurrentState.keyShift = packetState.keyShift;
-                m_CurrentState.keyQ = packetState.keyQ;
-                m_CurrentState.keyE = packetState.keyE;
-                m_CurrentState.key1 = packetState.key1;
-                m_CurrentState.key2 = packetState.key2;
-                m_CurrentState.key3 = packetState.key3;
-                m_CurrentState.key4 = packetState.key4;
-                m_CurrentState.key5 = packetState.key5;
-                m_CurrentState.key6 = packetState.key6;
-                m_CurrentState.key7 = packetState.key7;
-                m_CurrentState.key8 = packetState.key8;
-                m_CurrentState.key9 = packetState.key9;
-                m_CurrentState.key0 = packetState.key0;
+                // Latest key state bitmap
+                m_CurrentState.keyBitmap = packetState.keyBitmap;
 
                 m_CurrentState.timestamp = packetState.timestamp;
             }
             m_bNewData = true;
 
             if (m_Debug) {
+                auto keyDown = [&packetState](uint8_t vk) {
+                    return packetState.IsKeyDown(vk) ? "1" : "0";
+                };
+                auto keyDownAny = [&packetState](std::initializer_list<uint8_t> vks) {
+                    return packetState.IsAnyKeyDown(vks) ? "1" : "0";
+                };
+
                 advancedfx::Message(
-                    "mirv_udpdebug: seq=%u dx=%d dy=%d wheel=%d buttons=L%sR%sM%s keys=W%sA%sS%sD%sSpace%sCtrl%sShift%sQ%sE%s\n",
+                    "mirv_udpdebug: seq=%u dx=%d dy=%d wheel=%d buttons=L%sR%sM%sX1%sX2%s keys=W%sA%sS%sD%sSpace%sCtrl%sShift%sQ%sE%s1%s2%s3%s4%s5%s6%s7%s8%s9%s0%s\n",
                     packet.sequence,
                     (int)packetState.mouseDx,
                     (int)packetState.mouseDy,
@@ -190,25 +171,27 @@ void CObsInputReceiver::ReceiveThread() {
                     packetState.mouseLeft ? "1" : "0",
                     packetState.mouseRight ? "1" : "0",
                     packetState.mouseMiddle ? "1" : "0",
-                    packetState.keyW ? "1" : "0",
-                    packetState.keyA ? "1" : "0",
-                    packetState.keyS ? "1" : "0",
-                    packetState.keyD ? "1" : "0",
-                    packetState.keySpace ? "1" : "0",
-                    packetState.keyCtrl ? "1" : "0",
-                    packetState.keyShift ? "1" : "0",
-                    packetState.keyQ ? "1" : "0",
-                    packetState.keyE ? "1" : "0",
-                    packetState.key1 ? "1" : "0",
-                    packetState.key2 ? "1" : "0",
-                    packetState.key3 ? "1" : "0",
-                    packetState.key4 ? "1" : "0",
-                    packetState.key5 ? "1" : "0",
-                    packetState.key6 ? "1" : "0",
-                    packetState.key7 ? "1" : "0",
-                    packetState.key8 ? "1" : "0",
-                    packetState.key9 ? "1" : "0",
-                    packetState.key0 ? "1" : "0"
+                    packetState.mouseButton4 ? "1" : "0",
+                    packetState.mouseButton5 ? "1" : "0",
+                    keyDown('W'),
+                    keyDown('A'),
+                    keyDown('S'),
+                    keyDown('D'),
+                    keyDown(kVkSpace),
+                    keyDownAny({kVkLeftCtrl, kVkRightCtrl, kVkCtrl}),
+                    keyDownAny({kVkLeftShift, kVkRightShift, kVkShift}),
+                    keyDown('Q'),
+                    keyDown('E'),
+                    keyDown('1'),
+                    keyDown('2'),
+                    keyDown('3'),
+                    keyDown('4'),
+                    keyDown('5'),
+                    keyDown('6'),
+                    keyDown('7'),
+                    keyDown('8'),
+                    keyDown('9'),
+                    keyDown('0')
                 );
             }
 
@@ -251,29 +234,15 @@ void CObsInputReceiver::DecodePacket(const InputPacket& packet, InputState& stat
     state.mouseLeft = (packet.mouseButtons & 0x01) != 0;
     state.mouseRight = (packet.mouseButtons & 0x02) != 0;
     state.mouseMiddle = (packet.mouseButtons & 0x04) != 0;
+    state.mouseButton4 = (packet.mouseButtons & 0x08) != 0;
+    state.mouseButton5 = (packet.mouseButtons & 0x10) != 0;
 
-    // Decode keyboard keys from bitmask
-    state.keyW = (packet.keysDown & (1ULL << KEY_W)) != 0;
-    state.keyA = (packet.keysDown & (1ULL << KEY_A)) != 0;
-    state.keyS = (packet.keysDown & (1ULL << KEY_S)) != 0;
-    state.keyD = (packet.keysDown & (1ULL << KEY_D)) != 0;
-    state.keySpace = (packet.keysDown & (1ULL << KEY_SPACE)) != 0;
-    state.keyCtrl = (packet.keysDown & (1ULL << KEY_CTRL)) != 0;
-    state.keyShift = (packet.keysDown & (1ULL << KEY_SHIFT)) != 0;
-    state.keyQ = (packet.keysDown & (1ULL << KEY_Q)) != 0;
-    state.keyE = (packet.keysDown & (1ULL << KEY_E)) != 0;
-
-    // Decode number keys for player switching
-    state.key1 = (packet.keysDown & (1ULL << KEY_1)) != 0;
-    state.key2 = (packet.keysDown & (1ULL << KEY_2)) != 0;
-    state.key3 = (packet.keysDown & (1ULL << KEY_3)) != 0;
-    state.key4 = (packet.keysDown & (1ULL << KEY_4)) != 0;
-    state.key5 = (packet.keysDown & (1ULL << KEY_5)) != 0;
-    state.key6 = (packet.keysDown & (1ULL << KEY_6)) != 0;
-    state.key7 = (packet.keysDown & (1ULL << KEY_7)) != 0;
-    state.key8 = (packet.keysDown & (1ULL << KEY_8)) != 0;
-    state.key9 = (packet.keysDown & (1ULL << KEY_9)) != 0;
-    state.key0 = (packet.keysDown & (1ULL << KEY_0)) != 0;
+    // Copy keyboard bitmap
+    std::copy(
+        std::begin(packet.keyBitmap),
+        std::end(packet.keyBitmap),
+        state.keyBitmap.begin()
+    );
 
     state.timestamp = packet.timestamp;
 }
