@@ -115,21 +115,18 @@ void CFreecamController::UpdateMouseLook(const InputState& input, float deltaTim
         return;
     }
 
-    // Convert mouse deltas to angular velocity
-    float invDt = 1.0f / deltaTime;
-    float targetVelX = -input.mouseDx * m_Config.mouseSensitivity * invDt;
-    float targetVelY = input.mouseDy * m_Config.mouseSensitivity * invDt;
+    // Apply mouse deltas directly to angles
+    float deltaYaw = -input.mouseDx * m_Config.mouseSensitivity;
+    float deltaPitch = input.mouseDy * m_Config.mouseSensitivity;
 
-    // Apply mouse smoothing (exponential decay to target velocity)
-    float mouseLerpRaw = 1.0f - expf(-m_Config.mouseAcceleration * deltaTime);
-    float mouseLerp = Clamp(mouseLerpRaw * (1.0f - m_Config.mouseSmoothing), 0.0f, 1.0f);
+    m_Transform.yaw += deltaYaw;
+    m_Transform.pitch += deltaPitch;
 
-    m_MouseVelocityX = Lerp(m_MouseVelocityX, targetVelX, mouseLerp);
-    m_MouseVelocityY = Lerp(m_MouseVelocityY, targetVelY, mouseLerp);
-
-    // Apply velocity to angles
-    m_Transform.yaw += m_MouseVelocityX * deltaTime;
-    m_Transform.pitch += m_MouseVelocityY * deltaTime;
+    // Store velocities for roll calculation
+    if (deltaTime > 0) {
+        m_MouseVelocityX = deltaYaw / deltaTime;
+        m_MouseVelocityY = deltaPitch / deltaTime;
+    }
 
     // Clamp pitch
     m_Transform.pitch = Clamp(m_Transform.pitch, -89.0f, 89.0f);

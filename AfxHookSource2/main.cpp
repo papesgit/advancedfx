@@ -1827,6 +1827,7 @@ static void RegisterObsWebSocketHandlers() {
 		g_pFreecam->SetInputEnabled(true);
 		g_pFreecam->SetEnabled(true);
 		if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
+		if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
 		advancedfx::Message("Freecam enabled\n");
 		respond(MakeCommandResult("freecam_enable", true, "Freecam enabled"));
 	});
@@ -1839,8 +1840,8 @@ static void RegisterObsWebSocketHandlers() {
 
 		// Only disable input, keep freecam active until player switch
 		g_pFreecam->SetInputEnabled(false);
-		advancedfx::Message("Freecam input disabled (camera locked until player switch)\n");
-		respond(MakeCommandResult("freecam_disable", true, "Freecam input disabled (camera locked until player switch)"));
+		advancedfx::Message("Freecam input disabled\n");
+		respond(MakeCommandResult("freecam_disable", true, "Freecam input disabled"));
 	});
 
 	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_config", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
@@ -1857,16 +1858,6 @@ static void RegisterObsWebSocketHandlers() {
 		if (args.contains("mouseSensitivity")) {
 			config.mouseSensitivity = args["mouseSensitivity"].get<float>();
 			message += "mouseSensitivity=" + std::to_string(config.mouseSensitivity) + " ";
-			updated = true;
-		}
-		if (args.contains("mouseAcceleration")) {
-			config.mouseAcceleration = args["mouseAcceleration"].get<float>();
-			message += "mouseAcceleration=" + std::to_string(config.mouseAcceleration) + " ";
-			updated = true;
-		}
-		if (args.contains("mouseSmoothing")) {
-			config.mouseSmoothing = args["mouseSmoothing"].get<float>();
-			message += "mouseSmoothing=" + std::to_string(config.mouseSmoothing) + " ";
 			updated = true;
 		}
 

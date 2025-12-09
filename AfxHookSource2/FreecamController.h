@@ -20,8 +20,6 @@ struct CameraTransform {
 struct FreecamConfig {
     // Mouse
     float mouseSensitivity;
-    float mouseAcceleration;
-    float mouseSmoothing;
 
     // Movement
     float moveSpeed;
@@ -50,8 +48,6 @@ struct FreecamConfig {
 
     FreecamConfig()
         : mouseSensitivity(0.12f)
-        , mouseAcceleration(30.0f)
-        , mouseSmoothing(0.7f)
         , moveSpeed(200.0f)         // Increased from 320 for faster movement
         , sprintMultiplier(2.5f)
         , verticalSpeed(200.0f)     // Increased from 320 for faster vertical
