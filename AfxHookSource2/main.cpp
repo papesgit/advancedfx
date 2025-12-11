@@ -75,6 +75,9 @@ HMODULE g_H_FileSystem_stdio = 0;
 
 SOURCESDK::CS2::IFileSystem* g_pFileSystem = nullptr;
 
+typedef CEntityInstance* (__fastcall* ClientDll_GetSplitScreenPlayer_t)(int slot);
+extern ClientDll_GetSplitScreenPlayer_t g_ClientDll_GetSplitScreenPlayer;
+
 advancedfx::CCommandLine  * g_CommandLine = nullptr;
 
 typedef void (__fastcall * AddSearchPath_t)(void* This, const char *pPath, const char *pathID, int addType, int priority, int unk );
@@ -669,6 +672,8 @@ static void BroadcastFreecamSpeedIfNeeded() {
 // -1 = no player mapped to this key
 static int g_SpectatorBindings[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 static bool g_LastNumberKeyState[10] = {false};
+static bool g_PendingSpectatorSwitch = false;
+static int g_SpectatorSwitchTimeout = 0; // Safety timeout
 
 static bool g_bViewOverriden = false;
 static float g_fFovOverride = 90.0f;
@@ -792,11 +797,29 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 				if (g_SpectatorBindings[i] != -1) {
 					std::string specCmd = "spec_mode 2; spec_player " + std::to_string(g_SpectatorBindings[i]);
 					g_pEngineToClient->ExecuteClientCmd(0, specCmd.c_str(), true);
-					if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
-					if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(0);
+					
+					g_PendingSpectatorSwitch = true;
+					g_SpectatorSwitchTimeout = 3; // Max 3 frames timeout
 				}
 			}
 			g_LastNumberKeyState[i] = currentNumberKeys[i];
+		}
+	}
+
+	// Handle deferred freecam disable
+	if (g_PendingSpectatorSwitch && g_ClientDll_GetSplitScreenPlayer) {
+		CEntityInstance* localPlayer = g_ClientDll_GetSplitScreenPlayer(0);
+		if (localPlayer) {
+			uint8_t currentMode = localPlayer->GetObserverMode();
+			
+			// Check if spectator switch completed
+			bool switchComplete = (currentMode == 2);
+			
+			if (switchComplete || --g_SpectatorSwitchTimeout <= 0) {
+				if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
+				if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(0);
+				g_PendingSpectatorSwitch = false;
+			}
 		}
 	}
 
@@ -1991,16 +2014,15 @@ static void RegisterObsWebSocketHandlers() {
 			return;
 		}
 
-		if (!g_pEngineToClient) {
-			respond(MakeCampathPlayResult(cmd, false, "Engine not ready for campath playback"));
-			return;
-		}
+		float curTime = g_MirvTime.curtime_get();
 
-		std::ostringstream oss;
-		oss << "mirv_campath load \"" << EscapeQuotes(cmd) << "\"; mirv_campath edit start; mirv_campath enabled 1; spec_mode 4";
-		g_pEngineToClient->ExecuteClientCmd(0, oss.str().c_str(), true);
-		g_pFreecam->SetEnabled(false);
-
+		std::wstring wcmd;
+		UTF8StringToWideString(cmd.c_str(), wcmd);
+		g_CamPath.Load(wcmd.c_str());
+		g_CamPath.SetStart(curTime - g_CamPath.GetOffset());
+		g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
+		if(!g_CamPath.Enabled_get()) g_CamPath.Enabled_set(true);
+		if(g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
 		respond(MakeCampathPlayResult(cmd, true, "Campath playback started"));
 	});
 }
