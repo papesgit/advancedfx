@@ -99,6 +99,8 @@ CNvencStream::CNvencStream()
     , m_pSamplerState(nullptr)
     , m_nWidth(0)
     , m_nHeight(0)
+    , m_ConfigWidth(0)
+    , m_ConfigHeight(0)
     , m_nEncodedFrames(0)
     , m_nDroppedFrames(0)
     , m_SourceFormat(DXGI_FORMAT_UNKNOWN)
@@ -110,6 +112,20 @@ CNvencStream::CNvencStream()
     , m_RtpSsrc(0x12345678) // Random SSRC
     , m_bSentKeyframe(false)
     , m_TargetFrameTime(std::chrono::microseconds(16667)) // 60fps = 16.667ms per frame
+    , m_TargetBitrate(8000000) // 8 Mbps default
+    , m_DebugStatsEnabled(false)
+    , m_StatsStartTime(std::chrono::steady_clock::now())
+    , m_LastStatsPrint(std::chrono::steady_clock::now())
+    , m_NextEncodeTime(std::chrono::steady_clock::now())
+    , m_TotalEncodeCalls(0)
+    , m_SkippedRateLimit(0)
+    , m_LastStatEncoded(0)
+    , m_LastStatCalls(0)
+    , m_LastStatSkipped(0)
+    , m_SentRtpPackets(0)
+    , m_SentRtpBytes(0)
+    , m_LastStatRtpPackets(0)
+    , m_LastStatRtpBytes(0)
 {
     // Initialize WinSock
     WSADATA wsaData;
@@ -121,6 +137,83 @@ CNvencStream::~CNvencStream()
     Stop();
     DisableStreaming();
     WSACleanup();
+}
+
+void CNvencStream::SetTargetResolution(uint32_t width, uint32_t height)
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_ConfigWidth = width;
+    m_ConfigHeight = height;
+}
+
+void CNvencStream::ClearTargetResolution()
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_ConfigWidth = 0;
+    m_ConfigHeight = 0;
+}
+
+void CNvencStream::SetTargetBitrate(uint32_t bitrate)
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    if (bitrate > 0) {
+        m_TargetBitrate = bitrate;
+    }
+}
+
+void CNvencStream::SetDebugStatsEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_DebugStatsEnabled = enabled;
+}
+
+void CNvencStream::SetFpsCap(double fps)
+{
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    if (fps <= 0.0) {
+        m_TargetFrameTime = std::chrono::microseconds(0);
+    } else {
+        double frameUs = 1000000.0 / fps;
+        m_TargetFrameTime = std::chrono::microseconds(static_cast<int64_t>(frameUs));
+    }
+}
+
+double CNvencStream::GetFpsCap() const
+{
+    auto us = m_TargetFrameTime.count();
+    if (us <= 0) return 0.0;
+    return 1000000.0 / static_cast<double>(us);
+}
+
+double CNvencStream::GetElapsedSeconds() const
+{
+    if (!m_bActive) return 0.0;
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(now - m_StatsStartTime);
+    return elapsed.count();
+}
+
+double CNvencStream::GetEffectiveFps() const
+{
+    double seconds = GetElapsedSeconds();
+    if (seconds <= 0.0) return 0.0;
+    return static_cast<double>(m_nEncodedFrames.load()) / seconds;
+}
+
+double CNvencStream::GetReliabilityPct() const
+{
+    uint32_t encoded = m_nEncodedFrames.load();
+    uint32_t dropped = m_nDroppedFrames.load();
+    uint32_t total = encoded + dropped;
+    if (total == 0) return 100.0;
+    return (static_cast<double>(encoded) / static_cast<double>(total)) * 100.0;
+}
+
+double CNvencStream::GetRenderCallRate() const
+{
+    double seconds = GetElapsedSeconds();
+    if (seconds <= 0.0) return 0.0;
+    return static_cast<double>(m_TotalEncodeCalls.load()) / seconds;
 }
 
 bool CNvencStream::Start(ID3D11Device* pDevice, uint32_t nWidth, uint32_t nHeight, const char* outputPath)
@@ -135,20 +228,41 @@ bool CNvencStream::Start(ID3D11Device* pDevice, uint32_t nWidth, uint32_t nHeigh
         return false;
     }
 
-    m_nWidth = nWidth;
-    m_nHeight = nHeight;
+    // Allow overriding the encode resolution if the user configured one.
+    uint32_t targetWidth = (m_ConfigWidth > 0 && m_ConfigHeight > 0) ? m_ConfigWidth : nWidth;
+    uint32_t targetHeight = (m_ConfigWidth > 0 && m_ConfigHeight > 0) ? m_ConfigHeight : nHeight;
+
+    if (targetWidth == 0 || targetHeight == 0) {
+        return false;
+    }
+
+    m_nWidth = targetWidth;
+    m_nHeight = targetHeight;
     m_pDevice = pDevice;
     m_pDevice->AddRef();
     m_bSentKeyframe = false;
     m_RtpStartTime = std::chrono::steady_clock::now();
     m_LastIdrTime = m_RtpStartTime;
     m_LastEncodeTime = m_RtpStartTime;
+    m_NextEncodeTime = m_RtpStartTime;
+    m_StatsStartTime = m_RtpStartTime;
+    m_LastStatsPrint = m_RtpStartTime;
+    m_TotalEncodeCalls = 0;
+    m_SkippedRateLimit = 0;
+    m_LastStatEncoded = 0;
+    m_LastStatCalls = 0;
+    m_LastStatSkipped = 0;
+    m_SentRtpPackets = 0;
+    m_SentRtpBytes = 0;
+    m_LastStatRtpPackets = 0;
+    m_LastStatRtpBytes = 0;
 
     // Create debug log file
     m_pDebugLog = std::make_unique<std::ofstream>("nvenc_debug.txt", std::ios::out | std::ios::trunc);
     if (m_pDebugLog && m_pDebugLog->is_open()) {
         *m_pDebugLog << "=== NVENC Debug Log ===" << std::endl;
-        *m_pDebugLog << "Resolution: " << nWidth << "x" << nHeight << std::endl;
+        *m_pDebugLog << "Resolution: " << targetWidth << "x" << targetHeight << std::endl;
+        *m_pDebugLog << "Bitrate: " << m_TargetBitrate << " bps" << std::endl;
         m_pDebugLog->flush();
     }
 
@@ -164,7 +278,7 @@ bool CNvencStream::Start(ID3D11Device* pDevice, uint32_t nWidth, uint32_t nHeigh
     }
 
     // Initialize encoder
-    if (!InitializeEncoder(pDevice, nWidth, nHeight)) {
+    if (!InitializeEncoder(pDevice, targetWidth, targetHeight)) {
         std::cerr << "Failed to initialize NVENC encoder" << std::endl;
         Cleanup();
         return false;
@@ -247,6 +361,8 @@ bool CNvencStream::EnableStreaming(const char* ipAddress, uint16_t port)
     m_DestAddr.sin_family = AF_INET;
     m_DestAddr.sin_port = htons(port);
     inet_pton(AF_INET, ipAddress, &m_DestAddr.sin_addr);
+    m_DestIp = ipAddress ? ipAddress : "";
+    m_DestPort = port;
 
     // Reset RTP sequence and timestamp
     m_RtpSequence = 0;
@@ -322,8 +438,8 @@ bool CNvencStream::InitializeEncoder(ID3D11Device* pDevice, uint32_t nWidth, uin
 
         // Rate control
         encodeConfig.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;  // Constant bitrate for streaming
-        encodeConfig.rcParams.averageBitRate = 8000000;  // 8 Mbps (higher quality for 60fps)
-        encodeConfig.rcParams.maxBitRate = 8000000;
+        encodeConfig.rcParams.averageBitRate = m_TargetBitrate;
+        encodeConfig.rcParams.maxBitRate = m_TargetBitrate;
 
         // Create the encoder
         m_pEncoder->CreateEncoder(&initializeParams);
@@ -521,10 +637,16 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
 
     // Frame rate limiting: only encode at 60fps
     auto now = std::chrono::steady_clock::now();
-    auto elapsed = now - m_LastEncodeTime;
-    if (elapsed < m_TargetFrameTime) {
-        // Too soon, skip this frame
-        return;
+    m_TotalEncodeCalls++;
+    if (m_TargetFrameTime.count() > 0) {
+        if (now < m_NextEncodeTime) {
+            m_SkippedRateLimit++;
+            return;
+        }
+        // Advance next encode deadline in fixed increments to avoid quantization to render timestep.
+        do {
+            m_NextEncodeTime += m_TargetFrameTime;
+        } while (m_NextEncodeTime <= now);
     }
     m_LastEncodeTime = now;
 
@@ -741,6 +863,46 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
             ProcessEncodedFrame(packet.frame);
             m_nEncodedFrames++;
 
+            if (m_DebugStatsEnabled) {
+                auto nowDebug = std::chrono::steady_clock::now();
+                if (nowDebug - m_LastStatsPrint >= std::chrono::seconds(1)) {
+                    double fps = GetEffectiveFps();
+                    double rel = GetReliabilityPct();
+                    uint32_t encodedDelta = m_nEncodedFrames - m_LastStatEncoded;
+                    uint32_t callsDelta = m_TotalEncodeCalls - m_LastStatCalls;
+                    uint32_t skippedDelta = m_SkippedRateLimit - m_LastStatSkipped;
+                    uint64_t rtpPktDelta = m_SentRtpPackets - m_LastStatRtpPackets;
+                    uint64_t rtpBytesDelta = m_SentRtpBytes - m_LastStatRtpBytes;
+                    m_LastStatEncoded = m_nEncodedFrames;
+                    m_LastStatCalls = m_TotalEncodeCalls;
+                    m_LastStatSkipped = m_SkippedRateLimit;
+                    m_LastStatRtpPackets = m_SentRtpPackets;
+                    m_LastStatRtpBytes = m_SentRtpBytes;
+                    std::cout << "[NVENC] FPS: " << fps
+                              << " reliability: " << rel << "%"
+                              << " calls/s: " << callsDelta
+                              << " encoded/s: " << encodedDelta
+                              << " rateLimited/s: " << skippedDelta
+                              << " cap: " << GetFpsCap() << "fps"
+                              << " rtp/s: " << rtpPktDelta
+                              << " bytes/s: " << rtpBytesDelta
+                              << std::endl;
+                    if (m_pDebugLog && m_pDebugLog->is_open()) {
+                        *m_pDebugLog << "[DEBUG] FPS: " << fps
+                                     << " reliability: " << rel << "%"
+                                     << " calls/s: " << callsDelta
+                                     << " encoded/s: " << encodedDelta
+                                     << " rateLimited/s: " << skippedDelta
+                                     << " cap: " << GetFpsCap() << "fps"
+                                     << " rtp/s: " << rtpPktDelta
+                                     << " bytes/s: " << rtpBytesDelta
+                                     << std::endl;
+                        m_pDebugLog->flush();
+                    }
+                    m_LastStatsPrint = nowDebug;
+                }
+            }
+
             // Debug: Log packet size for first few frames
             if (m_pDebugLog && m_pDebugLog->is_open()) {
                 if (m_nEncodedFrames <= 5) {
@@ -943,8 +1105,12 @@ void CNvencStream::SendRtpPacket(const uint8_t* nalData, size_t nalSize, bool la
                         lastNalOfFrame, 96);
         memcpy(packet.data() + 12, nalData, nalSize);
 
-        sendto(m_Socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
+        int sent = sendto(m_Socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
             reinterpret_cast<sockaddr*>(&m_DestAddr), sizeof(m_DestAddr));
+        if (sent > 0) {
+            m_SentRtpPackets++;
+            m_SentRtpBytes += static_cast<uint64_t>(sent);
+        }
     }
     else {
         // Fragmentation Unit (FU-A) mode for large NAL units
@@ -971,8 +1137,12 @@ void CNvencStream::SendRtpPacket(const uint8_t* nalData, size_t nalSize, bool la
 
             memcpy(packet.data() + 14, payload + offset, fragmentSize);
 
-            sendto(m_Socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
+            int sent = sendto(m_Socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
                 reinterpret_cast<sockaddr*>(&m_DestAddr), sizeof(m_DestAddr));
+            if (sent > 0) {
+                m_SentRtpPackets++;
+                m_SentRtpBytes += static_cast<uint64_t>(sent);
+            }
 
             offset += fragmentSize;
             firstFragment = false;

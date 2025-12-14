@@ -56,6 +56,31 @@ public:
     DXGI_FORMAT GetSourceFormat() const { return m_SourceFormat; }
     DXGI_FORMAT GetEncoderFormat() const { return m_EncoderFormat; }
 
+    /// Optional configuration
+    void SetTargetResolution(uint32_t width, uint32_t height);
+    void ClearTargetResolution();
+    uint32_t GetTargetWidth() const { return m_ConfigWidth; }
+    uint32_t GetTargetHeight() const { return m_ConfigHeight; }
+
+    void SetTargetBitrate(uint32_t bitrate);
+    uint32_t GetTargetBitrate() const { return m_TargetBitrate; }
+
+    // Debug / diagnostics
+    void SetDebugStatsEnabled(bool enabled);
+    bool GetDebugStatsEnabled() const { return m_DebugStatsEnabled; }
+    double GetEffectiveFps() const;
+    double GetReliabilityPct() const;
+    double GetElapsedSeconds() const;
+    double GetRenderCallRate() const;
+    uint64_t GetRtpPacketsSent() const { return m_SentRtpPackets; }
+    uint64_t GetRtpBytesSent() const { return m_SentRtpBytes; }
+    const std::string& GetDestIp() const { return m_DestIp; }
+    uint16_t GetDestPort() const { return m_DestPort; }
+
+    // Frame pacing (0 = uncapped)
+    void SetFpsCap(double fps);
+    double GetFpsCap() const;
+
 private:
     void Cleanup();
     bool InitializeEncoder(ID3D11Device* pDevice, uint32_t nWidth, uint32_t nHeight);
@@ -86,6 +111,8 @@ private:
     // Frame size
     uint32_t m_nWidth;
     uint32_t m_nHeight;
+    uint32_t m_ConfigWidth;
+    uint32_t m_ConfigHeight;
 
     // Statistics
     std::atomic<uint32_t> m_nEncodedFrames;
@@ -106,6 +133,8 @@ private:
     std::atomic<bool> m_bStreamingEnabled;
     SOCKET m_Socket;
     sockaddr_in m_DestAddr;
+    std::string m_DestIp;
+    uint16_t m_DestPort = 0;
     uint32_t m_RtpSequence;
     uint32_t m_RtpTimestamp;
     uint32_t m_RtpSsrc;
@@ -118,5 +147,21 @@ private:
 
     // Frame rate limiting
     std::chrono::steady_clock::time_point m_LastEncodeTime;
+    std::chrono::steady_clock::time_point m_NextEncodeTime;
     std::chrono::microseconds m_TargetFrameTime;
+
+    // Encoding configuration
+    uint32_t m_TargetBitrate;
+    bool m_DebugStatsEnabled;
+    std::chrono::steady_clock::time_point m_StatsStartTime;
+    std::chrono::steady_clock::time_point m_LastStatsPrint;
+    std::atomic<uint32_t> m_TotalEncodeCalls;
+    std::atomic<uint32_t> m_SkippedRateLimit;
+    uint32_t m_LastStatEncoded;
+    uint32_t m_LastStatCalls;
+    uint32_t m_LastStatSkipped;
+    std::atomic<uint64_t> m_SentRtpPackets;
+    std::atomic<uint64_t> m_SentRtpBytes;
+    uint64_t m_LastStatRtpPackets;
+    uint64_t m_LastStatRtpBytes;
 };

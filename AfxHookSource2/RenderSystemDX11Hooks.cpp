@@ -4409,14 +4409,22 @@ CON_COMMAND(mirv_nvenc, "NVIDIA NVENC hardware encoding (experimental).")
 				return;
 			}
 
+			// Apply optional user override
+			uint32_t targetWidth = width;
+			uint32_t targetHeight = height;
+			if (g_NvencStream.GetTargetWidth() > 0 && g_NvencStream.GetTargetHeight() > 0) {
+				targetWidth = g_NvencStream.GetTargetWidth();
+				targetHeight = g_NvencStream.GetTargetHeight();
+			}
+
 			// Optional output file path for testing
 			const char* outputPath = nullptr;
 			if (3 <= argc) {
 				outputPath = args->ArgV(2);
 			}
 
-			if (g_NvencStream.Start(g_pDevice, width, height, outputPath)) {
-				advancedfx::Message("NVENC stream started: %dx%d\n", width, height);
+			if (g_NvencStream.Start(g_pDevice, targetWidth, targetHeight, outputPath)) {
+				advancedfx::Message("NVENC stream started: %ux%u (source %ux%u)\n", targetWidth, targetHeight, width, height);
 				if (outputPath) {
 					advancedfx::Message("  Output file: %s\n", outputPath);
 				}
@@ -4443,6 +4451,26 @@ CON_COMMAND(mirv_nvenc, "NVIDIA NVENC hardware encoding (experimental).")
 				advancedfx::Message("NVENC stream: ACTIVE\n");
 				advancedfx::Message("  Encoded frames: %u\n", g_NvencStream.GetEncodedFrameCount());
 				advancedfx::Message("  Dropped frames: %u\n", g_NvencStream.GetDroppedFrameCount());
+				advancedfx::Message("  Effective FPS: %.2f\n", g_NvencStream.GetEffectiveFps());
+				advancedfx::Message("  Reliability: %.2f%%\n", g_NvencStream.GetReliabilityPct());
+				advancedfx::Message("  Render call rate: %.2f fps\n", g_NvencStream.GetRenderCallRate());
+				if (g_NvencStream.GetTargetWidth() > 0 && g_NvencStream.GetTargetHeight() > 0) {
+					advancedfx::Message("  Configured resolution: %ux%u\n", g_NvencStream.GetTargetWidth(), g_NvencStream.GetTargetHeight());
+				} else {
+					advancedfx::Message("  Configured resolution: backbuffer size\n");
+				}
+				advancedfx::Message("  Configured bitrate: %u bps\n", g_NvencStream.GetTargetBitrate());
+				std::string fpsCapStr = g_NvencStream.GetFpsCap() > 0.0
+					? std::to_string(g_NvencStream.GetFpsCap()) + " fps"
+					: "uncapped";
+				advancedfx::Message("  FPS cap: %s\n", fpsCapStr.c_str());
+				advancedfx::Message("  Streaming: %s\n", g_NvencStream.GetRtpPacketsSent() > 0 ? "enabled" : "disabled");
+				if (g_NvencStream.GetRtpPacketsSent() > 0) {
+					advancedfx::Message("    Target: %s:%u\n", g_NvencStream.GetDestIp().c_str(), g_NvencStream.GetDestPort());
+					advancedfx::Message("    RTP packets sent: %llu\n", static_cast<unsigned long long>(g_NvencStream.GetRtpPacketsSent()));
+					advancedfx::Message("    RTP bytes sent: %llu\n", static_cast<unsigned long long>(g_NvencStream.GetRtpBytesSent()));
+				}
+				advancedfx::Message("  Debug stats: %s\n", g_NvencStream.GetDebugStatsEnabled() ? "on" : "off");
 
 				// Show format info
 				DXGI_FORMAT srcFmt = g_NvencStream.GetSourceFormat();
@@ -4475,7 +4503,124 @@ CON_COMMAND(mirv_nvenc, "NVIDIA NVENC hardware encoding (experimental).")
 			}
 			else {
 				advancedfx::Message("NVENC stream: INACTIVE\n");
+				if (g_NvencStream.GetTargetWidth() > 0 && g_NvencStream.GetTargetHeight() > 0) {
+					advancedfx::Message("  Configured resolution: %ux%u\n", g_NvencStream.GetTargetWidth(), g_NvencStream.GetTargetHeight());
+				} else {
+					advancedfx::Message("  Configured resolution: backbuffer size\n");
+				}
+				advancedfx::Message("  Configured bitrate: %u bps\n", g_NvencStream.GetTargetBitrate());
+				std::string fpsCapStr = g_NvencStream.GetFpsCap() > 0.0
+					? std::to_string(g_NvencStream.GetFpsCap()) + " fps"
+					: "uncapped";
+				advancedfx::Message("  FPS cap: %s\n", fpsCapStr.c_str());
+				advancedfx::Message("  Streaming: %s\n", g_NvencStream.GetRtpPacketsSent() > 0 ? "enabled" : "disabled");
+				if (g_NvencStream.GetRtpPacketsSent() > 0) {
+					advancedfx::Message("    Target: %s:%u\n", g_NvencStream.GetDestIp().c_str(), g_NvencStream.GetDestPort());
+					advancedfx::Message("    RTP packets sent: %llu\n", static_cast<unsigned long long>(g_NvencStream.GetRtpPacketsSent()));
+					advancedfx::Message("    RTP bytes sent: %llu\n", static_cast<unsigned long long>(g_NvencStream.GetRtpBytesSent()));
+				}
+				advancedfx::Message("  Debug stats: %s\n", g_NvencStream.GetDebugStatsEnabled() ? "on" : "off");
 			}
+			return;
+		}
+		else if (0 == _stricmp(cmd1, "resolution"))
+		{
+			if (3 <= argc) {
+				const char* cmd2 = args->ArgV(2);
+				if (0 == _stricmp(cmd2, "default")) {
+					g_NvencStream.ClearTargetResolution();
+					advancedfx::Message("NVENC resolution override cleared (using backbuffer size).\n");
+					return;
+				}
+				if (4 <= argc) {
+					uint32_t targetWidth = static_cast<uint32_t>(atoi(cmd2));
+					uint32_t targetHeight = static_cast<uint32_t>(atoi(args->ArgV(3)));
+					if (targetWidth > 0 && targetHeight > 0) {
+						g_NvencStream.SetTargetResolution(targetWidth, targetHeight);
+						advancedfx::Message("NVENC resolution override set to %ux%u.\n", targetWidth, targetHeight);
+					}
+					else {
+						advancedfx::Warning("Usage: %s resolution <width> <height>\n", cmd0);
+					}
+					return;
+				}
+			}
+
+			std::string currentRes = "backbuffer";
+			if (g_NvencStream.GetTargetWidth() > 0 && g_NvencStream.GetTargetHeight() > 0) {
+				currentRes = std::to_string(g_NvencStream.GetTargetWidth()) + "x" + std::to_string(g_NvencStream.GetTargetHeight());
+			}
+
+			advancedfx::Message(
+				"%s resolution <width> <height> - Override encode resolution.\n"
+				"%s resolution default - Use backbuffer size (default).\n"
+				"Current value: %s\n",
+				cmd0, cmd0, currentRes.c_str()
+			);
+			return;
+		}
+		else if (0 == _stricmp(cmd1, "bitrate"))
+		{
+			if (3 <= argc) {
+				const char* cmd2 = args->ArgV(2);
+				if (!StringIsAlphas(cmd2)) {
+					uint32_t bitrate = static_cast<uint32_t>(strtoul(cmd2, nullptr, 10));
+					if (bitrate > 0) {
+						g_NvencStream.SetTargetBitrate(bitrate);
+						advancedfx::Message("NVENC bitrate set to %u bps.\n", bitrate);
+						return;
+					}
+				}
+				advancedfx::Warning("Usage: %s bitrate <bitrateInBps>\n", cmd0);
+				return;
+			}
+
+			advancedfx::Message(
+				"%s bitrate <bitrateInBps> - Set target bitrate (constant bitrate mode).\n"
+				"Current value: %u bps\n",
+				cmd0,
+				g_NvencStream.GetTargetBitrate()
+			);
+			return;
+		}
+		else if (0 == _stricmp(cmd1, "debug"))
+		{
+			if (3 <= argc) {
+				bool enable = 0 != atoi(args->ArgV(2));
+				g_NvencStream.SetDebugStatsEnabled(enable);
+				advancedfx::Message("NVENC debug stats %s.\n", enable ? "enabled" : "disabled");
+				return;
+			}
+
+			advancedfx::Message(
+				"%s debug 0|1 - Disable/enable per-second FPS/reliability logging.\n"
+				"Current value: %s\n",
+				cmd0, g_NvencStream.GetDebugStatsEnabled() ? "1" : "0"
+			);
+			return;
+		}
+		else if (0 == _stricmp(cmd1, "fpscap"))
+		{
+			if (3 <= argc) {
+				const char* cmd2 = args->ArgV(2);
+				double fps = atof(cmd2);
+				g_NvencStream.SetFpsCap(fps);
+				if (fps <= 0.0) {
+					advancedfx::Message("NVENC FPS cap removed (uncapped).\n");
+				} else {
+					advancedfx::Message("NVENC FPS cap set to %.2f fps.\n", fps);
+				}
+				return;
+			}
+
+			double currentCap = g_NvencStream.GetFpsCap();
+			std::string currentCapStr = currentCap > 0.0 ? std::to_string(currentCap) + " fps" : "uncapped";
+			advancedfx::Message(
+				"%s fpscap <fps|0> - Set encode FPS cap (0 = uncapped).\n"
+				"Current value: %s\n",
+				cmd0,
+				currentCapStr.c_str()
+			);
 			return;
 		}
 		else if (0 == _stricmp(cmd1, "stream"))
@@ -4529,9 +4674,13 @@ CON_COMMAND(mirv_nvenc, "NVIDIA NVENC hardware encoding (experimental).")
 		"%s status - Show encoding status and statistics.\n"
 		"%s stream enable <ip> <port> - Enable RTP network streaming (writes nvenc_stream.sdp to open in VLC).\n"
 		"%s stream disable - Disable network streaming.\n"
+		"%s resolution <width> <height>|default - Override encode resolution or use backbuffer size.\n"
+		"%s bitrate <bitrateInBps> - Set target bitrate (CBR).\n"
+		"%s debug 0|1 - Disable/enable per-second FPS/reliability logging.\n"
+		"%s fpscap <fps|0> - Cap encoder FPS (0 = uncapped).\n"
 		"Example: %s start test.h264\n"
 		"Example: %s stream enable 127.0.0.1 5000\n",
-		cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0
+		cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0
 	);
 }
 
