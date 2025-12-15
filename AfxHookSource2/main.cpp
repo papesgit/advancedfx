@@ -40,6 +40,7 @@
 #include "../shared/StringTools.h"
 #include "../shared/binutils.h"
 #include "../shared/CommandSystem.h"
+#include "../shared/AfxMath.h"
 #include "../shared/ImageBufferPoolThreadSafe.h"
 #include "../shared/ThreadPool.h"
 #include "../shared/MirvCamIO.h"
@@ -675,6 +676,141 @@ static bool g_LastNumberKeyState[10] = {false};
 static bool g_PendingSpectatorSwitch = false;
 static int g_SpectatorSwitchTimeout = 0; // Safety timeout
 
+struct AttachmentCameraState {
+	bool active = false;
+	int controllerIndex = -1;
+	bool useAttachmentIndex = true;
+	uint8_t attachmentIndex = 0;
+	std::string attachmentName;
+	SOURCESDK::Vector offsetPos = {0.0f, 0.0f, 0.0f};
+	Afx::Math::QEulerAngles offsetAngles = Afx::Math::QEulerAngles(0.0, 0.0, 0.0);
+	float fov = 90.0f;
+};
+
+static AttachmentCameraState g_AttachmentCamera;
+static bool g_AttachmentCameraHadError = false;
+
+static Afx::Math::Quaternion SourceQuatToAfx(const SOURCESDK::Quaternion& q) {
+	return Afx::Math::Quaternion(q.w, q.x, q.y, q.z);
+}
+
+static Afx::Math::Vector3 RotateVectorByQuat(const Afx::Math::Quaternion& q, const Afx::Math::Vector3& v) {
+	Afx::Math::Quaternion vQuat(0.0, v.X, v.Y, v.Z);
+	Afx::Math::Quaternion result = q * vQuat * q.Conjugate();
+	return Afx::Math::Vector3(result.X, result.Y, result.Z);
+}
+
+static CEntityInstance* GetPawnFromControllerIndex(int controllerIndex) {
+	if (!g_pEntityList || !g_GetEntityFromIndex) return nullptr;
+
+	auto controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, controllerIndex);
+	if (!controller || !controller->IsPlayerController()) return nullptr;
+
+	auto pawnHandle = controller->GetPlayerPawnHandle();
+	if (!pawnHandle.IsValid()) return nullptr;
+
+	int pawnIndex = pawnHandle.GetEntryIndex();
+	if (pawnIndex < 0) return nullptr;
+
+	return (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIndex);
+}
+
+static bool TryComputeAttachmentCamera(const AttachmentCameraState& state, Afx::Math::Vector3& outOrigin, Afx::Math::QEulerAngles& outAngles, float & outFov) {
+	if (!state.active) return false;
+
+	auto pawn = GetPawnFromControllerIndex(state.controllerIndex);
+	if (!pawn) return false;
+
+	uint8_t attachmentIdx = state.attachmentIndex;
+	if (!state.useAttachmentIndex) {
+		attachmentIdx = pawn->LookupAttachment(state.attachmentName.c_str());
+	}
+
+	SOURCESDK::Vector attachmentOrigin;
+	SOURCESDK::Quaternion attachmentAngles;
+	if (!pawn->GetAttachment(attachmentIdx, attachmentOrigin, attachmentAngles)) return false;
+
+	Afx::Math::Quaternion baseQuat = SourceQuatToAfx(attachmentAngles).Normalized();
+	Afx::Math::Quaternion offsetQuat = Afx::Math::Quaternion::FromQREulerAngles(
+		Afx::Math::QREulerAngles::FromQEulerAngles(state.offsetAngles)
+	).Normalized();
+	Afx::Math::Quaternion combinedQuat = (baseQuat * offsetQuat).Normalized();
+
+	Afx::Math::Vector3 combinedOrigin(attachmentOrigin.x, attachmentOrigin.y, attachmentOrigin.z);
+	Afx::Math::Vector3 offsetVec(state.offsetPos.x, state.offsetPos.y, state.offsetPos.z);
+	combinedOrigin += RotateVectorByQuat(combinedQuat, offsetVec);
+
+	outOrigin = combinedOrigin;
+	outAngles = combinedQuat.ToQREulerAngles().ToQEulerAngles();
+	outFov = state.fov;
+
+	return true;
+}
+
+CON_COMMAND(mirv_attach, "Attach camera to a player attachment (testing)") {
+	if (2 <= args->ArgC() && 0 == _stricmp("stop", args->ArgV(1))) {
+		g_AttachmentCamera.active = false;
+		g_AttachmentCameraHadError = false;
+		advancedfx::Message("mirv_attach: stopped.\n");
+		return;
+	}
+
+	if (args->ArgC() < 10 || 0 != _stricmp("start", args->ArgV(1))) {
+		advancedfx::Message(
+			"mirv_attach start <playerControllerIndex> <attachmentIndex|attachmentName> <offX> <offY> <offZ> <pitch> <yaw> <roll> [fov]\n"
+			"mirv_attach stop\n"
+		);
+		return;
+	}
+
+	AttachmentCameraState newState;
+	newState.active = true;
+	newState.controllerIndex = atoi(args->ArgV(2));
+
+	const char* attachmentArg = args->ArgV(3);
+	char* endPtr = nullptr;
+	long attachmentVal = strtol(attachmentArg, &endPtr, 10);
+	if (endPtr && *endPtr == '\0') {
+		if (attachmentVal < 0 || 0xff < attachmentVal) {
+			advancedfx::Warning("mirv_attach: attachment index must be between 0 and 255.\n");
+			return;
+		}
+		newState.useAttachmentIndex = true;
+		newState.attachmentIndex = (uint8_t)attachmentVal;
+	} else {
+		newState.useAttachmentIndex = false;
+		newState.attachmentName = attachmentArg;
+	}
+
+	newState.offsetPos.x = (float)atof(args->ArgV(4));
+	newState.offsetPos.y = (float)atof(args->ArgV(5));
+	newState.offsetPos.z = (float)atof(args->ArgV(6));
+	newState.offsetAngles = Afx::Math::QEulerAngles(
+		atof(args->ArgV(7)),
+		atof(args->ArgV(8)),
+		atof(args->ArgV(9))
+	);
+	if (args->ArgC() >= 11) {
+		newState.fov = (float)atof(args->ArgV(10));
+	} else {
+		newState.fov = 90.0f;
+	}
+
+	g_AttachmentCamera = newState;
+	g_AttachmentCameraHadError = false;
+
+	std::string attachmentDesc = newState.useAttachmentIndex ? std::to_string(newState.attachmentIndex) : newState.attachmentName;
+	advancedfx::Message(
+		"mirv_attach: start controller %d attachment %s (%s) offset pos [%.2f %.2f %.2f] angles [%.2f %.2f %.2f] fov [%.2f]\n",
+		newState.controllerIndex,
+		newState.useAttachmentIndex ? "index" : "name",
+		attachmentDesc.c_str(),
+		newState.offsetPos.x, newState.offsetPos.y, newState.offsetPos.z,
+		(float)newState.offsetAngles.Pitch, (float)newState.offsetAngles.Yaw, (float)newState.offsetAngles.Roll,
+		newState.fov
+	);
+}
+
 static bool g_bViewOverriden = false;
 static float g_fFovOverride = 90.0f;
 static float * g_pFov = nullptr;
@@ -816,6 +952,8 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 			bool switchComplete = (currentMode == 2);
 			
 			if (switchComplete || --g_SpectatorSwitchTimeout <= 0) {
+				g_AttachmentCamera.active = false;
+				g_AttachmentCameraHadError = false;
 				if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
 				if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(0);
 				g_PendingSpectatorSwitch = false;
@@ -838,6 +976,28 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 		Rz = cam.roll;
 		Fov = cam.fov;
 		originOrAnglesOverriden = true;
+	}
+
+	// Camera attachment override
+	if (g_AttachmentCamera.active) {
+		Afx::Math::Vector3 attachedOrigin(0.0, 0.0, 0.0);
+		Afx::Math::QEulerAngles attachedAngles(0.0, 0.0, 0.0);
+
+	float attachedFov = 90.0f;
+	if (TryComputeAttachmentCamera(g_AttachmentCamera, attachedOrigin, attachedAngles, attachedFov)) {
+		Tx = (float)attachedOrigin.X;
+		Ty = (float)attachedOrigin.Y;
+		Tz = (float)attachedOrigin.Z;
+		Rx = (float)attachedAngles.Pitch;
+		Ry = (float)attachedAngles.Yaw;
+		Rz = (float)attachedAngles.Roll;
+		Fov = attachedFov;
+		originOrAnglesOverriden = true;
+		g_AttachmentCameraHadError = false;
+	} else if (!g_AttachmentCameraHadError) {
+			advancedfx::Warning("mirv_attach: failed to resolve attachment for controller %d.\n", g_AttachmentCamera.controllerIndex);
+			g_AttachmentCameraHadError = true;
+		}
 	}
 
 	BroadcastFreecamSpeedIfNeeded();
@@ -1851,6 +2011,8 @@ static void RegisterObsWebSocketHandlers() {
 		g_pFreecam->SetEnabled(true);
 		if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
 		if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
+		g_AttachmentCamera.active = false;
+		g_AttachmentCameraHadError = false;
 		advancedfx::Message("Freecam enabled\n");
 		respond(MakeCommandResult("freecam_enable", true, "Freecam enabled"));
 	});
@@ -1983,6 +2145,89 @@ static void RegisterObsWebSocketHandlers() {
 		} else {
 			respond(MakeCommandResult("freecam_config", false, "No valid config parameters provided"));
 		}
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("attach_camera", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("observer_slot")) {
+			respond(MakeCommandResult("attach_camera", false, "Missing observer_slot"));
+			return;
+		}
+		int slot = args["observer_slot"].get<int>();
+		if (slot < 0 || slot > 9) {
+			respond(MakeCommandResult("attach_camera", false, "observer_slot must be 0-9"));
+			return;
+		}
+
+		if (!args.contains("attachment")) {
+			respond(MakeCommandResult("attach_camera", false, "Missing attachment"));
+			return;
+		}
+
+		if (!args.contains("offset_pos") || !args.contains("offset_angles")) {
+			respond(MakeCommandResult("attach_camera", false, "Missing offset_pos or offset_angles"));
+			return;
+		}
+
+		// Refresh bindings to ensure the latest controller mapping.
+		//RefreshSpectatorBindings();
+		if (slot < 0 || slot > 9 || g_SpectatorBindings[slot] == -1) {
+			respond(MakeCommandResult("attach_camera", false, "observer_slot not mapped to a controller"));
+			return;
+		}
+
+		AttachmentCameraState state;
+		state.active = true;
+		state.controllerIndex = g_SpectatorBindings[slot];
+
+		if (args["attachment"].is_number_integer()) {
+			int idx = args["attachment"].get<int>();
+			if (idx < 0 || idx > 255) {
+				respond(MakeCommandResult("attach_camera", false, "attachment index must be 0-255"));
+				return;
+			}
+			state.useAttachmentIndex = true;
+			state.attachmentIndex = (uint8_t)idx;
+		} else if (args["attachment"].is_string()) {
+			state.useAttachmentIndex = false;
+			state.attachmentName = args["attachment"].get<std::string>();
+		} else {
+			respond(MakeCommandResult("attach_camera", false, "attachment must be index or name"));
+			return;
+		}
+
+		try {
+			state.offsetPos.x = (float)args["offset_pos"].at("x").get<double>();
+			state.offsetPos.y = (float)args["offset_pos"].at("y").get<double>();
+			state.offsetPos.z = (float)args["offset_pos"].at("z").get<double>();
+
+			state.offsetAngles = Afx::Math::QEulerAngles(
+				args["offset_angles"].at("pitch").get<double>(),
+				args["offset_angles"].at("yaw").get<double>(),
+				args["offset_angles"].at("roll").get<double>()
+			);
+
+			state.fov = args.contains("fov")
+				? (float)args["fov"].get<double>()
+				: 90.0f;
+		} catch (...) {
+			respond(MakeCommandResult("attach_camera", false, "Invalid offset_pos or offset_angles payload"));
+			return;
+		}
+
+		g_AttachmentCamera = state;
+		g_AttachmentCameraHadError = false;
+		std::string cmd = "spec_mode 2; spec_player " + std::to_string(state.controllerIndex);
+		g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
+
+		std::string attachmentDesc = state.useAttachmentIndex ? std::to_string(state.attachmentIndex) : state.attachmentName;
+		std::ostringstream oss;
+		oss << "Attached to controller " << state.controllerIndex
+			<< " attachment (" << (state.useAttachmentIndex ? "index " : "name ") << attachmentDesc << ")"
+			<< " offset pos [" << state.offsetPos.x << " " << state.offsetPos.y << " " << state.offsetPos.z << "]"
+			<< " angles [" << state.offsetAngles.Pitch << " " << state.offsetAngles.Yaw << " " << state.offsetAngles.Roll << "]"
+			<< " fov [" << state.fov << "]";
+
+		respond(MakeCommandResult("attach_camera", true, oss.str()));
 	});
 
 	g_ObsWebSocketProtocol.RegisterCommandHandler("refresh_binds", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
