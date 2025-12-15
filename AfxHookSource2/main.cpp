@@ -2216,6 +2216,7 @@ static void RegisterObsWebSocketHandlers() {
 
 		g_AttachmentCamera = state;
 		g_AttachmentCameraHadError = false;
+		if(g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
 		std::string cmd = "spec_mode 2; spec_player " + std::to_string(state.controllerIndex);
 		g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
 
@@ -2268,6 +2269,8 @@ static void RegisterObsWebSocketHandlers() {
 		g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
 		if(!g_CamPath.Enabled_get()) g_CamPath.Enabled_set(true);
 		if(g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
+		g_AttachmentCamera.active = false;
+		g_AttachmentCameraHadError = false;
 		respond(MakeCampathPlayResult(cmd, true, "Campath playback started"));
 	});
 }
