@@ -292,7 +292,13 @@ public:
 	{
 		size_t size = m_Map->size();
 
-		if(size < 2)
+		if (size == 0)
+		{
+			auto end = GetEnd();
+			outLower = end;
+			outUpper = end;
+		}
+		else if(size == 1)
 		{
 			outLower = GetBegin();
 			outUpper = outLower;
@@ -307,11 +313,19 @@ public:
 
 			if(end == outUpper)
 			{
-				--outUpper;
-
-				outLower = outUpper;
-
-				--outLower;
+				auto begin = GetBegin();
+				if (outUpper == begin)
+				{
+					// only possible if size == 0 which is handled above, but stay defensive
+					outLower = outUpper;
+				}
+				else
+				{
+					--outUpper;
+					outLower = outUpper;
+					if (outLower != begin)
+						--outLower;
+				}
 			}
 			else
 			{

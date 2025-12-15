@@ -2253,7 +2253,7 @@ static void RegisterObsWebSocketHandlers() {
 		respond(MakeExecCmdResult(cmd, true, "Command executed", output));
 	});
 
-	g_ObsWebSocketProtocol.SetCampathPlayHandler([](const std::string& cmd, const CObsWebSocketProtocol::JsonResponder& respond) {
+	g_ObsWebSocketProtocol.SetCampathPlayHandler([](const std::string& cmd, double offset, const CObsWebSocketProtocol::JsonResponder& respond) {
 		if (cmd.empty()) {
 			respond(MakeCampathPlayResult(cmd, false, "Campath path is empty"));
 			return;
@@ -2264,7 +2264,7 @@ static void RegisterObsWebSocketHandlers() {
 		std::wstring wcmd;
 		UTF8StringToWideString(cmd.c_str(), wcmd);
 		g_CamPath.Load(wcmd.c_str());
-		g_CamPath.SetStart(curTime - g_CamPath.GetOffset());
+		g_CamPath.SetStart(curTime - g_CamPath.GetOffset() - offset);
 		g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
 		if(!g_CamPath.Enabled_get()) g_CamPath.Enabled_set(true);
 		if(g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);

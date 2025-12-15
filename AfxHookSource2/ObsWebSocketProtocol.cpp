@@ -102,7 +102,14 @@ void CObsWebSocketProtocol::HandleMessage(const std::string& message, const Resp
             return;
         }
 
-        m_CampathPlayHandler(cmdIt->get<std::string>(), respondJson);
+        double offset = 0.0;
+        auto offsetIt = parsed.find("offset");
+        if (offsetIt != parsed.end() && offsetIt->is_number())
+        {
+            offset = offsetIt->get<double>();
+        }
+
+        m_CampathPlayHandler(cmdIt->get<std::string>(), offset, respondJson);
     }
     else
     {

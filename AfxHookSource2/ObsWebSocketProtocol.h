@@ -14,7 +14,7 @@ public:
     using JsonResponder = std::function<void(const nlohmann::json&)>;
     using CommandHandler = std::function<void(const nlohmann::json&, const JsonResponder&)>;
     using ExecCommandHandler = std::function<void(const std::string&, const JsonResponder&)>;
-    using CampathPlayHandler = std::function<void(const std::string&, const JsonResponder&)>;
+    using CampathPlayHandler = std::function<void(const std::string&, double, const JsonResponder&)>;
 
     /// Register a handler for a command (type == "command" / "cmd").
     void RegisterCommandHandler(const std::string& name, CommandHandler handler);
