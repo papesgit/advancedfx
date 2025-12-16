@@ -2,6 +2,7 @@
 #include <chrono>
 #include "../shared/AfxConsole.h"
 #include <algorithm>
+#include <cstring>
 
 namespace {
 constexpr uint8_t kVkSpace = 0x20;
@@ -28,7 +29,7 @@ CObsInputReceiver::~CObsInputReceiver() {
     Stop();
 }
 
-bool CObsInputReceiver::Start(uint16_t port) {
+bool CObsInputReceiver::Start(uint16_t port, const char* bindAddress) {
     if (m_bActive) {
         return false;
     }
@@ -47,11 +48,20 @@ bool CObsInputReceiver::Start(uint16_t port) {
     int opt = 1;
     setsockopt(m_Socket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
-    // Bind to port
+    // Bind to port/address
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port);
+
+    if (!bindAddress || strlen(bindAddress) == 0) {
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    } else {
+        if (InetPtonA(AF_INET, bindAddress, &addr.sin_addr) != 1) {
+            closesocket(m_Socket);
+            m_Socket = INVALID_SOCKET;
+            return false;
+        }
+    }
 
     if (bind(m_Socket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         closesocket(m_Socket);

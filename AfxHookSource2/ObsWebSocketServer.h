@@ -20,10 +20,11 @@ public:
     CObsWebSocketServer();
     ~CObsWebSocketServer();
 
-    /// Start WebSocket server on specified port
+    /// Start WebSocket server on specified port and address
     /// @param port Port number (default: 31338)
+    /// @param bindAddress Address to bind (default: 127.0.0.1)
     /// @return true if started successfully
-    bool Start(uint16_t port = 31338);
+    bool Start(uint16_t port = 31338, const std::string& bindAddress = "127.0.0.1");
 
     /// Stop WebSocket server
     void Stop();

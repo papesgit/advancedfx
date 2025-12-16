@@ -18,7 +18,7 @@ CObsWebSocketServer::~CObsWebSocketServer()
     Stop();
 }
 
-bool CObsWebSocketServer::Start(uint16_t port)
+bool CObsWebSocketServer::Start(uint16_t port, const std::string& bindAddress)
 {
     if (m_bActive)
     {
@@ -31,7 +31,7 @@ bool CObsWebSocketServer::Start(uint16_t port)
         ix::initNetSystem();
     });
 
-    auto server = std::make_shared<ix::WebSocketServer>(static_cast<int>(port), "0.0.0.0");
+    auto server = std::make_shared<ix::WebSocketServer>(static_cast<int>(port), bindAddress);
 
     server->setOnClientMessageCallback(
         [this](std::shared_ptr<ix::ConnectionState> /*connectionState*/,

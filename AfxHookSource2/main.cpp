@@ -65,6 +65,10 @@
 #include <cstdint>
 #include <mutex>
 #include <chrono>
+#include <filesystem>
+#include <iphlpapi.h>
+
+#pragma comment(lib, "iphlpapi.lib")
 
 using json = nlohmann::json;
 
@@ -119,6 +123,148 @@ CObsWebSocketServer* g_pObsWebSocket = nullptr;
 CObsWebSocketProtocol g_ObsWebSocketProtocol;
 CObsInputReceiver* g_pObsInput = nullptr;
 CFreecamController* g_pFreecam = nullptr;
+
+static bool IsLoopback(const in_addr& addr) {
+	const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&addr.S_un.S_addr);
+	return bytes[0] == 127;
+}
+
+static bool IsPrivateIpv4(const in_addr& addr) {
+	const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&addr.S_un.S_addr);
+	// 10.0.0.0/8
+	if (bytes[0] == 10) return true;
+	// 172.16.0.0/12
+	if (bytes[0] == 172 && (bytes[1] >= 16 && bytes[1] <= 31)) return true;
+	// 192.168.0.0/16
+	if (bytes[0] == 192 && bytes[1] == 168) return true;
+	return false;
+}
+
+static std::string InetNtopString(const in_addr& addr) {
+	char buffer[INET_ADDRSTRLEN] = {0};
+	if (InetNtopA(AF_INET, (PVOID)&addr, buffer, sizeof(buffer))) {
+		return std::string(buffer);
+	}
+	return std::string();
+}
+
+static std::string DetectIpv4Address(bool preferPublic) {
+	ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+	ULONG family = AF_UNSPEC;
+	ULONG size = 0;
+
+	// First call to get required buffer size
+	if (GetAdaptersAddresses(family, flags, nullptr, nullptr, &size) != ERROR_BUFFER_OVERFLOW) {
+		return std::string();
+	}
+
+	std::vector<BYTE> buffer(size);
+	PIP_ADAPTER_ADDRESSES addresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+	if (GetAdaptersAddresses(family, flags, nullptr, addresses, &size) != NO_ERROR) {
+		return std::string();
+	}
+
+	std::string privateCandidate;
+	std::string publicCandidate;
+
+	for (auto adapter = addresses; adapter != nullptr; adapter = adapter->Next) {
+		if (adapter->OperStatus != IfOperStatusUp) continue;
+
+		for (auto unicast = adapter->FirstUnicastAddress; unicast != nullptr; unicast = unicast->Next) {
+			if (!unicast->Address.lpSockaddr) continue;
+			if (unicast->Address.lpSockaddr->sa_family != AF_INET) continue;
+
+			auto addr = reinterpret_cast<sockaddr_in*>(unicast->Address.lpSockaddr)->sin_addr;
+			if (IsLoopback(addr)) continue;
+
+			if (IsPrivateIpv4(addr)) {
+				if (privateCandidate.empty()) privateCandidate = InetNtopString(addr);
+			} else {
+				if (publicCandidate.empty()) publicCandidate = InetNtopString(addr);
+			}
+		}
+	}
+
+	if (preferPublic) {
+		if (!publicCandidate.empty()) return publicCandidate;
+		if (!privateCandidate.empty()) return privateCandidate;
+	} else {
+		if (!privateCandidate.empty()) return privateCandidate;
+		if (!publicCandidate.empty()) return publicCandidate;
+	}
+
+	return std::string();
+}
+
+static bool TryGetCommandLineIp(int paramIndex, std::string& outAddress) {
+	if (paramIndex > 0 && paramIndex + 1 < g_CommandLine->GetArgC()) {
+		auto wArg = g_CommandLine->GetArgV(paramIndex + 1);
+		if (wArg && wArg[0] != L'-') {
+			std::wstring wstr(wArg);
+			if (!wstr.empty()) {
+				std::string utf8;
+				if (WideStringToUTF8String(wstr.c_str(), utf8)) {
+					outAddress = utf8;
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+static void InstallGsiConfig(const std::string& overrideHost) {
+	try {
+		std::filesystem::path src = std::filesystem::path(GetHlaeFolderW())
+			/ "resources"
+			/ "AfxHookSource2"
+			/ "gamestate_integration_hot.cfg";
+
+		if (!std::filesystem::exists(src)) {
+			advancedfx::Message("GSI install: source missing (%s)\n", src.string().c_str());
+			return;
+		}
+
+		// CS2 cfg folder is csgo/cfg relative to current working directory
+		std::filesystem::path cfgPath = std::filesystem::current_path() / ".." / ".." / "csgo" / "cfg";
+		cfgPath = std::filesystem::absolute(cfgPath);
+
+		std::filesystem::create_directories(cfgPath);
+		std::filesystem::path dst = cfgPath / "gamestate_integration_hot.cfg";
+		advancedfx::Message("GSI install: src=%s dst=%s\n", src.string().c_str(), dst.string().c_str());
+
+		std::ifstream inFile(src, std::ios::binary);
+		if (!inFile.is_open()) {
+			advancedfx::Message("GSI install: failed to open source\n");
+			return;
+		}
+		std::string content((std::istreambuf_iterator<char>(inFile)), std::istreambuf_iterator<char>());
+		inFile.close();
+
+		if (!overrideHost.empty()) {
+			const std::string needle = "http://127.0.0.1:31337/gsi";
+			std::string replacement = "http://" + overrideHost + ":31337/gsi";
+			if (auto pos = content.find(needle); pos != std::string::npos) {
+				content.replace(pos, needle.size(), replacement);
+				advancedfx::Message("GSI install: replaced URI with host %s\n", overrideHost.c_str());
+			} else {
+				advancedfx::Message("GSI install: did not find default URI to replace\n");
+			}
+		}
+
+		std::ofstream outFile(dst, std::ios::binary | std::ios::trunc);
+		if (!outFile.is_open()) {
+			advancedfx::Message("GSI install: failed to open destination for write\n");
+			return;
+		}
+		outFile.write(content.data(), static_cast<std::streamsize>(content.size()));
+		outFile.close();
+		advancedfx::Message("GSI install: wrote config (%zu bytes)\n", content.size());
+	}
+	catch (...) {
+		advancedfx::Message("GSI install: exception, continuing without config\n");
+	}
+}
 
 /*typedef void (*Unknown_ExecuteClientCommandFromNetChan_t)(void * Ecx, void * Edx, void *R8);
 Unknown_ExecuteClientCommandFromNetChan_t g_Old_Unknown_ExecuteClientCommandFromNetChan = nullptr;
@@ -2305,21 +2451,53 @@ int new_CCS2_Client_Init(void* This) {
 		advancedfx::Message("WSAStartup succeeded\n");
 	}
 
+	// Install GSI config on main thread before GSI servers spin up.
+	static bool gsiInstalled = false;
+	if (!gsiInstalled) {
+		std::string gsiOverride;
+		// Explicit target IP takes precedence (for remote GUI). Otherwise keep default loopback.
+		if (int targetIdx = g_CommandLine->FindParam(L"-targetip")) {
+			TryGetCommandLineIp(targetIdx, gsiOverride);
+		}
+		InstallGsiConfig(gsiOverride);
+		gsiInstalled = true;
+	}
+
 	RegisterObsWebSocketHandlers();
+
+	// Decide bind address for observer tools
+	std::string bindAddress("127.0.0.1");
+	const int lanIndex = g_CommandLine->FindParam(L"-lanserver");
+
+	std::string overrideAddress;
+	const bool hasOverride = (lanIndex > 0) && TryGetCommandLineIp(lanIndex, overrideAddress);
+
+	if (hasOverride) {
+		bindAddress = overrideAddress;
+		advancedfx::Message("DEBUG: Using explicit observer bind address %s\n", bindAddress.c_str());
+	} else if (lanIndex > 0) {
+		auto detected = DetectIpv4Address(false);
+		if (!detected.empty()) {
+			bindAddress = detected;
+			advancedfx::Message("DEBUG: Detected LAN observer bind address %s\n", bindAddress.c_str());
+		}
+	}
+
+	advancedfx::Message("DEBUG: Observer tools binding to %s (WS:31338, UDP:31339)\n", bindAddress.c_str());
 
 	// Initialize observer tools for remote control
 	advancedfx::Message("DEBUG: Creating WebSocket server...\n");
 	g_pObsWebSocket = new CObsWebSocketServer();
-	if (g_pObsWebSocket->Start(31338)) {
-		advancedfx::Message("Observer WebSocket server started on port 31338\n");
+	if (g_pObsWebSocket->Start(31338, bindAddress)) {
+		advancedfx::Message("Observer WebSocket server started on %s:31338\n", bindAddress.c_str());
 		g_pObsWebSocket->SetCommandCallback(HandleObsWebSocketCommand);
 	} else {
 		advancedfx::Message("Failed to start Observer WebSocket server\n");
 	}
 
 	g_pObsInput = new CObsInputReceiver();
-	if (g_pObsInput->Start(31339)) {
-		advancedfx::Message("Observer UDP input receiver started on port 31339\n");
+	if (g_pObsInput->Start(31339, bindAddress.c_str())) {
+		advancedfx::Message("Observer UDP input receiver started on %s:31339\n", bindAddress.c_str());
 	} else {
 		advancedfx::Message("Failed to start Observer UDP input receiver\n");
 	}

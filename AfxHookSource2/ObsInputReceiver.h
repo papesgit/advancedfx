@@ -75,8 +75,9 @@ public:
 
     /// Start UDP receiver on specified port
     /// @param port Port number (default: 31339)
+    /// @param bindAddress Address to bind (default: 127.0.0.1)
     /// @return true if started successfully
-    bool Start(uint16_t port = 31339);
+    bool Start(uint16_t port = 31339, const char* bindAddress = "127.0.0.1");
 
     /// Stop UDP receiver
     void Stop();
