@@ -356,12 +356,14 @@ CamPathIterator CamPath::GetEnd()
 
 double CamPath::GetLowerBound() const
 {
+	if (m_Map.empty()) return 0.0;
 	return m_Map.cbegin()->first;
 }
 
 double CamPath::GetUpperBound() const
 {
-	return (--m_Map.cend())->first;
+	if (m_Map.empty()) return 0.0;
+	return m_Map.crbegin()->first;
 }
 
 bool CamPath::CanEval(void) const
