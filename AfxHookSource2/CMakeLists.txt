@@ -153,6 +153,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     ../deps/release/prop/AfxHookSource/SourceSdkShared.h
     ../deps/release/prop/AfxHookSource/SourceInterfaces.h
     
+    ../shared/vcpp/AfxAddr.cpp
+    ../shared/vcpp/AfxAddr.h
+
     ../shared/AfxCommandLine.cpp
     ../shared/AfxCommandLine.h
     ../shared/AfxConsole.cpp
@@ -206,6 +209,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     ../shared/MirvSkip.cpp
     ../shared/MirvSkip.h
 
+    addresses.cpp
+    addresses.h
+
     AfxHookSource2Rs.cpp
     AfxHookSource2Rs.h
 
@@ -258,6 +264,9 @@ target_sources(${PROJECT_NAME} PRIVATE
 
     RenderCommands.cpp
     RenderCommands.h
+
+    RenderServiceHooks.cpp
+    RenderServiceHooks.h
 
     RenderSystemDX11Hooks.cpp
     RenderSystemDX11Hooks.h
