@@ -817,10 +817,11 @@ static void BroadcastFreecamSpeedIfNeeded() {
 	}
 }
 
-// Global spectator key bindings: number keys 1-0 map to controller indices
+// Global spectator key bindings: slots 1-0 map to controller indices
 // -1 = no player mapped to this key
 static int g_SpectatorBindings[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
-static bool g_LastNumberKeyState[10] = {false};
+static bool g_LastSpectatorKeyState[10] = {false};
+static bool g_UseAltSpectatorBindings = false;
 static bool g_PendingSpectatorSwitch = false;
 static int g_SpectatorSwitchTimeout = 0; // Safety timeout
 
@@ -1067,16 +1068,21 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 		g_pObsInput->GetInputState(input);
 	}
 
-	// Handle number key presses for spectator switching (keys 1-0)
+	// Handle spectator key presses (1-5 and 6-0 or Q/E/R/T/Z)
 	if (g_pEngineToClient) {
 		const uint8_t numberKeyVks[10] = { '1','2','3','4','5','6','7','8','9','0' };
+		const uint8_t altKeyVks[5] = { 'Q','E','R','T','Z' };
 		bool currentNumberKeys[10] = {};
 
 		for (int i = 0; i < 10; ++i) {
-			currentNumberKeys[i] = input.IsKeyDown(numberKeyVks[i]);
+			uint8_t vk = numberKeyVks[i];
+			if (g_UseAltSpectatorBindings && i >= 5) {
+				vk = altKeyVks[i - 5];
+			}
+			currentNumberKeys[i] = input.IsKeyDown(vk);
 
 			// Detect key press (transition from false to true)
-			if (currentNumberKeys[i] && !g_LastNumberKeyState[i]) {
+			if (currentNumberKeys[i] && !g_LastSpectatorKeyState[i]) {
 				// Check if this key is mapped to a player
 				if (g_SpectatorBindings[i] != -1) {
 					std::string specCmd = "spec_mode 2; spec_player " + std::to_string(g_SpectatorBindings[i]);
@@ -1086,7 +1092,7 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 					g_SpectatorSwitchTimeout = 3; // Max 3 frames timeout
 				}
 			}
-			g_LastNumberKeyState[i] = currentNumberKeys[i];
+			g_LastSpectatorKeyState[i] = currentNumberKeys[i];
 		}
 	}
 
@@ -2071,10 +2077,26 @@ void RefreshSpectatorBindings() {
 	// Map T players to keys 6-0 (index 5-9)
 	for (size_t i = 0; i < tControllers.size() && i < 5; ++i) {
 		g_SpectatorBindings[i + 5] = tControllers[i];
-		advancedfx::Message("Key %d -> T controller %d\n", (i+6) % 10, tControllers[i]);
+		if (g_UseAltSpectatorBindings) {
+			static const char* kAltLabels[5] = { "Q", "E", "R", "T", "Z" };
+			advancedfx::Message("Key %s -> T controller %d\n", kAltLabels[i], tControllers[i]);
+		} else {
+			advancedfx::Message("Key %d -> T controller %d\n", (i+6) % 10, tControllers[i]);
+		}
 	}
 
 	advancedfx::Message("Spectator bindings refreshed: %zu CT, %zu T\n", ctControllers.size(), tControllers.size());
+}
+
+static void SetAltSpectatorBindings(bool enabled) {
+	if (g_UseAltSpectatorBindings == enabled) {
+		return;
+	}
+
+	g_UseAltSpectatorBindings = enabled;
+	for (int i = 0; i < 10; ++i) {
+		g_LastSpectatorKeyState[i] = false;
+	}
 }
 
 static json MakeCommandResult(const std::string& command, bool ok, const std::string& message = std::string()) {
@@ -2384,6 +2406,17 @@ static void RegisterObsWebSocketHandlers() {
 	g_ObsWebSocketProtocol.RegisterCommandHandler("refresh_binds", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
 		RefreshSpectatorBindings();
 		respond(MakeCommandResult("refresh_binds", true, "Spectator bindings refreshed"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("spectator_bindings_mode", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("useAlt") || !args["useAlt"].is_boolean()) {
+			respond(MakeCommandResult("spectator_bindings_mode", false, "Missing or invalid useAlt flag"));
+			return;
+		}
+
+		bool useAlt = args["useAlt"].get<bool>();
+		SetAltSpectatorBindings(useAlt);
+		respond(MakeCommandResult("spectator_bindings_mode", true, useAlt ? "Alt spectator bindings enabled" : "Alt spectator bindings disabled"));
 	});
 
 	g_ObsWebSocketProtocol.SetExecCommandHandler([](const std::string& cmd, const CObsWebSocketProtocol::JsonResponder& respond) {
