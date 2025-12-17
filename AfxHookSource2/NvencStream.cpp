@@ -10,6 +10,7 @@
 #include <sstream>
 #include <functional>
 #include <array>
+#include <algorithm>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -1065,11 +1066,13 @@ void CNvencStream::ProcessEncodedFrame(const std::vector<uint8_t>& frameData)
             auto now = std::chrono::steady_clock::now();
             auto elapsed90k = std::chrono::duration_cast<std::chrono::microseconds>(now - m_RtpStartTime).count() * 90 / 1000;
             m_RtpTimestamp = static_cast<uint32_t>(elapsed90k);
+            uint64_t senderTimestampUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
 
             for (size_t i = 0; i < finalNals.size(); ++i) {
                 const auto& nal = finalNals[i];
                 bool lastNal = (i + 1 == finalNals.size());
-                SendRtpPacket(nal.data, nal.size, lastNal);
+                SendRtpPacket(nal.data, nal.size, lastNal, senderTimestampUs);
             }
         }
     }
@@ -1094,16 +1097,69 @@ void write_rtp_header(uint8_t* p, uint16_t seq, uint32_t ts, uint32_t ssrc, bool
     p[11] = (uint8_t)(ssrc & 0xFF);
 }
 
-void CNvencStream::SendRtpPacket(const uint8_t* nalData, size_t nalSize, bool lastNalOfFrame)
+static size_t write_rtp_header_with_timestamp(std::vector<uint8_t>& packet, uint16_t seq, uint32_t ts, uint32_t ssrc,
+    bool marker, uint8_t payloadType, uint64_t sendTimestampUs)
+{
+    const bool includeExtension = sendTimestampUs != 0;
+    const size_t extPayloadLen = includeExtension ? (1 + sizeof(uint64_t)) : 0;
+    const size_t extPadding = includeExtension ? (4 - (extPayloadLen % 4)) % 4 : 0;
+    const size_t extWords = includeExtension ? (extPayloadLen + extPadding) / 4 : 0;
+    const size_t extTotalBytes = includeExtension ? (4 + extWords * 4) : 0;
+
+    const size_t headerSize = 12 + extTotalBytes;
+    packet.resize(headerSize);
+
+    packet[0] = includeExtension ? 0x90 : 0x80; // V=2, X set if extension
+    packet[1] = (marker ? 0x80 : 0x00) | payloadType;
+
+    packet[2] = (uint8_t)(seq >> 8);
+    packet[3] = (uint8_t)(seq & 0xFF);
+
+    packet[4] = (uint8_t)(ts >> 24);
+    packet[5] = (uint8_t)(ts >> 16);
+    packet[6] = (uint8_t)(ts >> 8);
+    packet[7] = (uint8_t)(ts & 0xFF);
+
+    packet[8] = (uint8_t)(ssrc >> 24);
+    packet[9] = (uint8_t)(ssrc >> 16);
+    packet[10] = (uint8_t)(ssrc >> 8);
+    packet[11] = (uint8_t)(ssrc & 0xFF);
+
+    if (includeExtension) {
+        // One-byte header extension (0xBEDE) with a single element:
+        // id=1, length=8 bytes => len field = 7 (length-1)
+        size_t extOffset = 12;
+        packet[extOffset] = 0xBE;
+        packet[extOffset + 1] = 0xDE;
+        packet[extOffset + 2] = (uint8_t)(extWords >> 8);
+        packet[extOffset + 3] = (uint8_t)(extWords & 0xFF);
+
+        size_t extDataOffset = extOffset + 4;
+        packet[extDataOffset] = static_cast<uint8_t>((1 << 4) | (sizeof(uint64_t) - 1));
+        for (size_t i = 0; i < sizeof(uint64_t); ++i) {
+            packet[extDataOffset + 1 + i] = static_cast<uint8_t>((sendTimestampUs >> (56 - i * 8)) & 0xFF);
+        }
+
+        size_t extEnd = extDataOffset + 1 + sizeof(uint64_t);
+        for (size_t i = 0; i < extPadding; ++i) {
+            packet[extEnd + i] = 0;
+        }
+    }
+
+    return headerSize;
+}
+
+void CNvencStream::SendRtpPacket(const uint8_t* nalData, size_t nalSize, bool lastNalOfFrame, uint64_t sendTimestampUs)
 {
     const size_t MAX_PAYLOAD = 1400; // MTU - headers
 
     if (nalSize <= MAX_PAYLOAD) {
         // Single NAL unit mode
-        std::vector<uint8_t> packet(12 + nalSize);
-        write_rtp_header(packet.data(), m_RtpSequence++, m_RtpTimestamp, m_RtpSsrc,
-                        lastNalOfFrame, 96);
-        memcpy(packet.data() + 12, nalData, nalSize);
+        std::vector<uint8_t> packet;
+        size_t headerSize = write_rtp_header_with_timestamp(packet, m_RtpSequence++, m_RtpTimestamp, m_RtpSsrc,
+            lastNalOfFrame, 96, sendTimestampUs);
+        packet.resize(headerSize + nalSize);
+        memcpy(packet.data() + headerSize, nalData, nalSize);
 
         int sent = sendto(m_Socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
             reinterpret_cast<sockaddr*>(&m_DestAddr), sizeof(m_DestAddr));
@@ -1125,17 +1181,18 @@ void CNvencStream::SendRtpPacket(const uint8_t* nalData, size_t nalSize, bool la
             size_t fragmentSize = (std::min)(MAX_PAYLOAD - 2, payloadSize - offset); // -2 for FU indicator and header
             bool lastFragment = (offset + fragmentSize >= payloadSize);
 
-            std::vector<uint8_t> packet(12 + 2 + fragmentSize);
-            write_rtp_header(packet.data(), m_RtpSequence++, m_RtpTimestamp, m_RtpSsrc,
-                            lastFragment && lastNalOfFrame, 96);
+            std::vector<uint8_t> packet;
+            size_t headerSize = write_rtp_header_with_timestamp(packet, m_RtpSequence++, m_RtpTimestamp, m_RtpSsrc,
+                lastFragment && lastNalOfFrame, 96, sendTimestampUs);
+            packet.resize(headerSize + 2 + fragmentSize);
 
-            packet[12] = (nalHeader & 0xE0) | 28; // FU-A indicator
+            packet[headerSize] = (nalHeader & 0xE0) | 28; // FU-A indicator
             uint8_t fuHeader = nalType;
             if (firstFragment) fuHeader |= 0x80;  // S
             if (lastFragment) fuHeader |= 0x40;   // E
-            packet[13] = fuHeader;
+            packet[headerSize + 1] = fuHeader;
 
-            memcpy(packet.data() + 14, payload + offset, fragmentSize);
+            memcpy(packet.data() + headerSize + 2, payload + offset, fragmentSize);
 
             int sent = sendto(m_Socket, reinterpret_cast<const char*>(packet.data()), static_cast<int>(packet.size()), 0,
                 reinterpret_cast<sockaddr*>(&m_DestAddr), sizeof(m_DestAddr));

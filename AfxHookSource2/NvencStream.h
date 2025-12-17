@@ -85,7 +85,7 @@ private:
     void Cleanup();
     bool InitializeEncoder(ID3D11Device* pDevice, uint32_t nWidth, uint32_t nHeight);
     void ProcessEncodedFrame(const std::vector<uint8_t>& frameData);
-    void SendRtpPacket(const uint8_t* nalData, size_t nalSize, bool lastNalOfFrame);
+    void SendRtpPacket(const uint8_t* nalData, size_t nalSize, bool lastNalOfFrame, uint64_t sendTimestampUs);
     void WriteSdpFile(const char* ipAddress, uint16_t port);
     void ParseParameterSets(const uint8_t* data, size_t size);
     void CacheParameterSet(uint8_t nalType, const uint8_t* data, size_t size);
