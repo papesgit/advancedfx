@@ -2305,6 +2305,16 @@ static void RegisterObsWebSocketHandlers() {
 			message += "halfRot=" + std::to_string(config.halfRot) + " ";
 			updated = true;
 		}
+		if (args.contains("lockHalfRot")) {
+			config.lockHalfRot = args["lockHalfRot"].get<float>();
+			message += "lockHalfRot=" + std::to_string(config.lockHalfRot) + " ";
+			updated = true;
+		}
+		if (args.contains("lockHalfRotTransition")) {
+			config.lockHalfRotTransition = args["lockHalfRotTransition"].get<float>();
+			message += "lockHalfRotTransition=" + std::to_string(config.lockHalfRotTransition) + " ";
+			updated = true;
+		}
 		if (args.contains("halfFov")) {
 			config.halfFov = args["halfFov"].get<float>();
 			message += "halfFov=" + std::to_string(config.halfFov) + " ";

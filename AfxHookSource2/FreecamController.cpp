@@ -1,4 +1,5 @@
 #include "FreecamController.h"
+#include "ClientEntitySystem.h"
 #include <cmath>
 #include <algorithm>
 
@@ -18,6 +19,7 @@ constexpr uint8_t kVkRightShift = 0xA1;
 constexpr uint8_t kVkAlt        = 0x12;  // VK_MENU
 constexpr uint8_t kVkLeftAlt    = 0xA4;  // VK_LMENU
 constexpr uint8_t kVkRightAlt   = 0xA5;  // VK_RMENU
+constexpr uint8_t kVkV          = 0x56;
 
 bool IsCtrlDown(const InputState& input) {
     return input.IsAnyKeyDown({kVkLeftCtrl, kVkRightCtrl, kVkCtrl});
@@ -42,8 +44,19 @@ CFreecamController::CFreecamController()
     , m_LastMouseButton4(false), m_LastMouseButton5(false)
     , m_MouseButton4Hold(0.0f), m_MouseButton5Hold(0.0f)
     , m_TargetRoll(0), m_CurrentRoll(0)
+    , m_PlayerLockActive(false)
+    , m_LastKeyVDown(false)
+    , m_PlayerLockHandle(-1)
+    , m_PlayerLockReturnHalfRot(0.0f)
+    , m_CurrentHalfRot(0.0f)
+    , m_HalfRotTransitionStart(0.0f)
+    , m_HalfRotTransitionTarget(0.0f)
+    , m_HalfRotTransitionElapsed(0.0f)
+    , m_HalfRotTransitionActive(false)
 {
     m_LastUpdateTime = std::chrono::steady_clock::now();
+    m_CurrentHalfRot = m_Config.halfRot;
+    m_PlayerLockReturnHalfRot = m_Config.halfRot;
 }
 
 CFreecamController::~CFreecamController() {
@@ -64,6 +77,13 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_MouseVelocityX = m_MouseVelocityY = 0;
         m_TargetRoll = m_CurrentRoll = 0;
         m_Transform.fov = m_Config.defaultFov;
+        m_PlayerLockActive = false;
+        m_LastKeyVDown = false;
+        m_PlayerLockHandle = -1;
+        m_PlayerLockReturnHalfRot = m_Config.halfRot;
+        m_CurrentHalfRot = m_Config.halfRot;
+        m_HalfRotTransitionActive = false;
+        m_HalfRotTransitionElapsed = 0.0f;
         ResetSpeed();
         m_LastUpdateTime = std::chrono::steady_clock::now();
     }
@@ -75,6 +95,10 @@ void CFreecamController::Reset(const CameraTransform& transform) {
     m_VelocityX = m_VelocityY = m_VelocityZ = 0;
     m_MouseVelocityX = m_MouseVelocityY = 0;
     m_TargetRoll = m_CurrentRoll = transform.roll;
+    m_CurrentHalfRot = m_Config.halfRot;
+    m_PlayerLockReturnHalfRot = m_Config.halfRot;
+    m_HalfRotTransitionActive = false;
+    m_HalfRotTransitionElapsed = 0.0f;
     ResetSpeed();
     m_bInitialized = true;
 }
@@ -97,6 +121,11 @@ void CFreecamController::Update(const InputState& input, float deltaTime) {
     if (m_bInputEnabled) {
         UpdateSpeed(input, deltaTime);
         UpdateMouseLook(input, deltaTime);
+    }
+
+    UpdatePlayerLock(input, deltaTime);
+
+    if (m_bInputEnabled) {
         UpdateMovement(input, deltaTime);
         UpdateRoll(input, deltaTime);
         UpdateFOV(input);
@@ -364,8 +393,8 @@ void CFreecamController::ApplySmoothing(float deltaTime) {
     float posBlend = (m_Config.halfVec > 0) ?
         1.0f - expf((-logf(2.0f) * deltaTime) / m_Config.halfVec) : 1.0f;
 
-    float rotBlend = (m_Config.halfRot > 0) ?
-        1.0f - expf((-logf(2.0f) * deltaTime) / m_Config.halfRot) : 1.0f;
+    float rotBlend = (m_CurrentHalfRot > 0) ?
+        1.0f - expf((-logf(2.0f) * deltaTime) / m_CurrentHalfRot) : 1.0f;
 
     float fovBlend = (m_Config.halfFov > 0) ?
         1.0f - expf((-logf(2.0f) * deltaTime) / m_Config.halfFov) : 1.0f;
@@ -389,6 +418,184 @@ void CFreecamController::ApplySmoothing(float deltaTime) {
 
     // FOV smoothing
     m_SmoothedTransform.fov = Lerp(m_SmoothedTransform.fov, m_Transform.fov, fovBlend);
+}
+
+void CFreecamController::UpdatePlayerLock(const InputState& input, float deltaTime) {
+    bool vDown = input.IsKeyDown(kVkV);
+    if (vDown && !m_LastKeyVDown) {
+        if (!m_PlayerLockActive) {
+            float eyeX = 0.0f, eyeY = 0.0f, eyeZ = 0.0f;
+            int handle = -1;
+            if (TryAcquirePlayerLockTarget(eyeX, eyeY, eyeZ, handle)) {
+                m_PlayerLockActive = true;
+                m_PlayerLockHandle = handle;
+                m_PlayerLockReturnHalfRot = m_Config.halfRot;
+                StartHalfRotTransition(m_Config.lockHalfRot);
+            }
+        } else {
+            m_PlayerLockActive = false;
+            m_PlayerLockHandle = -1;
+            StartHalfRotTransition(m_PlayerLockReturnHalfRot);
+        }
+    }
+    m_LastKeyVDown = vDown;
+
+    UpdateHalfRotTransition(deltaTime);
+
+    if (m_PlayerLockActive) {
+        float eyeX = 0.0f, eyeY = 0.0f, eyeZ = 0.0f;
+        if (GetLockedTargetEye(eyeX, eyeY, eyeZ)) {
+            ApplyLockAngles(eyeX, eyeY, eyeZ);
+        } else {
+            m_PlayerLockActive = false;
+            m_PlayerLockHandle = -1;
+            StartHalfRotTransition(m_PlayerLockReturnHalfRot);
+        }
+    }
+}
+
+bool CFreecamController::TryAcquirePlayerLockTarget(float& outX, float& outY, float& outZ, int& outHandle) {
+    if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) {
+        return false;
+    }
+
+    const CameraTransform& view = m_Config.smoothEnabled ? m_SmoothedTransform : m_Transform;
+    float forwardX = 0.0f, forwardY = 0.0f, forwardZ = 0.0f;
+    GetForwardVector(view.pitch, view.yaw, forwardX, forwardY, forwardZ);
+
+    float bestDot = 0.0f;
+    float bestDistSq = 0.0f;
+    bool found = false;
+
+    int highestIndex = GetHighestEntityIndex();
+    for (int i = 0; i <= highestIndex; ++i) {
+        auto ent = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, i);
+        if (!ent || !ent->IsPlayerPawn() || !ent->GetHealth() > 0) {
+            continue;
+        }
+
+        float eye[3];
+        ent->GetRenderEyeOrigin(eye);
+
+        float dx = eye[0] - view.x;
+        float dy = eye[1] - view.y;
+        float dz = eye[2] - view.z;
+        float distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq < 0.0001f) {
+            continue;
+        }
+
+        float invLen = 1.0f / sqrtf(distSq);
+        float dirX = dx * invLen;
+        float dirY = dy * invLen;
+        float dirZ = dz * invLen;
+        float dot = dirX * forwardX + dirY * forwardY + dirZ * forwardZ;
+        if (dot <= 0.0f) {
+            continue;
+        }
+
+        if (!found || dot > bestDot + 0.0001f ||
+            (fabsf(dot - bestDot) < 0.0001f && distSq < bestDistSq)) {
+            found = true;
+            bestDot = dot;
+            bestDistSq = distSq;
+            outX = eye[0];
+            outY = eye[1];
+            outZ = eye[2];
+            outHandle = ent->GetHandle().ToInt();
+        }
+    }
+
+    return found;
+}
+
+bool CFreecamController::GetLockedTargetEye(float& outX, float& outY, float& outZ) {
+    if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) {
+        return false;
+    }
+
+    SOURCESDK::CS2::CBaseHandle handle(m_PlayerLockHandle);
+    if (!handle.IsValid()) {
+        return false;
+    }
+
+    int index = handle.GetEntryIndex();
+    if (index < 0) {
+        return false;
+    }
+
+    auto ent = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, index);
+    if (!ent || !ent->IsPlayerPawn()) {
+        return false;
+    }
+
+    if (ent->GetHandle().ToInt() != m_PlayerLockHandle) {
+        return false;
+    }
+
+    float eye[3];
+    ent->GetRenderEyeOrigin(eye);
+    outX = eye[0];
+    outY = eye[1];
+    outZ = eye[2];
+    return true;
+}
+
+void CFreecamController::StartHalfRotTransition(float targetHalfRot) {
+    if (fabsf(m_CurrentHalfRot - targetHalfRot) < 0.0001f) {
+        m_CurrentHalfRot = targetHalfRot;
+        m_HalfRotTransitionActive = false;
+        m_HalfRotTransitionElapsed = 0.0f;
+        return;
+    }
+
+    m_HalfRotTransitionStart = m_CurrentHalfRot;
+    m_HalfRotTransitionTarget = targetHalfRot;
+    m_HalfRotTransitionElapsed = 0.0f;
+    m_HalfRotTransitionActive = true;
+}
+
+void CFreecamController::UpdateHalfRotTransition(float deltaTime) {
+    if (!m_HalfRotTransitionActive) {
+        float desired = m_PlayerLockActive ? m_Config.lockHalfRot : m_Config.halfRot;
+        if (fabsf(m_CurrentHalfRot - desired) > 0.0001f) {
+            m_CurrentHalfRot = desired;
+        }
+        return;
+    }
+
+    m_HalfRotTransitionElapsed += deltaTime;
+    float transitionSeconds = m_Config.lockHalfRotTransition;
+    float t = (transitionSeconds > 0.0f)
+        ? Clamp(m_HalfRotTransitionElapsed / transitionSeconds, 0.0f, 1.0f)
+        : 1.0f;
+    m_CurrentHalfRot = Lerp(m_HalfRotTransitionStart, m_HalfRotTransitionTarget, t);
+    if (t >= 1.0f) {
+        m_HalfRotTransitionActive = false;
+    }
+}
+
+void CFreecamController::ApplyLockAngles(float targetX, float targetY, float targetZ) {
+    const CameraTransform& view = m_Config.smoothEnabled ? m_SmoothedTransform : m_Transform;
+
+    float dx = targetX - view.x;
+    float dy = targetY - view.y;
+    float dz = targetZ - view.z;
+    float distSq = dx * dx + dy * dy + dz * dz;
+    if (distSq < 0.0001f) {
+        return;
+    }
+
+    float yaw = atan2f(dy, dx) * (180.0f / M_PI);
+    float hyp = sqrtf(dx * dx + dy * dy);
+    float pitch = -atan2f(dz, hyp) * (180.0f / M_PI);
+
+    // Normalize yaw to [-180, 180]
+    while (yaw > 180.0f) yaw -= 360.0f;
+    while (yaw < -180.0f) yaw += 360.0f;
+
+    m_Transform.pitch = Clamp(pitch, -89.0f, 89.0f);
+    m_Transform.yaw = yaw;
 }
 
 // Math helpers

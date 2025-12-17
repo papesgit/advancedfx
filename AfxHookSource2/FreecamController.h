@@ -44,6 +44,8 @@ struct FreecamConfig {
     bool smoothEnabled;
     float halfVec;  // Half-time for position smoothing (seconds)
     float halfRot;  // Half-time for rotation smoothing (seconds)
+    float lockHalfRot;  // Half-time for rotation smoothing when player lock is active (seconds)
+    float lockHalfRotTransition;  // Duration to blend halfRot <-> lockHalfRot (seconds)
     float halfFov;  // Half-time for FOV smoothing (seconds)
 
     FreecamConfig()
@@ -64,6 +66,8 @@ struct FreecamConfig {
         , smoothEnabled(true)
         , halfVec(0.5f)             // Exponential half-time for position
         , halfRot(0.5f)             // Exponential half-time for rotation
+        , lockHalfRot(0.2f)
+        , lockHalfRotTransition(1.0f)
         , halfFov(0.5f)             // Exponential half-time for FOV
     {}
 };
@@ -115,6 +119,12 @@ private:
     void UpdateFOV(const InputState& input);
     void UpdateSpeed(const InputState& input, float deltaTime);
     void ResetSpeed();
+    void UpdatePlayerLock(const InputState& input, float deltaTime);
+    bool TryAcquirePlayerLockTarget(float& outX, float& outY, float& outZ, int& outHandle);
+    bool GetLockedTargetEye(float& outX, float& outY, float& outZ);
+    void StartHalfRotTransition(float targetHalfRot);
+    void UpdateHalfRotTransition(float deltaTime);
+    void ApplyLockAngles(float targetX, float targetY, float targetZ);
     void ApplySmoothing(float deltaTime);
 
     // Math helpers
@@ -149,6 +159,17 @@ private:
     // Roll state
     float m_TargetRoll;
     float m_CurrentRoll;
+
+    // Player lock state
+    bool m_PlayerLockActive;
+    bool m_LastKeyVDown;
+    int m_PlayerLockHandle;
+    float m_PlayerLockReturnHalfRot;
+    float m_CurrentHalfRot;
+    float m_HalfRotTransitionStart;
+    float m_HalfRotTransitionTarget;
+    float m_HalfRotTransitionElapsed;
+    bool m_HalfRotTransitionActive;
 
     // Timing
     std::chrono::steady_clock::time_point m_LastUpdateTime;
