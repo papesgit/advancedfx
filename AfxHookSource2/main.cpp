@@ -2155,6 +2155,123 @@ static std::string EscapeQuotes(const std::string& value) {
 	return escaped;
 }
 
+static bool UpdateFreecamConfigFromJson(const json& args, FreecamConfig& config, std::string& message) {
+	bool updated = false;
+	message = "Freecam config updated: ";
+
+	// Mouse settings
+	if (args.contains("mouseSensitivity")) {
+		config.mouseSensitivity = args["mouseSensitivity"].get<float>();
+		message += "mouseSensitivity=" + std::to_string(config.mouseSensitivity) + " ";
+		updated = true;
+	}
+
+	// Movement settings
+	if (args.contains("moveSpeed")) {
+		config.moveSpeed = args["moveSpeed"].get<float>();
+		message += "moveSpeed=" + std::to_string(config.moveSpeed) + " ";
+		updated = true;
+	}
+	if (args.contains("sprintMultiplier")) {
+		config.sprintMultiplier = args["sprintMultiplier"].get<float>();
+		message += "sprintMultiplier=" + std::to_string(config.sprintMultiplier) + " ";
+		updated = true;
+	}
+	if (args.contains("verticalSpeed")) {
+		config.verticalSpeed = args["verticalSpeed"].get<float>();
+		message += "verticalSpeed=" + std::to_string(config.verticalSpeed) + " ";
+		updated = true;
+	}
+	if (args.contains("speedAdjustRate")) {
+		config.speedAdjustRate = args["speedAdjustRate"].get<float>();
+		message += "speedAdjustRate=" + std::to_string(config.speedAdjustRate) + " ";
+		updated = true;
+	}
+	if (args.contains("speedMinMultiplier")) {
+		config.speedMinMultiplier = args["speedMinMultiplier"].get<float>();
+		message += "speedMinMultiplier=" + std::to_string(config.speedMinMultiplier) + " ";
+		updated = true;
+	}
+	if (args.contains("speedMaxMultiplier")) {
+		config.speedMaxMultiplier = args["speedMaxMultiplier"].get<float>();
+		message += "speedMaxMultiplier=" + std::to_string(config.speedMaxMultiplier) + " ";
+		updated = true;
+	}
+
+	// Roll settings
+	if (args.contains("rollSpeed")) {
+		config.rollSpeed = args["rollSpeed"].get<float>();
+		message += "rollSpeed=" + std::to_string(config.rollSpeed) + " ";
+		updated = true;
+	}
+	if (args.contains("rollSmoothing")) {
+		config.rollSmoothing = args["rollSmoothing"].get<float>();
+		message += "rollSmoothing=" + std::to_string(config.rollSmoothing) + " ";
+		updated = true;
+	}
+	if (args.contains("leanStrength")) {
+		config.leanStrength = args["leanStrength"].get<float>();
+		message += "leanStrength=" + std::to_string(config.leanStrength) + " ";
+		updated = true;
+	}
+
+	// FOV settings
+	if (args.contains("fovMin")) {
+		config.fovMin = args["fovMin"].get<float>();
+		message += "fovMin=" + std::to_string(config.fovMin) + " ";
+		updated = true;
+	}
+	if (args.contains("fovMax")) {
+		config.fovMax = args["fovMax"].get<float>();
+		message += "fovMax=" + std::to_string(config.fovMax) + " ";
+		updated = true;
+	}
+	if (args.contains("fovStep")) {
+		config.fovStep = args["fovStep"].get<float>();
+		message += "fovStep=" + std::to_string(config.fovStep) + " ";
+		updated = true;
+	}
+	if (args.contains("defaultFov")) {
+		config.defaultFov = args["defaultFov"].get<float>();
+		message += "defaultFov=" + std::to_string(config.defaultFov) + " ";
+		updated = true;
+	}
+
+	// Smoothing settings
+	if (args.contains("smoothEnabled")) {
+		config.smoothEnabled = args["smoothEnabled"].get<bool>();
+		message += "smoothEnabled=" + std::string(config.smoothEnabled ? "true" : "false") + " ";
+		updated = true;
+	}
+	if (args.contains("halfVec")) {
+		config.halfVec = args["halfVec"].get<float>();
+		message += "halfVec=" + std::to_string(config.halfVec) + " ";
+		updated = true;
+	}
+	if (args.contains("halfRot")) {
+		config.halfRot = args["halfRot"].get<float>();
+		message += "halfRot=" + std::to_string(config.halfRot) + " ";
+		updated = true;
+	}
+	if (args.contains("lockHalfRot")) {
+		config.lockHalfRot = args["lockHalfRot"].get<float>();
+		message += "lockHalfRot=" + std::to_string(config.lockHalfRot) + " ";
+		updated = true;
+	}
+	if (args.contains("lockHalfRotTransition")) {
+		config.lockHalfRotTransition = args["lockHalfRotTransition"].get<float>();
+		message += "lockHalfRotTransition=" + std::to_string(config.lockHalfRotTransition) + " ";
+		updated = true;
+	}
+	if (args.contains("halfFov")) {
+		config.halfFov = args["halfFov"].get<float>();
+		message += "halfFov=" + std::to_string(config.halfFov) + " ";
+		updated = true;
+	}
+
+	return updated;
+}
+
 static void RegisterObsWebSocketHandlers() {
 	static bool initialized = false;
 	if (initialized) return;
@@ -2208,118 +2325,8 @@ static void RegisterObsWebSocketHandlers() {
 		}
 
 		FreecamConfig& config = g_pFreecam->GetConfig();
-		bool updated = false;
-		std::string message = "Freecam config updated: ";
-
-		// Mouse settings
-		if (args.contains("mouseSensitivity")) {
-			config.mouseSensitivity = args["mouseSensitivity"].get<float>();
-			message += "mouseSensitivity=" + std::to_string(config.mouseSensitivity) + " ";
-			updated = true;
-		}
-
-		// Movement settings
-		if (args.contains("moveSpeed")) {
-			config.moveSpeed = args["moveSpeed"].get<float>();
-			message += "moveSpeed=" + std::to_string(config.moveSpeed) + " ";
-			updated = true;
-		}
-		if (args.contains("sprintMultiplier")) {
-			config.sprintMultiplier = args["sprintMultiplier"].get<float>();
-			message += "sprintMultiplier=" + std::to_string(config.sprintMultiplier) + " ";
-			updated = true;
-		}
-		if (args.contains("verticalSpeed")) {
-			config.verticalSpeed = args["verticalSpeed"].get<float>();
-			message += "verticalSpeed=" + std::to_string(config.verticalSpeed) + " ";
-			updated = true;
-		}
-		if (args.contains("speedAdjustRate")) {
-			config.speedAdjustRate = args["speedAdjustRate"].get<float>();
-			message += "speedAdjustRate=" + std::to_string(config.speedAdjustRate) + " ";
-			updated = true;
-		}
-		if (args.contains("speedMinMultiplier")) {
-			config.speedMinMultiplier = args["speedMinMultiplier"].get<float>();
-			message += "speedMinMultiplier=" + std::to_string(config.speedMinMultiplier) + " ";
-			updated = true;
-		}
-		if (args.contains("speedMaxMultiplier")) {
-			config.speedMaxMultiplier = args["speedMaxMultiplier"].get<float>();
-			message += "speedMaxMultiplier=" + std::to_string(config.speedMaxMultiplier) + " ";
-			updated = true;
-		}
-
-		// Roll settings
-		if (args.contains("rollSpeed")) {
-			config.rollSpeed = args["rollSpeed"].get<float>();
-			message += "rollSpeed=" + std::to_string(config.rollSpeed) + " ";
-			updated = true;
-		}
-		if (args.contains("rollSmoothing")) {
-			config.rollSmoothing = args["rollSmoothing"].get<float>();
-			message += "rollSmoothing=" + std::to_string(config.rollSmoothing) + " ";
-			updated = true;
-		}
-		if (args.contains("leanStrength")) {
-			config.leanStrength = args["leanStrength"].get<float>();
-			message += "leanStrength=" + std::to_string(config.leanStrength) + " ";
-			updated = true;
-		}
-
-		// FOV settings
-		if (args.contains("fovMin")) {
-			config.fovMin = args["fovMin"].get<float>();
-			message += "fovMin=" + std::to_string(config.fovMin) + " ";
-			updated = true;
-		}
-		if (args.contains("fovMax")) {
-			config.fovMax = args["fovMax"].get<float>();
-			message += "fovMax=" + std::to_string(config.fovMax) + " ";
-			updated = true;
-		}
-		if (args.contains("fovStep")) {
-			config.fovStep = args["fovStep"].get<float>();
-			message += "fovStep=" + std::to_string(config.fovStep) + " ";
-			updated = true;
-		}
-		if (args.contains("defaultFov")) {
-			config.defaultFov = args["defaultFov"].get<float>();
-			message += "defaultFov=" + std::to_string(config.defaultFov) + " ";
-			updated = true;
-		}
-
-		// Smoothing settings
-		if (args.contains("smoothEnabled")) {
-			config.smoothEnabled = args["smoothEnabled"].get<bool>();
-			message += "smoothEnabled=" + std::string(config.smoothEnabled ? "true" : "false") + " ";
-			updated = true;
-		}
-		if (args.contains("halfVec")) {
-			config.halfVec = args["halfVec"].get<float>();
-			message += "halfVec=" + std::to_string(config.halfVec) + " ";
-			updated = true;
-		}
-		if (args.contains("halfRot")) {
-			config.halfRot = args["halfRot"].get<float>();
-			message += "halfRot=" + std::to_string(config.halfRot) + " ";
-			updated = true;
-		}
-		if (args.contains("lockHalfRot")) {
-			config.lockHalfRot = args["lockHalfRot"].get<float>();
-			message += "lockHalfRot=" + std::to_string(config.lockHalfRot) + " ";
-			updated = true;
-		}
-		if (args.contains("lockHalfRotTransition")) {
-			config.lockHalfRotTransition = args["lockHalfRotTransition"].get<float>();
-			message += "lockHalfRotTransition=" + std::to_string(config.lockHalfRotTransition) + " ";
-			updated = true;
-		}
-		if (args.contains("halfFov")) {
-			config.halfFov = args["halfFov"].get<float>();
-			message += "halfFov=" + std::to_string(config.halfFov) + " ";
-			updated = true;
-		}
+		std::string message;
+		bool updated = UpdateFreecamConfigFromJson(args, config, message);
 
 		if (updated) {
 			advancedfx::Message((message + "\n").c_str());
@@ -2327,6 +2334,61 @@ static void RegisterObsWebSocketHandlers() {
 		} else {
 			respond(MakeCommandResult("freecam_config", false, "No valid config parameters provided"));
 		}
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_handoff", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!g_pFreecam) {
+			respond(MakeCommandResult("freecam_handoff", false, "Freecam controller not ready"));
+			return;
+		}
+
+		if (!args.contains("posX") || !args.contains("posY") || !args.contains("posZ")
+			|| !args.contains("pitch") || !args.contains("yaw") || !args.contains("roll")) {
+			respond(MakeCommandResult("freecam_handoff", false, "Missing position or rotation"));
+			return;
+		}
+
+		FreecamConfig& config = g_pFreecam->GetConfig();
+		std::string message;
+		UpdateFreecamConfigFromJson(args, config, message);
+
+		CameraTransform transform;
+		transform.x = args["posX"].get<float>();
+		transform.y = args["posY"].get<float>();
+		transform.z = args["posZ"].get<float>();
+		transform.pitch = args["pitch"].get<float>();
+		transform.yaw = args["yaw"].get<float>();
+		transform.roll = args["roll"].get<float>();
+		transform.fov = args.contains("fov") ? args["fov"].get<float>() : config.defaultFov;
+
+		CameraTransform smoothTransform;
+		bool hasSmooth = args.contains("smoothPosX") && args.contains("smoothPosY") && args.contains("smoothPosZ")
+			&& args.contains("smoothPitch") && args.contains("smoothYaw") && args.contains("smoothRoll");
+		if (hasSmooth) {
+			smoothTransform.x = args["smoothPosX"].get<float>();
+			smoothTransform.y = args["smoothPosY"].get<float>();
+			smoothTransform.z = args["smoothPosZ"].get<float>();
+			smoothTransform.pitch = args["smoothPitch"].get<float>();
+			smoothTransform.yaw = args["smoothYaw"].get<float>();
+			smoothTransform.roll = args["smoothRoll"].get<float>();
+			smoothTransform.fov = args.contains("smoothFov") ? args["smoothFov"].get<float>() : transform.fov;
+		}
+
+		g_pFreecam->Reset(transform);
+		if (hasSmooth) {
+			g_pFreecam->SetSmoothedTransform(smoothTransform);
+		}
+		g_pFreecam->SetInputEnabled(true);
+		g_pFreecam->SetEnabled(true);
+		if (args.contains("speedScalar"))
+			g_pFreecam->SetSpeedScalar(args["speedScalar"].get<float>());
+
+		if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
+		if (g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
+		g_AttachmentCamera.active = false;
+		g_AttachmentCameraHadError = false;
+		advancedfx::Message("Freecam handoff applied\n");
+		respond(MakeCommandResult("freecam_handoff", true, "Freecam handoff applied"));
 	});
 
 	g_ObsWebSocketProtocol.RegisterCommandHandler("attach_camera", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {

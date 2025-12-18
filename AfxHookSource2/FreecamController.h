@@ -101,6 +101,7 @@ public:
     float GetCurrentMoveSpeed() const { return m_Config.moveSpeed * m_SpeedScalar; }
     float GetCurrentVerticalSpeed() const { return m_Config.verticalSpeed * m_SpeedScalar; }
     float GetSpeedMultiplier() const { return m_SpeedScalar; }
+    void SetSpeedScalar(float value);
     float GetMinMoveSpeed() const { return m_Config.moveSpeed * m_Config.speedMinMultiplier; }
     float GetMaxMoveSpeed() const { return m_Config.moveSpeed * m_Config.speedMaxMultiplier; }
     bool IsSpeedDirty() const { return m_SpeedDirty; }
@@ -108,6 +109,9 @@ public:
 
     /// Reset camera to specified position/rotation
     void Reset(const CameraTransform& transform);
+
+    /// Override smoothed transform (for seamless handoff)
+    void SetSmoothedTransform(const CameraTransform& transform);
 
     /// Reset camera to origin
     void Reset();

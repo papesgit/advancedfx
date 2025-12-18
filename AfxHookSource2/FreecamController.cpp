@@ -103,6 +103,11 @@ void CFreecamController::Reset(const CameraTransform& transform) {
     m_bInitialized = true;
 }
 
+void CFreecamController::SetSmoothedTransform(const CameraTransform& transform) {
+    m_SmoothedTransform = transform;
+    m_bInitialized = true;
+}
+
 void CFreecamController::Reset() {
     CameraTransform origin;
     origin.fov = m_Config.defaultFov;
@@ -386,6 +391,11 @@ void CFreecamController::ResetSpeed() {
     m_LastMouseButton5 = false;
     m_MouseButton4Hold = 0.0f;
     m_MouseButton5Hold = 0.0f;
+}
+
+void CFreecamController::SetSpeedScalar(float value) {
+    m_SpeedScalar = Clamp(value, m_Config.speedMinMultiplier, m_Config.speedMaxMultiplier);
+    m_SpeedDirty = true;
 }
 
 void CFreecamController::ApplySmoothing(float deltaTime) {
