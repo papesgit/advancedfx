@@ -76,7 +76,6 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_VelocityX = m_VelocityY = m_VelocityZ = 0;
         m_MouseVelocityX = m_MouseVelocityY = 0;
         m_TargetRoll = m_CurrentRoll = 0;
-        m_Transform.fov = m_Config.defaultFov;
         m_PlayerLockActive = false;
         m_LastKeyVDown = false;
         m_PlayerLockHandle = -1;
@@ -110,7 +109,6 @@ void CFreecamController::SetSmoothedTransform(const CameraTransform& transform) 
 
 void CFreecamController::Reset() {
     CameraTransform origin;
-    origin.fov = m_Config.defaultFov;
     Reset(origin);
 }
 
