@@ -21,9 +21,12 @@
 #include "MirvColors.h"
 #include "MirvFix.h"
 #include "MirvTime.h"
+#include "ObsObserverState.h"
 #include "ObsWebSocketServer.h"
-#include "ObsWebSocketProtocol.h"
+#include "ObsWebSocketHandlers.h"
 #include "ObsInputReceiver.h"
+#include "ObsSpectatorBindings.h"
+#include "ObsWebSocketActions.h"
 #include "FreecamController.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
@@ -122,7 +125,6 @@ void * g_pGameResourceService = nullptr;
 
 // Observer tools for remote control
 CObsWebSocketServer* g_pObsWebSocket = nullptr;
-CObsWebSocketProtocol g_ObsWebSocketProtocol;
 CObsInputReceiver* g_pObsInput = nullptr;
 CFreecamController* g_pFreecam = nullptr;
 
@@ -507,6 +509,18 @@ float GetLastCameraFov() {
 	return (float)g_MirvInputEx.LastCameraFov;
 }
 
+CameraTransform Obs_GetLastCameraTransform() {
+	CameraTransform transform;
+	transform.x = (float)g_MirvInputEx.LastCameraOrigin[0];
+	transform.y = (float)g_MirvInputEx.LastCameraOrigin[1];
+	transform.z = (float)g_MirvInputEx.LastCameraOrigin[2];
+	transform.pitch = (float)g_MirvInputEx.LastCameraAngles[0];
+	transform.yaw = (float)g_MirvInputEx.LastCameraAngles[1];
+	transform.roll = (float)g_MirvInputEx.LastCameraAngles[2];
+	transform.fov = (float)g_MirvInputEx.LastCameraFov;
+	return transform;
+}
+
 CON_COMMAND(mirv_input, "Input mode configuration.")
 {
 	g_MirvInputEx.m_MirvInput->ConCommand(args);
@@ -817,28 +831,6 @@ static void BroadcastFreecamSpeedIfNeeded() {
 	}
 }
 
-// Global spectator key bindings: slots 1-0 map to controller indices
-// -1 = no player mapped to this key
-static int g_SpectatorBindings[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
-static bool g_LastSpectatorKeyState[10] = {false};
-static bool g_UseAltSpectatorBindings = false;
-static bool g_PendingSpectatorSwitch = false;
-static int g_SpectatorSwitchTimeout = 0; // Safety timeout
-
-struct AttachmentCameraState {
-	bool active = false;
-	int controllerIndex = -1;
-	bool useAttachmentIndex = true;
-	uint8_t attachmentIndex = 0;
-	std::string attachmentName;
-	SOURCESDK::Vector offsetPos = {0.0f, 0.0f, 0.0f};
-	Afx::Math::QEulerAngles offsetAngles = Afx::Math::QEulerAngles(0.0, 0.0, 0.0);
-	float fov = 90.0f;
-};
-
-static AttachmentCameraState g_AttachmentCamera;
-static bool g_AttachmentCameraHadError = false;
-
 static Afx::Math::Quaternion SourceQuatToAfx(const SOURCESDK::Quaternion& q) {
 	return Afx::Math::Quaternion(q.w, q.x, q.y, q.z);
 }
@@ -1007,6 +999,8 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	g_MirvInputEx.GameCameraAngles[1] = Ry;
 	g_MirvInputEx.GameCameraAngles[2] = Rz;
 	g_MirvInputEx.GameCameraFov = Fov;
+
+	ObsWebSocket_ProcessActions();
 
 	if (g_CamPath.Enabled_get() && g_CamPath.CanEval())
 	{
@@ -2021,517 +2015,6 @@ CON_COMMAND(mirv_cvar_unlock_sv_cheats, "Unlocks sv_cheats on client (as much as
 	}
 	
 	advancedfx::Message("==== Cvars total: %i (Cvars unlocked: %i) ====\n",total,nUnhidden);
-}
-
-
-
-// Refresh spectator bindings for number keys 1-0
-void RefreshSpectatorBindings() {
-	if (!g_pEntityList || !g_GetEntityFromIndex || !g_GetHighestEntityIndex) {
-		advancedfx::Warning("Cannot refresh bindings: Engine not ready\n");
-		return;
-	}
-
-	// Collect all player controllers with their indices
-	std::vector<int> ctControllers;
-	std::vector<int> tControllers;
-
-	int highestIndex = g_GetHighestEntityIndex(*g_pEntityList, false);
-	for (int i = 0; i <= highestIndex; ++i) {
-		CEntityInstance* ent = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, i);
-		if (!ent) continue;
-
-		// Check if it's a player controller (not pawn)
-		if (!ent->IsPlayerController()) continue;
-
-		// Get team (2 = T, 3 = CT)
-		int team = ent->GetTeam();
-		if (team != 2 && team != 3) continue;
-
-		// Controller index is the entity index itself
-		int controllerIndex = i;
-
-		// Add to appropriate team list
-		if (team == 3) {
-			ctControllers.push_back(controllerIndex);
-		} else if (team == 2) {
-			tControllers.push_back(controllerIndex);
-		}
-	}
-
-	// Sort controller indices (lowest to highest)
-	std::sort(ctControllers.begin(), ctControllers.end());
-	std::sort(tControllers.begin(), tControllers.end());
-
-	// Clear all bindings first
-	for (int i = 0; i < 10; ++i) {
-		g_SpectatorBindings[i] = -1;
-	}
-
-	// Map CT players to keys 1-5 (index 0-4)
-	for (size_t i = 0; i < ctControllers.size() && i < 5; ++i) {
-		g_SpectatorBindings[i] = ctControllers[i];
-		advancedfx::Message("Key %d -> CT controller %d\n", i+1, ctControllers[i]);
-	}
-
-	// Map T players to keys 6-0 (index 5-9)
-	for (size_t i = 0; i < tControllers.size() && i < 5; ++i) {
-		g_SpectatorBindings[i + 5] = tControllers[i];
-		if (g_UseAltSpectatorBindings) {
-			static const char* kAltLabels[5] = { "Q", "E", "R", "T", "Z" };
-			advancedfx::Message("Key %s -> T controller %d\n", kAltLabels[i], tControllers[i]);
-		} else {
-			advancedfx::Message("Key %d -> T controller %d\n", (i+6) % 10, tControllers[i]);
-		}
-	}
-
-	advancedfx::Message("Spectator bindings refreshed: %zu CT, %zu T\n", ctControllers.size(), tControllers.size());
-}
-
-static void SetAltSpectatorBindings(bool enabled) {
-	if (g_UseAltSpectatorBindings == enabled) {
-		return;
-	}
-
-	g_UseAltSpectatorBindings = enabled;
-	for (int i = 0; i < 10; ++i) {
-		g_LastSpectatorKeyState[i] = false;
-	}
-}
-
-static json MakeCommandResult(const std::string& command, bool ok, const std::string& message = std::string()) {
-	json result{
-		{"type", "command_result"},
-		{"command", command},
-		{"ok", ok}
-	};
-
-	if (!message.empty()) {
-		if (ok) result["message"] = message;
-		else result["error"] = message;
-	}
-
-	return result;
-}
-
-static json MakeExecCmdResult(const std::string& cmd, bool ok, const std::string& message = std::string(), const json& output = json::array()) {
-	json result{
-		{"type", "exec_cmd_result"},
-		{"cmd", cmd},
-		{"ok", ok},
-		{"output", output.is_array() ? output : json::array()}
-	};
-
-	if (!message.empty()) {
-		if (ok) result["message"] = message;
-		else result["error"] = message;
-	}
-
-	return result;
-}
-
-static json MakeCampathPlayResult(const std::string& cmd, bool ok, const std::string& message = std::string()) {
-	json result{
-		{"type", "campath_play_result"},
-		{"cmd", cmd},
-		{"ok", ok}
-	};
-
-	if (!message.empty()) {
-		if (ok) result["message"] = message;
-		else result["error"] = message;
-	}
-
-	return result;
-}
-
-static std::string EscapeQuotes(const std::string& value) {
-	std::string escaped = value;
-	size_t pos = 0;
-	while ((pos = escaped.find('\"', pos)) != std::string::npos) {
-		escaped.replace(pos, 1, "\\\"");
-		pos += 2;
-	}
-	return escaped;
-}
-
-static bool UpdateFreecamConfigFromJson(const json& args, FreecamConfig& config, std::string& message) {
-	bool updated = false;
-	message = "Freecam config updated: ";
-
-	// Mouse settings
-	if (args.contains("mouseSensitivity")) {
-		config.mouseSensitivity = args["mouseSensitivity"].get<float>();
-		message += "mouseSensitivity=" + std::to_string(config.mouseSensitivity) + " ";
-		updated = true;
-	}
-
-	// Movement settings
-	if (args.contains("moveSpeed")) {
-		config.moveSpeed = args["moveSpeed"].get<float>();
-		message += "moveSpeed=" + std::to_string(config.moveSpeed) + " ";
-		updated = true;
-	}
-	if (args.contains("sprintMultiplier")) {
-		config.sprintMultiplier = args["sprintMultiplier"].get<float>();
-		message += "sprintMultiplier=" + std::to_string(config.sprintMultiplier) + " ";
-		updated = true;
-	}
-	if (args.contains("verticalSpeed")) {
-		config.verticalSpeed = args["verticalSpeed"].get<float>();
-		message += "verticalSpeed=" + std::to_string(config.verticalSpeed) + " ";
-		updated = true;
-	}
-	if (args.contains("speedAdjustRate")) {
-		config.speedAdjustRate = args["speedAdjustRate"].get<float>();
-		message += "speedAdjustRate=" + std::to_string(config.speedAdjustRate) + " ";
-		updated = true;
-	}
-	if (args.contains("speedMinMultiplier")) {
-		config.speedMinMultiplier = args["speedMinMultiplier"].get<float>();
-		message += "speedMinMultiplier=" + std::to_string(config.speedMinMultiplier) + " ";
-		updated = true;
-	}
-	if (args.contains("speedMaxMultiplier")) {
-		config.speedMaxMultiplier = args["speedMaxMultiplier"].get<float>();
-		message += "speedMaxMultiplier=" + std::to_string(config.speedMaxMultiplier) + " ";
-		updated = true;
-	}
-
-	// Roll settings
-	if (args.contains("rollSpeed")) {
-		config.rollSpeed = args["rollSpeed"].get<float>();
-		message += "rollSpeed=" + std::to_string(config.rollSpeed) + " ";
-		updated = true;
-	}
-	if (args.contains("rollSmoothing")) {
-		config.rollSmoothing = args["rollSmoothing"].get<float>();
-		message += "rollSmoothing=" + std::to_string(config.rollSmoothing) + " ";
-		updated = true;
-	}
-	if (args.contains("leanStrength")) {
-		config.leanStrength = args["leanStrength"].get<float>();
-		message += "leanStrength=" + std::to_string(config.leanStrength) + " ";
-		updated = true;
-	}
-
-	// FOV settings
-	if (args.contains("fovMin")) {
-		config.fovMin = args["fovMin"].get<float>();
-		message += "fovMin=" + std::to_string(config.fovMin) + " ";
-		updated = true;
-	}
-	if (args.contains("fovMax")) {
-		config.fovMax = args["fovMax"].get<float>();
-		message += "fovMax=" + std::to_string(config.fovMax) + " ";
-		updated = true;
-	}
-	if (args.contains("fovStep")) {
-		config.fovStep = args["fovStep"].get<float>();
-		message += "fovStep=" + std::to_string(config.fovStep) + " ";
-		updated = true;
-	}
-	if (args.contains("defaultFov")) {
-		config.defaultFov = args["defaultFov"].get<float>();
-		message += "defaultFov=" + std::to_string(config.defaultFov) + " ";
-		updated = true;
-	}
-
-	// Smoothing settings
-	if (args.contains("smoothEnabled")) {
-		config.smoothEnabled = args["smoothEnabled"].get<bool>();
-		message += "smoothEnabled=" + std::string(config.smoothEnabled ? "true" : "false") + " ";
-		updated = true;
-	}
-	if (args.contains("halfVec")) {
-		config.halfVec = args["halfVec"].get<float>();
-		message += "halfVec=" + std::to_string(config.halfVec) + " ";
-		updated = true;
-	}
-	if (args.contains("halfRot")) {
-		config.halfRot = args["halfRot"].get<float>();
-		message += "halfRot=" + std::to_string(config.halfRot) + " ";
-		updated = true;
-	}
-	if (args.contains("lockHalfRot")) {
-		config.lockHalfRot = args["lockHalfRot"].get<float>();
-		message += "lockHalfRot=" + std::to_string(config.lockHalfRot) + " ";
-		updated = true;
-	}
-	if (args.contains("lockHalfRotTransition")) {
-		config.lockHalfRotTransition = args["lockHalfRotTransition"].get<float>();
-		message += "lockHalfRotTransition=" + std::to_string(config.lockHalfRotTransition) + " ";
-		updated = true;
-	}
-	if (args.contains("halfFov")) {
-		config.halfFov = args["halfFov"].get<float>();
-		message += "halfFov=" + std::to_string(config.halfFov) + " ";
-		updated = true;
-	}
-
-	return updated;
-}
-
-static void RegisterObsWebSocketHandlers() {
-	static bool initialized = false;
-	if (initialized) return;
-	initialized = true;
-
-	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_enable", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
-		if (!g_pFreecam) {
-			respond(MakeCommandResult("freecam_enable", false, "Freecam controller not ready"));
-			return;
-		}
-
-		// Initialize freecam with current game camera position if not initialized
-		if (!g_pFreecam->IsEnabled()) {
-			CameraTransform initTransform;
-			initTransform.x = (float)g_MirvInputEx.LastCameraOrigin[0];
-			initTransform.y = (float)g_MirvInputEx.LastCameraOrigin[1];
-			initTransform.z = (float)g_MirvInputEx.LastCameraOrigin[2];
-			initTransform.pitch = (float)g_MirvInputEx.LastCameraAngles[0];
-			initTransform.yaw = (float)g_MirvInputEx.LastCameraAngles[1];
-			initTransform.roll = (float)g_MirvInputEx.LastCameraAngles[2];
-			initTransform.fov = (float)g_MirvInputEx.LastCameraFov;
-			g_pFreecam->Reset(initTransform);
-		}
-
-		g_pFreecam->SetInputEnabled(true);
-		g_pFreecam->SetEnabled(true);
-		if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
-		if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
-		g_AttachmentCamera.active = false;
-		g_AttachmentCameraHadError = false;
-		advancedfx::Message("Freecam enabled\n");
-		respond(MakeCommandResult("freecam_enable", true, "Freecam enabled"));
-	});
-
-	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_disable", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
-		if (!g_pFreecam) {
-			respond(MakeCommandResult("freecam_disable", false, "Freecam controller not ready"));
-			return;
-		}
-
-		// Only disable input, keep freecam active until player switch
-		g_pFreecam->SetInputEnabled(false);
-		advancedfx::Message("Freecam input disabled\n");
-		respond(MakeCommandResult("freecam_disable", true, "Freecam input disabled"));
-	});
-
-	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_config", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
-		if (!g_pFreecam) {
-			respond(MakeCommandResult("freecam_config", false, "Freecam controller not ready"));
-			return;
-		}
-
-		FreecamConfig& config = g_pFreecam->GetConfig();
-		std::string message;
-		bool updated = UpdateFreecamConfigFromJson(args, config, message);
-
-		if (updated) {
-			advancedfx::Message((message + "\n").c_str());
-			respond(MakeCommandResult("freecam_config", true, message));
-		} else {
-			respond(MakeCommandResult("freecam_config", false, "No valid config parameters provided"));
-		}
-	});
-
-	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_handoff", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
-		if (!g_pFreecam) {
-			respond(MakeCommandResult("freecam_handoff", false, "Freecam controller not ready"));
-			return;
-		}
-
-		if (!args.contains("posX") || !args.contains("posY") || !args.contains("posZ")
-			|| !args.contains("pitch") || !args.contains("yaw") || !args.contains("roll")) {
-			respond(MakeCommandResult("freecam_handoff", false, "Missing position or rotation"));
-			return;
-		}
-
-		FreecamConfig& config = g_pFreecam->GetConfig();
-		std::string message;
-		UpdateFreecamConfigFromJson(args, config, message);
-
-		CameraTransform transform;
-		transform.x = args["posX"].get<float>();
-		transform.y = args["posY"].get<float>();
-		transform.z = args["posZ"].get<float>();
-		transform.pitch = args["pitch"].get<float>();
-		transform.yaw = args["yaw"].get<float>();
-		transform.roll = args["roll"].get<float>();
-		transform.fov = args.contains("fov") ? args["fov"].get<float>() : config.defaultFov;
-
-		CameraTransform smoothTransform;
-		bool hasSmooth = args.contains("smoothPosX") && args.contains("smoothPosY") && args.contains("smoothPosZ")
-			&& args.contains("smoothPitch") && args.contains("smoothYaw") && args.contains("smoothRoll");
-		if (hasSmooth) {
-			smoothTransform.x = args["smoothPosX"].get<float>();
-			smoothTransform.y = args["smoothPosY"].get<float>();
-			smoothTransform.z = args["smoothPosZ"].get<float>();
-			smoothTransform.pitch = args["smoothPitch"].get<float>();
-			smoothTransform.yaw = args["smoothYaw"].get<float>();
-			smoothTransform.roll = args["smoothRoll"].get<float>();
-			smoothTransform.fov = args.contains("smoothFov") ? args["smoothFov"].get<float>() : transform.fov;
-		}
-
-		g_pFreecam->Reset(transform);
-		if (hasSmooth) {
-			g_pFreecam->SetSmoothedTransform(smoothTransform);
-		}
-		g_pFreecam->SetInputEnabled(true);
-		g_pFreecam->SetEnabled(true);
-		if (args.contains("speedScalar"))
-			g_pFreecam->SetSpeedScalar(args["speedScalar"].get<float>());
-
-		if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
-		if (g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
-		g_AttachmentCamera.active = false;
-		g_AttachmentCameraHadError = false;
-		advancedfx::Message("Freecam handoff applied\n");
-		respond(MakeCommandResult("freecam_handoff", true, "Freecam handoff applied"));
-	});
-
-	g_ObsWebSocketProtocol.RegisterCommandHandler("attach_camera", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
-		if (!args.contains("observer_slot")) {
-			respond(MakeCommandResult("attach_camera", false, "Missing observer_slot"));
-			return;
-		}
-		int slot = args["observer_slot"].get<int>();
-		if (slot < 0 || slot > 9) {
-			respond(MakeCommandResult("attach_camera", false, "observer_slot must be 0-9"));
-			return;
-		}
-
-		if (!args.contains("attachment")) {
-			respond(MakeCommandResult("attach_camera", false, "Missing attachment"));
-			return;
-		}
-
-		if (!args.contains("offset_pos") || !args.contains("offset_angles")) {
-			respond(MakeCommandResult("attach_camera", false, "Missing offset_pos or offset_angles"));
-			return;
-		}
-
-		// Refresh bindings to ensure the latest controller mapping.
-		//RefreshSpectatorBindings();
-		if (slot < 0 || slot > 9 || g_SpectatorBindings[slot] == -1) {
-			respond(MakeCommandResult("attach_camera", false, "observer_slot not mapped to a controller"));
-			return;
-		}
-
-		AttachmentCameraState state;
-		state.active = true;
-		state.controllerIndex = g_SpectatorBindings[slot];
-
-		if (args["attachment"].is_number_integer()) {
-			int idx = args["attachment"].get<int>();
-			if (idx < 0 || idx > 255) {
-				respond(MakeCommandResult("attach_camera", false, "attachment index must be 0-255"));
-				return;
-			}
-			state.useAttachmentIndex = true;
-			state.attachmentIndex = (uint8_t)idx;
-		} else if (args["attachment"].is_string()) {
-			state.useAttachmentIndex = false;
-			state.attachmentName = args["attachment"].get<std::string>();
-		} else {
-			respond(MakeCommandResult("attach_camera", false, "attachment must be index or name"));
-			return;
-		}
-
-		try {
-			state.offsetPos.x = (float)args["offset_pos"].at("x").get<double>();
-			state.offsetPos.y = (float)args["offset_pos"].at("y").get<double>();
-			state.offsetPos.z = (float)args["offset_pos"].at("z").get<double>();
-
-			state.offsetAngles = Afx::Math::QEulerAngles(
-				args["offset_angles"].at("pitch").get<double>(),
-				args["offset_angles"].at("yaw").get<double>(),
-				args["offset_angles"].at("roll").get<double>()
-			);
-
-			state.fov = args.contains("fov")
-				? (float)args["fov"].get<double>()
-				: 90.0f;
-		} catch (...) {
-			respond(MakeCommandResult("attach_camera", false, "Invalid offset_pos or offset_angles payload"));
-			return;
-		}
-
-		g_AttachmentCamera = state;
-		g_AttachmentCameraHadError = false;
-		if(g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
-		std::string cmd = "spec_mode 2; spec_player " + std::to_string(state.controllerIndex);
-		g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
-
-		std::string attachmentDesc = state.useAttachmentIndex ? std::to_string(state.attachmentIndex) : state.attachmentName;
-		std::ostringstream oss;
-		oss << "Attached to controller " << state.controllerIndex
-			<< " attachment (" << (state.useAttachmentIndex ? "index " : "name ") << attachmentDesc << ")"
-			<< " offset pos [" << state.offsetPos.x << " " << state.offsetPos.y << " " << state.offsetPos.z << "]"
-			<< " angles [" << state.offsetAngles.Pitch << " " << state.offsetAngles.Yaw << " " << state.offsetAngles.Roll << "]"
-			<< " fov [" << state.fov << "]";
-
-		respond(MakeCommandResult("attach_camera", true, oss.str()));
-	});
-
-	g_ObsWebSocketProtocol.RegisterCommandHandler("refresh_binds", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
-		RefreshSpectatorBindings();
-		respond(MakeCommandResult("refresh_binds", true, "Spectator bindings refreshed"));
-	});
-
-	g_ObsWebSocketProtocol.RegisterCommandHandler("spectator_bindings_mode", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
-		if (!args.contains("useAlt") || !args["useAlt"].is_boolean()) {
-			respond(MakeCommandResult("spectator_bindings_mode", false, "Missing or invalid useAlt flag"));
-			return;
-		}
-
-		bool useAlt = args["useAlt"].get<bool>();
-		SetAltSpectatorBindings(useAlt);
-		respond(MakeCommandResult("spectator_bindings_mode", true, useAlt ? "Alt spectator bindings enabled" : "Alt spectator bindings disabled"));
-	});
-
-	g_ObsWebSocketProtocol.SetExecCommandHandler([](const std::string& cmd, const CObsWebSocketProtocol::JsonResponder& respond) {
-		if (cmd.empty()) {
-			respond(MakeExecCmdResult(cmd, false, "Command string is empty"));
-			return;
-		}
-
-		if (!g_pEngineToClient) {
-			respond(MakeExecCmdResult(cmd, false, "Engine not ready for commands"));
-			return;
-		}
-
-		g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
-
-		json output = json::array();
-		output.push_back(cmd + " executed");
-		respond(MakeExecCmdResult(cmd, true, "Command executed", output));
-	});
-
-	g_ObsWebSocketProtocol.SetCampathPlayHandler([](const std::string& cmd, double offset, const CObsWebSocketProtocol::JsonResponder& respond) {
-		if (cmd.empty()) {
-			respond(MakeCampathPlayResult(cmd, false, "Campath path is empty"));
-			return;
-		}
-
-		float curTime = g_MirvTime.curtime_get();
-
-		std::wstring wcmd;
-		UTF8StringToWideString(cmd.c_str(), wcmd);
-		g_CamPath.Load(wcmd.c_str());
-		g_CamPath.SetStart(curTime - g_CamPath.GetOffset() - offset);
-		g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
-		if(!g_CamPath.Enabled_get()) g_CamPath.Enabled_set(true);
-		if(g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
-		g_AttachmentCamera.active = false;
-		g_AttachmentCameraHadError = false;
-		respond(MakeCampathPlayResult(cmd, true, "Campath playback started"));
-	});
-}
-
-void HandleObsWebSocketCommand(const std::string& jsonMessage, const CObsWebSocketProtocol::ResponseSender& respond) {
-	g_ObsWebSocketProtocol.HandleMessage(jsonMessage, respond);
 }
 
 typedef int(* CCS2_Client_Init_t)(void* This);

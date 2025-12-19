@@ -289,6 +289,13 @@ target_sources(${PROJECT_NAME} PRIVATE
     ObsWebSocketServer.h
     ObsWebSocketProtocol.cpp
     ObsWebSocketProtocol.h
+    ObsWebSocketHandlers.cpp
+    ObsWebSocketHandlers.h
+    ObsWebSocketActions.cpp
+    ObsWebSocketActions.h
+    ObsSpectatorBindings.cpp
+    ObsSpectatorBindings.h
+    ObsObserverState.h
 
     ObsInputReceiver.cpp
     ObsInputReceiver.h
