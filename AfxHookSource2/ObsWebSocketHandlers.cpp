@@ -221,6 +221,20 @@ void RegisterObsWebSocketHandlers() {
 		respond(MakeCommandResult("freecam_disable", true, "Freecam input disabled"));
 	});
 
+	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!g_pFreecam) {
+			respond(MakeCommandResult("freecam_hold", false, "Freecam controller not ready"));
+			return;
+		}
+		if (!g_pFreecam->IsEnabled()) {
+			respond(MakeCommandResult("freecam_hold", false, "Freecam is not enabled"));
+			return;
+		}
+
+		ObsWebSocket_QueueFreecamHold();
+		respond(MakeCommandResult("freecam_hold", true, "Freecam input hold enabled"));
+	});
+
 	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_config", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
 		if (!g_pFreecam) {
 			respond(MakeCommandResult("freecam_config", false, "Freecam controller not ready"));
@@ -287,6 +301,8 @@ void RegisterObsWebSocketHandlers() {
 			payload.hasSpeedScalar = true;
 			payload.speedScalar = args["speedScalar"].get<float>();
 		}
+		
+		g_pFreecam->m_PlayerLockActive = false;
 
 		ObsWebSocket_QueueFreecamHandoff(payload);
 		respond(MakeCommandResult("freecam_handoff", true, "Freecam handoff applied"));

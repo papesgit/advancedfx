@@ -84,8 +84,14 @@ public:
     bool IsEnabled() const { return m_bEnabled; }
 
     /// Enable/disable input processing (gates input without disabling camera)
-    void SetInputEnabled(bool enabled) { m_bInputEnabled = enabled; }
+    void SetInputEnabled(bool enabled);
     bool IsInputEnabled() const { return m_bInputEnabled; }
+
+    /// Enable/disable input hold (keeps last input motion while ignoring new input)
+    void SetInputHold(bool enabled);
+    bool IsInputHold() const { return m_bInputHold; }
+
+    bool m_PlayerLockActive;
 
     /// Get configuration (mutable for settings)
     FreecamConfig& GetConfig() { return m_Config; }
@@ -130,6 +136,8 @@ private:
     void UpdateHalfRotTransition(float deltaTime);
     void ApplyLockAngles(float targetX, float targetY, float targetZ);
     void ApplySmoothing(float deltaTime);
+    void ComputeHoldAngularVelocity();
+    void ApplyHoldRotation(float deltaTime);
 
     // Math helpers
     float Clamp(float value, float min, float max);
@@ -140,6 +148,7 @@ private:
 
     bool m_bEnabled;
     bool m_bInputEnabled;  // Gates input processing without disabling camera
+    bool m_bInputHold;     // Keeps last input motion while ignoring new input
     bool m_bInitialized;
     FreecamConfig m_Config;
 
@@ -152,6 +161,8 @@ private:
 
     // Mouse state
     float m_MouseVelocityX, m_MouseVelocityY;
+    float m_HoldYawVelocity;
+    float m_HoldPitchVelocity;
 
     float m_SpeedScalar;
     bool m_SpeedDirty;
@@ -165,7 +176,6 @@ private:
     float m_CurrentRoll;
 
     // Player lock state
-    bool m_PlayerLockActive;
     bool m_LastKeyVDown;
     int m_PlayerLockHandle;
     float m_PlayerLockReturnHalfRot;

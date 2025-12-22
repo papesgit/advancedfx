@@ -37,9 +37,11 @@ bool IsAltDown(const InputState& input) {
 CFreecamController::CFreecamController()
     : m_bEnabled(false)
     , m_bInputEnabled(false)
+    , m_bInputHold(false)
     , m_bInitialized(false)
     , m_VelocityX(0), m_VelocityY(0), m_VelocityZ(0)
     , m_MouseVelocityX(0), m_MouseVelocityY(0)
+    , m_HoldYawVelocity(0), m_HoldPitchVelocity(0)
     , m_SpeedScalar(1.0f), m_SpeedDirty(false)
     , m_LastMouseButton4(false), m_LastMouseButton5(false)
     , m_MouseButton4Hold(0.0f), m_MouseButton5Hold(0.0f)
@@ -75,6 +77,9 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_bInitialized = false;
         m_VelocityX = m_VelocityY = m_VelocityZ = 0;
         m_MouseVelocityX = m_MouseVelocityY = 0;
+        m_bInputHold = false;
+        m_HoldYawVelocity = 0;
+        m_HoldPitchVelocity = 0;
         m_TargetRoll = m_CurrentRoll = 0;
         m_PlayerLockActive = false;
         m_LastKeyVDown = false;
@@ -85,7 +90,30 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_HalfRotTransitionElapsed = 0.0f;
         ResetSpeed();
         m_LastUpdateTime = std::chrono::steady_clock::now();
+    } else {
+        m_bInputHold = false;
+        m_HoldYawVelocity = 0;
+        m_HoldPitchVelocity = 0;
     }
+}
+
+void CFreecamController::SetInputEnabled(bool enabled) {
+    m_bInputEnabled = enabled;
+    if (enabled) {
+        m_bInputHold = false;
+        m_HoldYawVelocity = 0;
+        m_HoldPitchVelocity = 0;
+    }
+}
+
+void CFreecamController::SetInputHold(bool enabled) {
+    if (!m_bEnabled) {
+        return;
+    }
+    if (enabled) {
+        ComputeHoldAngularVelocity();
+    }
+    m_bInputHold = enabled;
 }
 
 void CFreecamController::Reset(const CameraTransform& transform) {
@@ -93,6 +121,8 @@ void CFreecamController::Reset(const CameraTransform& transform) {
     m_SmoothedTransform = transform;
     m_VelocityX = m_VelocityY = m_VelocityZ = 0;
     m_MouseVelocityX = m_MouseVelocityY = 0;
+    m_HoldYawVelocity = 0;
+    m_HoldPitchVelocity = 0;
     m_TargetRoll = m_CurrentRoll = transform.roll;
     m_CurrentHalfRot = m_Config.halfRot;
     m_PlayerLockReturnHalfRot = m_Config.halfRot;
@@ -120,18 +150,29 @@ void CFreecamController::Update(const InputState& input, float deltaTime) {
     // Clamp deltaTime to prevent large jumps
     deltaTime = (std::min)(deltaTime, 0.1f);
 
-    // Only process input if input is enabled (gated when right-click released)
-    if (m_bInputEnabled) {
-        UpdateSpeed(input, deltaTime);
-        UpdateMouseLook(input, deltaTime);
-    }
+    if (m_bInputHold) {
+        ApplyHoldRotation(deltaTime);
+        UpdatePlayerLock(InputState{}, deltaTime);
+        UpdateRoll(InputState{}, deltaTime);
 
-    UpdatePlayerLock(input, deltaTime);
+        // Apply stored velocity without consuming new input.
+        m_Transform.x += m_VelocityX * deltaTime;
+        m_Transform.y += m_VelocityY * deltaTime;
+        m_Transform.z += m_VelocityZ * deltaTime;
+    } else {
+        // Only process input if input is enabled (gated when right-click released)
+        if (m_bInputEnabled) {
+            UpdateSpeed(input, deltaTime);
+            UpdateMouseLook(input, deltaTime);
+        }
 
-    if (m_bInputEnabled) {
-        UpdateMovement(input, deltaTime);
-        UpdateRoll(input, deltaTime);
-        UpdateFOV(input);
+        UpdatePlayerLock(input, deltaTime);
+
+        if (m_bInputEnabled) {
+            UpdateMovement(input, deltaTime);
+            UpdateRoll(input, deltaTime);
+            UpdateFOV(input);
+        }
     }
 
     // Always apply smoothing (even when input is disabled) to maintain camera position
@@ -150,6 +191,48 @@ void CFreecamController::UpdateMouseLook(const InputState& input, float deltaTim
     // Apply mouse deltas directly to angles
     float deltaYaw = -input.mouseDx * m_Config.mouseSensitivity;
     float deltaPitch = input.mouseDy * m_Config.mouseSensitivity;
+
+    m_Transform.yaw += deltaYaw;
+    m_Transform.pitch += deltaPitch;
+
+    // Store velocities for roll calculation
+    if (deltaTime > 0) {
+        m_MouseVelocityX = deltaYaw / deltaTime;
+        m_MouseVelocityY = deltaPitch / deltaTime;
+    }
+
+    // Clamp pitch
+    m_Transform.pitch = Clamp(m_Transform.pitch, -89.0f, 89.0f);
+
+    // Wrap yaw to [-180, 180]
+    while (m_Transform.yaw > 180.0f) m_Transform.yaw -= 360.0f;
+    while (m_Transform.yaw < -180.0f) m_Transform.yaw += 360.0f;
+}
+
+void CFreecamController::ComputeHoldAngularVelocity() {
+    m_HoldYawVelocity = 0.0f;
+    m_HoldPitchVelocity = 0.0f;
+
+    if (!m_Config.smoothEnabled || m_CurrentHalfRot <= 0.0f) {
+        return;
+    }
+
+    float targetYaw = m_Transform.yaw;
+    float currentYaw = m_SmoothedTransform.yaw;
+    while (targetYaw - currentYaw > 180.0f) targetYaw -= 360.0f;
+    while (targetYaw - currentYaw < -180.0f) targetYaw += 360.0f;
+
+    float deltaYaw = targetYaw - currentYaw;
+    float deltaPitch = m_Transform.pitch - m_SmoothedTransform.pitch;
+
+    const float rate = logf(2.0f) / m_CurrentHalfRot;
+    m_HoldYawVelocity = deltaYaw * rate;
+    m_HoldPitchVelocity = deltaPitch * rate;
+}
+
+void CFreecamController::ApplyHoldRotation(float deltaTime) {
+    float deltaYaw = m_HoldYawVelocity * deltaTime;
+    float deltaPitch = m_HoldPitchVelocity * deltaTime;
 
     m_Transform.yaw += deltaYaw;
     m_Transform.pitch += deltaPitch;

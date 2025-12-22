@@ -23,6 +23,7 @@ namespace {
 	enum class ActionType {
 		FreecamEnable,
 		FreecamDisable,
+		FreecamHold,
 		FreecamConfig,
 		FreecamHandoff,
 		AttachCamera,
@@ -78,6 +79,11 @@ void ObsWebSocket_QueueFreecamEnable() {
 void ObsWebSocket_QueueFreecamDisable() {
 	std::lock_guard<std::mutex> lock(g_ActionMutex);
 	g_ActionQueue.push_back({ActionType::FreecamDisable});
+}
+
+void ObsWebSocket_QueueFreecamHold() {
+	std::lock_guard<std::mutex> lock(g_ActionMutex);
+	g_ActionQueue.push_back({ActionType::FreecamHold});
 }
 
 void ObsWebSocket_QueueFreecamConfig(const FreecamConfigDelta& delta, const std::string& message) {
@@ -162,6 +168,11 @@ void ObsWebSocket_ProcessActions() {
 			if (!g_pFreecam) break;
 			g_pFreecam->SetInputEnabled(false);
 			advancedfx::Message("Freecam input disabled\n");
+			break;
+		case ActionType::FreecamHold:
+			if (!g_pFreecam || !g_pFreecam->IsEnabled()) break;
+			g_pFreecam->SetInputHold(true);
+			advancedfx::Message("Freecam input hold enabled\n");
 			break;
 		case ActionType::FreecamConfig:
 			if (!g_pFreecam) break;
