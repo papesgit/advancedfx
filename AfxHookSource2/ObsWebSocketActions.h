@@ -66,9 +66,14 @@ struct FreecamHandoffPayload {
 	std::string message;
 };
 
+enum class FreecamHoldMode {
+	Camera,
+	World
+};
+
 void ObsWebSocket_QueueFreecamEnable();
 void ObsWebSocket_QueueFreecamDisable();
-void ObsWebSocket_QueueFreecamHold();
+void ObsWebSocket_QueueFreecamHold(bool hasMode, FreecamHoldMode mode);
 void ObsWebSocket_QueueFreecamConfig(const FreecamConfigDelta& delta, const std::string& message);
 void ObsWebSocket_QueueFreecamHandoff(const FreecamHandoffPayload& payload);
 void ObsWebSocket_QueueAttachCamera(const AttachmentCameraState& state);

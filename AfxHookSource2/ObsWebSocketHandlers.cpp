@@ -221,7 +221,7 @@ void RegisterObsWebSocketHandlers() {
 		respond(MakeCommandResult("freecam_disable", true, "Freecam input disabled"));
 	});
 
-	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
+g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
 		if (!g_pFreecam) {
 			respond(MakeCommandResult("freecam_hold", false, "Freecam controller not ready"));
 			return;
@@ -231,7 +231,27 @@ void RegisterObsWebSocketHandlers() {
 			return;
 		}
 
-		ObsWebSocket_QueueFreecamHold();
+		bool hasMode = false;
+		FreecamHoldMode mode = FreecamHoldMode::Camera;
+		if (args.contains("mode")) {
+			if (!args["mode"].is_string()) {
+				respond(MakeCommandResult("freecam_hold", false, "mode must be 'camera' or 'world'"));
+				return;
+			}
+			auto modeStr = args["mode"].get<std::string>();
+			if (modeStr == "camera") {
+				mode = FreecamHoldMode::Camera;
+				hasMode = true;
+			} else if (modeStr == "world") {
+				mode = FreecamHoldMode::World;
+				hasMode = true;
+			} else {
+				respond(MakeCommandResult("freecam_hold", false, "mode must be 'camera' or 'world'"));
+				return;
+			}
+		}
+
+		ObsWebSocket_QueueFreecamHold(hasMode, mode);
 		respond(MakeCommandResult("freecam_hold", true, "Freecam input hold enabled"));
 	});
 

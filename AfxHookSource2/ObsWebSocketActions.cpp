@@ -38,6 +38,8 @@ namespace {
 		FreecamConfigDelta configDelta;
 		FreecamHandoffPayload handoff;
 		AttachmentCameraState attachment;
+		bool hasHoldMode = false;
+		FreecamHoldMode holdMode = FreecamHoldMode::Camera;
 		bool useAltBindings = false;
 		std::string cmd;
 		double offset = 0.0;
@@ -81,9 +83,13 @@ void ObsWebSocket_QueueFreecamDisable() {
 	g_ActionQueue.push_back({ActionType::FreecamDisable});
 }
 
-void ObsWebSocket_QueueFreecamHold() {
+void ObsWebSocket_QueueFreecamHold(bool hasMode, FreecamHoldMode mode) {
 	std::lock_guard<std::mutex> lock(g_ActionMutex);
-	g_ActionQueue.push_back({ActionType::FreecamHold});
+	PendingAction action;
+	action.type = ActionType::FreecamHold;
+	action.hasHoldMode = hasMode;
+	action.holdMode = mode;
+	g_ActionQueue.push_back(std::move(action));
 }
 
 void ObsWebSocket_QueueFreecamConfig(const FreecamConfigDelta& delta, const std::string& message) {
@@ -171,6 +177,12 @@ void ObsWebSocket_ProcessActions() {
 			break;
 		case ActionType::FreecamHold:
 			if (!g_pFreecam || !g_pFreecam->IsEnabled()) break;
+			if (action.hasHoldMode) {
+				g_pFreecam->SetHoldMovementMode(
+					action.holdMode == FreecamHoldMode::World
+						? CFreecamController::HoldMovementMode::World
+						: CFreecamController::HoldMovementMode::Camera);
+			}
 			g_pFreecam->SetInputHold(true);
 			advancedfx::Message("Freecam input hold enabled\n");
 			break;

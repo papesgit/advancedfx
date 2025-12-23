@@ -76,6 +76,11 @@ struct FreecamConfig {
 /// Ported from mirv_camera.mjs with optimizations for C++
 class CFreecamController {
 public:
+    enum class HoldMovementMode {
+        Camera,
+        World
+    };
+
     CFreecamController();
     ~CFreecamController();
 
@@ -90,6 +95,8 @@ public:
     /// Enable/disable input hold (keeps last input motion while ignoring new input)
     void SetInputHold(bool enabled);
     bool IsInputHold() const { return m_bInputHold; }
+    void SetHoldMovementMode(HoldMovementMode mode);
+    HoldMovementMode GetHoldMovementMode() const { return m_HoldMovementMode; }
 
     bool m_PlayerLockActive;
 
@@ -138,6 +145,8 @@ private:
     void ApplySmoothing(float deltaTime);
     void ComputeHoldAngularVelocity();
     void ApplyHoldRotation(float deltaTime);
+    void ComputeHoldMovementBasis();
+    void ApplyHoldMovement(float deltaTime);
 
     // Math helpers
     float Clamp(float value, float min, float max);
@@ -163,6 +172,13 @@ private:
     float m_MouseVelocityX, m_MouseVelocityY;
     float m_HoldYawVelocity;
     float m_HoldPitchVelocity;
+    float m_HoldLocalForward;
+    float m_HoldLocalRight;
+    float m_HoldLocalUp;
+    float m_HoldWorldVelocityX;
+    float m_HoldWorldVelocityY;
+    float m_HoldWorldVelocityZ;
+    HoldMovementMode m_HoldMovementMode;
 
     float m_SpeedScalar;
     bool m_SpeedDirty;

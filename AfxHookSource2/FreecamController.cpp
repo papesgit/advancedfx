@@ -42,6 +42,9 @@ CFreecamController::CFreecamController()
     , m_VelocityX(0), m_VelocityY(0), m_VelocityZ(0)
     , m_MouseVelocityX(0), m_MouseVelocityY(0)
     , m_HoldYawVelocity(0), m_HoldPitchVelocity(0)
+    , m_HoldLocalForward(0), m_HoldLocalRight(0), m_HoldLocalUp(0)
+    , m_HoldWorldVelocityX(0), m_HoldWorldVelocityY(0), m_HoldWorldVelocityZ(0)
+    , m_HoldMovementMode(HoldMovementMode::Camera)
     , m_SpeedScalar(1.0f), m_SpeedDirty(false)
     , m_LastMouseButton4(false), m_LastMouseButton5(false)
     , m_MouseButton4Hold(0.0f), m_MouseButton5Hold(0.0f)
@@ -80,6 +83,12 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_bInputHold = false;
         m_HoldYawVelocity = 0;
         m_HoldPitchVelocity = 0;
+        m_HoldLocalForward = 0;
+        m_HoldLocalRight = 0;
+        m_HoldLocalUp = 0;
+        m_HoldWorldVelocityX = 0;
+        m_HoldWorldVelocityY = 0;
+        m_HoldWorldVelocityZ = 0;
         m_TargetRoll = m_CurrentRoll = 0;
         m_PlayerLockActive = false;
         m_LastKeyVDown = false;
@@ -94,6 +103,12 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_bInputHold = false;
         m_HoldYawVelocity = 0;
         m_HoldPitchVelocity = 0;
+        m_HoldLocalForward = 0;
+        m_HoldLocalRight = 0;
+        m_HoldLocalUp = 0;
+        m_HoldWorldVelocityX = 0;
+        m_HoldWorldVelocityY = 0;
+        m_HoldWorldVelocityZ = 0;
     }
 }
 
@@ -103,6 +118,12 @@ void CFreecamController::SetInputEnabled(bool enabled) {
         m_bInputHold = false;
         m_HoldYawVelocity = 0;
         m_HoldPitchVelocity = 0;
+        m_HoldLocalForward = 0;
+        m_HoldLocalRight = 0;
+        m_HoldLocalUp = 0;
+        m_HoldWorldVelocityX = 0;
+        m_HoldWorldVelocityY = 0;
+        m_HoldWorldVelocityZ = 0;
     }
 }
 
@@ -112,8 +133,32 @@ void CFreecamController::SetInputHold(bool enabled) {
     }
     if (enabled) {
         ComputeHoldAngularVelocity();
+        if (m_HoldMovementMode == HoldMovementMode::Camera) {
+            ComputeHoldMovementBasis();
+        } else {
+            m_HoldWorldVelocityX = m_VelocityX;
+            m_HoldWorldVelocityY = m_VelocityY;
+            m_HoldWorldVelocityZ = m_VelocityZ;
+        }
     }
     m_bInputHold = enabled;
+}
+
+void CFreecamController::SetHoldMovementMode(HoldMovementMode mode) {
+    if (m_HoldMovementMode == mode) {
+        return;
+    }
+
+    m_HoldMovementMode = mode;
+    if (m_bInputHold) {
+        if (m_HoldMovementMode == HoldMovementMode::Camera) {
+            ComputeHoldMovementBasis();
+        } else {
+            m_HoldWorldVelocityX = m_VelocityX;
+            m_HoldWorldVelocityY = m_VelocityY;
+            m_HoldWorldVelocityZ = m_VelocityZ;
+        }
+    }
 }
 
 void CFreecamController::Reset(const CameraTransform& transform) {
@@ -123,6 +168,12 @@ void CFreecamController::Reset(const CameraTransform& transform) {
     m_MouseVelocityX = m_MouseVelocityY = 0;
     m_HoldYawVelocity = 0;
     m_HoldPitchVelocity = 0;
+    m_HoldLocalForward = 0;
+    m_HoldLocalRight = 0;
+    m_HoldLocalUp = 0;
+    m_HoldWorldVelocityX = 0;
+    m_HoldWorldVelocityY = 0;
+    m_HoldWorldVelocityZ = 0;
     m_TargetRoll = m_CurrentRoll = transform.roll;
     m_CurrentHalfRot = m_Config.halfRot;
     m_PlayerLockReturnHalfRot = m_Config.halfRot;
@@ -156,9 +207,7 @@ void CFreecamController::Update(const InputState& input, float deltaTime) {
         UpdateRoll(InputState{}, deltaTime);
 
         // Apply stored velocity without consuming new input.
-        m_Transform.x += m_VelocityX * deltaTime;
-        m_Transform.y += m_VelocityY * deltaTime;
-        m_Transform.z += m_VelocityZ * deltaTime;
+        ApplyHoldMovement(deltaTime);
     } else {
         // Only process input if input is enabled (gated when right-click released)
         if (m_bInputEnabled) {
@@ -249,6 +298,51 @@ void CFreecamController::ApplyHoldRotation(float deltaTime) {
     // Wrap yaw to [-180, 180]
     while (m_Transform.yaw > 180.0f) m_Transform.yaw -= 360.0f;
     while (m_Transform.yaw < -180.0f) m_Transform.yaw += 360.0f;
+}
+
+void CFreecamController::ComputeHoldMovementBasis() {
+    float forwardX, forwardY, forwardZ;
+    GetForwardVector(m_Transform.pitch, m_Transform.yaw, forwardX, forwardY, forwardZ);
+
+    float rightX, rightY, rightZ;
+    GetRightVector(m_Transform.yaw, rightX, rightY, rightZ);
+
+    float upX, upY, upZ;
+    GetUpVector(m_Transform.pitch, m_Transform.yaw, upX, upY, upZ);
+
+    m_HoldLocalForward = m_VelocityX * forwardX + m_VelocityY * forwardY + m_VelocityZ * forwardZ;
+    m_HoldLocalRight = m_VelocityX * rightX + m_VelocityY * rightY + m_VelocityZ * rightZ;
+    m_HoldLocalUp = m_VelocityX * upX + m_VelocityY * upY + m_VelocityZ * upZ;
+}
+
+void CFreecamController::ApplyHoldMovement(float deltaTime) {
+    if (m_HoldMovementMode == HoldMovementMode::World) {
+        m_VelocityX = m_HoldWorldVelocityX;
+        m_VelocityY = m_HoldWorldVelocityY;
+        m_VelocityZ = m_HoldWorldVelocityZ;
+
+        m_Transform.x += m_VelocityX * deltaTime;
+        m_Transform.y += m_VelocityY * deltaTime;
+        m_Transform.z += m_VelocityZ * deltaTime;
+        return;
+    }
+
+    float forwardX, forwardY, forwardZ;
+    GetForwardVector(m_Transform.pitch, m_Transform.yaw, forwardX, forwardY, forwardZ);
+
+    float rightX, rightY, rightZ;
+    GetRightVector(m_Transform.yaw, rightX, rightY, rightZ);
+
+    float upX, upY, upZ;
+    GetUpVector(m_Transform.pitch, m_Transform.yaw, upX, upY, upZ);
+
+    m_VelocityX = forwardX * m_HoldLocalForward + rightX * m_HoldLocalRight + upX * m_HoldLocalUp;
+    m_VelocityY = forwardY * m_HoldLocalForward + rightY * m_HoldLocalRight + upY * m_HoldLocalUp;
+    m_VelocityZ = forwardZ * m_HoldLocalForward + rightZ * m_HoldLocalRight + upZ * m_HoldLocalUp;
+
+    m_Transform.x += m_VelocityX * deltaTime;
+    m_Transform.y += m_VelocityY * deltaTime;
+    m_Transform.z += m_VelocityZ * deltaTime;
 }
 
 void CFreecamController::UpdateMovement(const InputState& input, float deltaTime) {
