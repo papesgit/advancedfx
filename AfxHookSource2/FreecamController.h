@@ -33,6 +33,10 @@ struct FreecamConfig {
     float rollSpeed;
     float rollSmoothing;
     float leanStrength;
+    float leanAccelScale;
+    float leanVelocityScale;
+    float leanMaxAngle;
+    float leanHalfTime;
 
     // FOV
     float fovMin;
@@ -59,6 +63,10 @@ struct FreecamConfig {
         , rollSpeed(45.0f)
         , rollSmoothing(0.8f)
         , leanStrength(1.0f)
+        , leanAccelScale(0.0015f)
+        , leanVelocityScale(0.01f)
+        , leanMaxAngle(20.0f)
+        , leanHalfTime(0.18f)
         , fovMin(10.0f)
         , fovMax(150.0f)
         , fovStep(2.0f)
@@ -151,6 +159,7 @@ private:
     // Math helpers
     float Clamp(float value, float min, float max);
     float Lerp(float a, float b, float t);
+    float SmoothDamp(float current, float target, float& currentVelocity, float smoothTime, float deltaTime);
     void GetForwardVector(float pitch, float yaw, float& outX, float& outY, float& outZ);
     void GetRightVector(float yaw, float& outX, float& outY, float& outZ);
     void GetUpVector(float pitch, float yaw, float& outX, float& outY, float& outZ);
@@ -190,6 +199,11 @@ private:
     // Roll state
     float m_TargetRoll;
     float m_CurrentRoll;
+    float m_RollVelocity;
+    float m_LastLateralVelocity;
+    float m_LastSmoothedX;
+    float m_LastSmoothedY;
+    float m_LastSmoothedZ;
 
     // Player lock state
     bool m_LastKeyVDown;

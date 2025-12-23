@@ -48,7 +48,8 @@ CFreecamController::CFreecamController()
     , m_SpeedScalar(1.0f), m_SpeedDirty(false)
     , m_LastMouseButton4(false), m_LastMouseButton5(false)
     , m_MouseButton4Hold(0.0f), m_MouseButton5Hold(0.0f)
-    , m_TargetRoll(0), m_CurrentRoll(0)
+    , m_TargetRoll(0), m_CurrentRoll(0), m_RollVelocity(0.0f), m_LastLateralVelocity(0.0f)
+    , m_LastSmoothedX(0.0f), m_LastSmoothedY(0.0f), m_LastSmoothedZ(0.0f)
     , m_PlayerLockActive(false)
     , m_LastKeyVDown(false)
     , m_PlayerLockHandle(-1)
@@ -90,6 +91,11 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_HoldWorldVelocityY = 0;
         m_HoldWorldVelocityZ = 0;
         m_TargetRoll = m_CurrentRoll = 0;
+        m_RollVelocity = 0.0f;
+        m_LastLateralVelocity = 0.0f;
+        m_LastSmoothedX = 0.0f;
+        m_LastSmoothedY = 0.0f;
+        m_LastSmoothedZ = 0.0f;
         m_PlayerLockActive = false;
         m_LastKeyVDown = false;
         m_PlayerLockHandle = -1;
@@ -175,6 +181,11 @@ void CFreecamController::Reset(const CameraTransform& transform) {
     m_HoldWorldVelocityY = 0;
     m_HoldWorldVelocityZ = 0;
     m_TargetRoll = m_CurrentRoll = transform.roll;
+    m_RollVelocity = 0.0f;
+    m_LastLateralVelocity = 0.0f;
+    m_LastSmoothedX = m_SmoothedTransform.x;
+    m_LastSmoothedY = m_SmoothedTransform.y;
+    m_LastSmoothedZ = m_SmoothedTransform.z;
     m_CurrentHalfRot = m_Config.halfRot;
     m_PlayerLockReturnHalfRot = m_Config.halfRot;
     m_HalfRotTransitionActive = false;
@@ -219,7 +230,11 @@ void CFreecamController::Update(const InputState& input, float deltaTime) {
 
         if (m_bInputEnabled) {
             UpdateMovement(input, deltaTime);
-            UpdateRoll(input, deltaTime);
+        }
+
+        UpdateRoll(m_bInputEnabled ? input : InputState{}, deltaTime);
+
+        if (m_bInputEnabled) {
             UpdateFOV(input);
         }
     }
@@ -452,42 +467,68 @@ void CFreecamController::UpdateRoll(const InputState& input, float deltaTime) {
     // Dynamic roll (only when smoothing enabled)
     float dynamicRoll = 0;
     if (m_Config.smoothEnabled) {
-        // Yaw rate from mouse velocity
-        float yawRate = m_MouseVelocityX; // degrees/sec
+        const CameraTransform& view = m_Config.smoothEnabled ? m_SmoothedTransform : m_Transform;
 
-        // Get right vector for lateral speed calculation
+        float posBlend = (m_Config.halfVec > 0.0f)
+            ? 1.0f - expf((-logf(2.0f) * deltaTime) / m_Config.halfVec)
+            : 1.0f;
+
+        float smoothedX = Lerp(m_SmoothedTransform.x, m_Transform.x, posBlend);
+        float smoothedY = Lerp(m_SmoothedTransform.y, m_Transform.y, posBlend);
+        float smoothedZ = Lerp(m_SmoothedTransform.z, m_Transform.z, posBlend);
+
+        float velX = 0.0f;
+        float velY = 0.0f;
+        float velZ = 0.0f;
+        if (deltaTime > 0.0f) {
+            velX = (smoothedX - m_LastSmoothedX) / deltaTime;
+            velY = (smoothedY - m_LastSmoothedY) / deltaTime;
+            velZ = (smoothedZ - m_LastSmoothedZ) / deltaTime;
+        }
+
+        m_LastSmoothedX = smoothedX;
+        m_LastSmoothedY = smoothedY;
+        m_LastSmoothedZ = smoothedZ;
+
+        // Use smoothed orientation for lateral basis to match what the user sees.
         float rightX, rightY, rightZ;
-        GetRightVector(m_Transform.yaw, rightX, rightY, rightZ);
+        GetRightVector(view.yaw, rightX, rightY, rightZ);
 
-        // Lateral speed (projection of velocity onto right vector)
-        float lateralSpeed = m_VelocityX * rightX + m_VelocityY * rightY;
+        float lateralVelocity = velX * rightX + velY * rightY + velZ * rightZ;
+        float lateralAccel = 0.0f;
+        if (deltaTime > 0.0f) {
+            lateralAccel = (lateralVelocity - m_LastLateralVelocity) / deltaTime;
+        }
+        m_LastLateralVelocity = lateralVelocity;
 
-        // Total speed magnitude
-        float speedMag = sqrtf(m_VelocityX * m_VelocityX +
-                              m_VelocityY * m_VelocityY +
-                              m_VelocityZ * m_VelocityZ);
+        float rawLean = lateralAccel * m_Config.leanAccelScale +
+                        lateralVelocity * m_Config.leanVelocityScale;
+        rawLean *= m_Config.leanStrength;
 
-        // Calculate lean
-        const float maxLeanSpeed = 1000.0f; // units/s for full lean
-        const float maxLeanDeg = 30.0f;
-
-        float speedFactor = Clamp(speedMag / maxLeanSpeed, 0.0f, 1.0f);
-        float lateralFactor = Clamp(lateralSpeed / maxLeanSpeed, -1.0f, 1.0f);
-
-        float moveLean = lateralFactor * maxLeanDeg * speedFactor;
-
-        // Require higher yaw speed for full lean by reducing yaw sensitivity
-        float yawLean = Clamp(yawRate * 0.04f, -maxLeanDeg, maxLeanDeg);
-
-        float combined = (moveLean + yawLean) * m_Config.leanStrength;
-        dynamicRoll = Clamp(combined, -maxLeanDeg, maxLeanDeg);
+        if (m_Config.leanMaxAngle > 0.0f) {
+            float curved = std::tanh(rawLean / m_Config.leanMaxAngle);
+            dynamicRoll = curved * m_Config.leanMaxAngle;
+        }
+    } else {
+        m_LastLateralVelocity = 0.0f;
+        m_LastSmoothedX = m_Transform.x;
+        m_LastSmoothedY = m_Transform.y;
+        m_LastSmoothedZ = m_Transform.z;
     }
 
     // Combine manual and dynamic roll
     float combinedRoll = m_TargetRoll + dynamicRoll;
 
     // Apply roll smoothing
-    m_CurrentRoll = Lerp(m_CurrentRoll, combinedRoll, 1.0f - m_Config.rollSmoothing);
+    if (m_Config.smoothEnabled && m_Config.leanHalfTime > 0.0f) {
+        m_CurrentRoll = SmoothDamp(m_CurrentRoll, combinedRoll, m_RollVelocity, m_Config.leanHalfTime, deltaTime);
+    } else if (m_Config.smoothEnabled) {
+        m_CurrentRoll = combinedRoll;
+        m_RollVelocity = 0.0f;
+    } else {
+        m_CurrentRoll = Lerp(m_CurrentRoll, combinedRoll, 1.0f - m_Config.rollSmoothing);
+        m_RollVelocity = 0.0f;
+    }
     m_Transform.roll = m_CurrentRoll;
 }
 
@@ -791,6 +832,22 @@ float CFreecamController::Clamp(float value, float min, float max) {
 
 float CFreecamController::Lerp(float a, float b, float t) {
     return a + (b - a) * t;
+}
+
+float CFreecamController::SmoothDamp(float current, float target, float& currentVelocity, float smoothTime, float deltaTime) {
+    if (smoothTime <= 0.0f || deltaTime <= 0.0f) {
+        currentVelocity = 0.0f;
+        return target;
+    }
+
+    float omega = 2.0f / smoothTime;
+    float x = omega * deltaTime;
+    float exp = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x);
+
+    float change = current - target;
+    float temp = (currentVelocity + omega * change) * deltaTime;
+    currentVelocity = (currentVelocity - omega * temp) * exp;
+    return target + (change + temp) * exp;
 }
 
 void CFreecamController::GetForwardVector(float pitch, float yaw, float& outX, float& outY, float& outZ) {

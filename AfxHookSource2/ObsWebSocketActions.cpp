@@ -60,6 +60,10 @@ namespace {
 		if (delta.hasRollSpeed) config.rollSpeed = delta.rollSpeed;
 		if (delta.hasRollSmoothing) config.rollSmoothing = delta.rollSmoothing;
 		if (delta.hasLeanStrength) config.leanStrength = delta.leanStrength;
+		if (delta.hasLeanAccelScale) config.leanAccelScale = delta.leanAccelScale;
+		if (delta.hasLeanVelocityScale) config.leanVelocityScale = delta.leanVelocityScale;
+		if (delta.hasLeanMaxAngle) config.leanMaxAngle = delta.leanMaxAngle;
+		if (delta.hasLeanHalfTime) config.leanHalfTime = delta.leanHalfTime;
 		if (delta.hasFovMin) config.fovMin = delta.fovMin;
 		if (delta.hasFovMax) config.fovMax = delta.fovMax;
 		if (delta.hasFovStep) config.fovStep = delta.fovStep;

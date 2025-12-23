@@ -129,6 +129,30 @@ namespace {
 			message += "leanStrength=" + std::to_string(delta.leanStrength) + " ";
 			updated = true;
 		}
+		if (args.contains("leanAccelScale")) {
+			delta.hasLeanAccelScale = true;
+			delta.leanAccelScale = args["leanAccelScale"].get<float>();
+			message += "leanAccelScale=" + std::to_string(delta.leanAccelScale) + " ";
+			updated = true;
+		}
+		if (args.contains("leanVelocityScale")) {
+			delta.hasLeanVelocityScale = true;
+			delta.leanVelocityScale = args["leanVelocityScale"].get<float>();
+			message += "leanVelocityScale=" + std::to_string(delta.leanVelocityScale) + " ";
+			updated = true;
+		}
+		if (args.contains("leanMaxAngle")) {
+			delta.hasLeanMaxAngle = true;
+			delta.leanMaxAngle = args["leanMaxAngle"].get<float>();
+			message += "leanMaxAngle=" + std::to_string(delta.leanMaxAngle) + " ";
+			updated = true;
+		}
+		if (args.contains("leanHalfTime")) {
+			delta.hasLeanHalfTime = true;
+			delta.leanHalfTime = args["leanHalfTime"].get<float>();
+			message += "leanHalfTime=" + std::to_string(delta.leanHalfTime) + " ";
+			updated = true;
+		}
 
 		if (args.contains("fovMin")) {
 			delta.hasFovMin = true;

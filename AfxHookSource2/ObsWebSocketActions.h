@@ -28,6 +28,14 @@ struct FreecamConfigDelta {
 	float rollSmoothing = 0.0f;
 	bool hasLeanStrength = false;
 	float leanStrength = 0.0f;
+	bool hasLeanAccelScale = false;
+	float leanAccelScale = 0.0f;
+	bool hasLeanVelocityScale = false;
+	float leanVelocityScale = 0.0f;
+	bool hasLeanMaxAngle = false;
+	float leanMaxAngle = 0.0f;
+	bool hasLeanHalfTime = false;
+	float leanHalfTime = 0.0f;
 
 	bool hasFovMin = false;
 	float fovMin = 0.0f;
