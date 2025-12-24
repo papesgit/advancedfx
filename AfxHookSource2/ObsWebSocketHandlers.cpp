@@ -153,6 +153,12 @@ namespace {
 			message += "leanHalfTime=" + std::to_string(delta.leanHalfTime) + " ";
 			updated = true;
 		}
+		if (args.contains("clampPitch")) {
+			delta.hasClampPitch = true;
+			delta.clampPitch = args["clampPitch"].get<bool>();
+			message += "clampPitch=" + std::string(delta.clampPitch ? "true" : "false") + " ";
+			updated = true;
+		}
 
 		if (args.contains("fovMin")) {
 			delta.hasFovMin = true;

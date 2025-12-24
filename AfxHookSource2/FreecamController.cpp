@@ -265,8 +265,9 @@ void CFreecamController::UpdateMouseLook(const InputState& input, float deltaTim
         m_MouseVelocityY = deltaPitch / deltaTime;
     }
 
-    // Clamp pitch
-    m_Transform.pitch = Clamp(m_Transform.pitch, -89.0f, 89.0f);
+    if (m_Config.clampPitch) {
+        m_Transform.pitch = Clamp(m_Transform.pitch, -89.0f, 89.0f);
+    }
 
     // Wrap yaw to [-180, 180]
     while (m_Transform.yaw > 180.0f) m_Transform.yaw -= 360.0f;
@@ -307,8 +308,9 @@ void CFreecamController::ApplyHoldRotation(float deltaTime) {
         m_MouseVelocityY = deltaPitch / deltaTime;
     }
 
-    // Clamp pitch
-    m_Transform.pitch = Clamp(m_Transform.pitch, -89.0f, 89.0f);
+    if (m_Config.clampPitch) {
+        m_Transform.pitch = Clamp(m_Transform.pitch, -89.0f, 89.0f);
+    }
 
     // Wrap yaw to [-180, 180]
     while (m_Transform.yaw > 180.0f) m_Transform.yaw -= 360.0f;
@@ -842,7 +844,7 @@ void CFreecamController::ApplyLockAngles(float targetX, float targetY, float tar
     while (yaw > 180.0f) yaw -= 360.0f;
     while (yaw < -180.0f) yaw += 360.0f;
 
-    m_Transform.pitch = Clamp(pitch, -89.0f, 89.0f);
+    m_Transform.pitch = m_Config.clampPitch ? Clamp(pitch, -89.0f, 89.0f) : pitch;
     m_Transform.yaw = yaw;
 }
 

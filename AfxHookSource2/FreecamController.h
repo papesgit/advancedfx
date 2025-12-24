@@ -37,6 +37,7 @@ struct FreecamConfig {
     float leanVelocityScale;
     float leanMaxAngle;
     float leanHalfTime;
+    bool clampPitch;
 
     // FOV
     float fovMin;
@@ -67,6 +68,7 @@ struct FreecamConfig {
         , leanVelocityScale(0.01f)
         , leanMaxAngle(20.0f)
         , leanHalfTime(0.18f)
+        , clampPitch(false)
         , fovMin(10.0f)
         , fovMax(150.0f)
         , fovStep(2.0f)

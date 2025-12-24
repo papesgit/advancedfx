@@ -64,6 +64,7 @@ namespace {
 		if (delta.hasLeanVelocityScale) config.leanVelocityScale = delta.leanVelocityScale;
 		if (delta.hasLeanMaxAngle) config.leanMaxAngle = delta.leanMaxAngle;
 		if (delta.hasLeanHalfTime) config.leanHalfTime = delta.leanHalfTime;
+		if (delta.hasClampPitch) config.clampPitch = delta.clampPitch;
 		if (delta.hasFovMin) config.fovMin = delta.fovMin;
 		if (delta.hasFovMax) config.fovMax = delta.fovMax;
 		if (delta.hasFovStep) config.fovStep = delta.fovStep;

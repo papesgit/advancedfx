@@ -36,6 +36,8 @@ struct FreecamConfigDelta {
 	float leanMaxAngle = 0.0f;
 	bool hasLeanHalfTime = false;
 	float leanHalfTime = 0.0f;
+	bool hasClampPitch = false;
+	bool clampPitch = false;
 
 	bool hasFovMin = false;
 	float fovMin = 0.0f;
