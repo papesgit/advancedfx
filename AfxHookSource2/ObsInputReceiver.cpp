@@ -119,7 +119,7 @@ float CObsInputReceiver::GetPacketLoss() const {
 }
 
 void CObsInputReceiver::ReceiveThread() {
-    InputPacket packet;
+    std::array<uint8_t, sizeof(InputPacketV2)> buffer{};
     sockaddr_in fromAddr;
     int fromLen = sizeof(fromAddr);
 
@@ -129,17 +129,28 @@ void CObsInputReceiver::ReceiveThread() {
     while (m_bActive) {
         int bytesRead = recvfrom(
             m_Socket,
-            (char*)&packet,
-            sizeof(packet),
+            (char*)buffer.data(),
+            (int)buffer.size(),
             0,
             (sockaddr*)&fromAddr,
             &fromLen
         );
 
-        if (bytesRead == sizeof(InputPacket)) {
+        if (bytesRead == sizeof(InputPacketV1) || bytesRead == sizeof(InputPacketV2)) {
             // Decode packet
             InputState packetState;
-            DecodePacket(packet, packetState);
+            uint32_t seq = 0;
+            if (bytesRead == sizeof(InputPacketV2)) {
+                InputPacketV2 packetV2{};
+                std::memcpy(&packetV2, buffer.data(), sizeof(packetV2));
+                DecodePacket(packetV2, packetState);
+                seq = packetV2.base.sequence;
+            } else {
+                InputPacketV1 packetV1{};
+                std::memcpy(&packetV1, buffer.data(), sizeof(packetV1));
+                DecodePacket(packetV1, packetState);
+                seq = packetV1.sequence;
+            }
 
             // Accumulate mouse deltas and update key/button state
             {
@@ -160,6 +171,12 @@ void CObsInputReceiver::ReceiveThread() {
                 // Latest key state bitmap
                 m_CurrentState.keyBitmap = packetState.keyBitmap;
 
+                m_CurrentState.analogEnabled = packetState.analogEnabled;
+                m_CurrentState.analogLX = packetState.analogLX;
+                m_CurrentState.analogLY = packetState.analogLY;
+                m_CurrentState.analogRY = packetState.analogRY;
+                m_CurrentState.analogRX = packetState.analogRX;
+
                 m_CurrentState.timestamp = packetState.timestamp;
             }
             m_bNewData = true;
@@ -173,8 +190,8 @@ void CObsInputReceiver::ReceiveThread() {
                 };
 
                 advancedfx::Message(
-                    "mirv_udpdebug: seq=%u dx=%d dy=%d wheel=%d buttons=L%sR%sM%sX1%sX2%s keys=W%sA%sS%sD%sSpace%sCtrl%sShift%sQ%sE%s1%s2%s3%s4%s5%s6%s7%s8%s9%s0%s\n",
-                    packet.sequence,
+                    "mirv_udpdebug: seq=%u dx=%d dy=%d wheel=%d buttons=L%sR%sM%sX1%sX2%s keys=W%sA%sS%sD%sSpace%sCtrl%sShift%sQ%sE%s1%s2%s3%s4%s5%s6%s7%s8%s9%s0%s analog=%s lx=%.3f ly=%.3f ry=%.3f rx=%.3f\n",
+                    seq,
                     (int)packetState.mouseDx,
                     (int)packetState.mouseDy,
                     (int)packetState.mouseWheel,
@@ -201,20 +218,25 @@ void CObsInputReceiver::ReceiveThread() {
                     keyDown('7'),
                     keyDown('8'),
                     keyDown('9'),
-                    keyDown('0')
+                    keyDown('0'),
+                    packetState.analogEnabled ? "1" : "0",
+                    packetState.analogLX,
+                    packetState.analogLY,
+                    packetState.analogRY,
+                    packetState.analogRX
                 );
             }
 
             // Track packet loss
             if (m_LastSequence != 0) {
                 uint32_t expected = m_LastSequence + 1;
-                if (packet.sequence != expected) {
+                if (seq != expected) {
                     // Packet loss detected
-                    uint32_t lost = packet.sequence - expected;
+                    uint32_t lost = seq - expected;
                     m_PacketLossCount += lost;
                 }
             }
-            m_LastSequence = packet.sequence;
+            m_LastSequence = seq;
             m_TotalPackets++;
 
             // Update packets per second
@@ -235,7 +257,7 @@ void CObsInputReceiver::ReceiveThread() {
     }
 }
 
-void CObsInputReceiver::DecodePacket(const InputPacket& packet, InputState& state) {
+void CObsInputReceiver::DecodePacket(const InputPacketV1& packet, InputState& state) {
     state.mouseDx = packet.mouseDx;
     state.mouseDy = packet.mouseDy;
     state.mouseWheel = packet.mouseWheel;
@@ -255,4 +277,28 @@ void CObsInputReceiver::DecodePacket(const InputPacket& packet, InputState& stat
     );
 
     state.timestamp = packet.timestamp;
+    state.analogEnabled = false;
+    state.analogLX = 0.0f;
+    state.analogLY = 0.0f;
+    state.analogRY = 0.0f;
+    state.analogRX = 0.0f;
+}
+
+void CObsInputReceiver::DecodePacket(const InputPacketV2& packet, InputState& state) {
+    DecodePacket(packet.base, state);
+
+    if (packet.version != 2) {
+        state.analogEnabled = false;
+        state.analogLX = 0.0f;
+        state.analogLY = 0.0f;
+        state.analogRY = 0.0f;
+        state.analogRX = 0.0f;
+        return;
+    }
+
+    state.analogEnabled = (packet.flags & 0x01) != 0;
+    state.analogLX = packet.analogLX;
+    state.analogLY = packet.analogLY;
+    state.analogRY = packet.analogRY;
+    state.analogRX = packet.analogRX;
 }

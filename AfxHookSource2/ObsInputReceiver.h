@@ -10,9 +10,9 @@
 #include <array>
 #include <initializer_list>
 
-/// Binary input packet format (50 bytes) for ultra-low latency
+/// Binary input packet v1 format (50 bytes) for ultra-low latency
 #pragma pack(push, 1)
-struct InputPacket {
+struct InputPacketV1 {
     uint32_t sequence;      // Packet sequence number
     int16_t mouseDx;        // Mouse delta X
     int16_t mouseDy;        // Mouse delta Y
@@ -20,6 +20,18 @@ struct InputPacket {
     uint8_t mouseButtons;   // Button flags (L=1, R=2, M=4, X1=8, X2=16)
     uint8_t keyBitmap[32];  // 256-bit virtual-key bitmap (VK code -> bit)
     uint64_t timestamp;     // Microsecond timestamp
+};
+
+/// Binary input packet v2 format (versioned, includes analog axes)
+struct InputPacketV2 {
+    uint8_t version;       // Packet version (2)
+    uint8_t flags;         // bit0 = analog enabled
+    uint16_t reserved;     // alignment
+    InputPacketV1 base;
+    float analogLX;        // Left stick X [-1, 1]
+    float analogLY;        // Left stick Y [-1, 1]
+    float analogRY;        // Right stick Y [-1, 1]
+    float analogRX;        // Right stick X [-1, 1] (sprint)
 };
 #pragma pack(pop)
 
@@ -35,6 +47,11 @@ struct InputState {
     bool mouseMiddle;
     bool mouseButton4;
     bool mouseButton5;
+    bool analogEnabled;
+    float analogLX;
+    float analogLY;
+    float analogRY;
+    float analogRX;
 
     std::array<uint8_t, kKeyBitmapSize> keyBitmap;
     uint64_t timestamp;
@@ -45,6 +62,11 @@ struct InputState {
         , mouseButton4(false), mouseButton5(false)
         , keyBitmap{}
         , timestamp(0)
+        , analogEnabled(false)
+        , analogLX(0.0f)
+        , analogLY(0.0f)
+        , analogRY(0.0f)
+        , analogRX(0.0f)
     {}
 
     bool IsKeyDown(uint8_t virtualKey) const {
@@ -101,7 +123,8 @@ public:
 
 private:
     void ReceiveThread();
-    void DecodePacket(const InputPacket& packet, InputState& state);
+    void DecodePacket(const InputPacketV1& packet, InputState& state);
+    void DecodePacket(const InputPacketV2& packet, InputState& state);
 
     std::atomic<bool> m_bActive;
     SOCKET m_Socket;

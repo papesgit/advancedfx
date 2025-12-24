@@ -363,12 +363,17 @@ void CFreecamController::ApplyHoldMovement(float deltaTime) {
 void CFreecamController::UpdateMovement(const InputState& input, float deltaTime) {
     // Calculate movement speed
     float moveSpeed = GetCurrentMoveSpeed();
-    if (IsShiftDown(input)) {
-        moveSpeed *= m_Config.sprintMultiplier;
-    }
-
     float verticalSpeed = GetCurrentVerticalSpeed();
-    if (IsShiftDown(input)) {
+    if (input.analogEnabled) {
+        float sprintInput = Clamp(input.analogRX, 0.0f, 1.0f);
+        if (sprintInput <= 0.0f && IsShiftDown(input)) {
+            sprintInput = 1.0f;
+        }
+        float sprintFactor = 1.0f + sprintInput * (m_Config.sprintMultiplier - 1.0f);
+        moveSpeed *= sprintFactor;
+        verticalSpeed *= sprintFactor;
+    } else if (IsShiftDown(input)) {
+        moveSpeed *= m_Config.sprintMultiplier;
         verticalSpeed *= m_Config.sprintMultiplier;
     }
 
@@ -385,38 +390,55 @@ void CFreecamController::UpdateMovement(const InputState& input, float deltaTime
     // Calculate desired velocity
     float desiredVelX = 0, desiredVelY = 0, desiredVelZ = 0;
 
-    // Forward/backward (W/S)
-    if (input.IsKeyDown('W')) {
-        desiredVelX += forwardX * moveSpeed;
-        desiredVelY += forwardY * moveSpeed;
-        desiredVelZ += forwardZ * moveSpeed;
-    }
-    if (input.IsKeyDown('S')) {
-        desiredVelX -= forwardX * moveSpeed;
-        desiredVelY -= forwardY * moveSpeed;
-        desiredVelZ -= forwardZ * moveSpeed;
-    }
+    if (input.analogEnabled) {
+        float analogX = Clamp(input.analogLX, -1.0f, 1.0f);
+        float analogY = Clamp(input.analogLY, -1.0f, 1.0f);
+        float analogZ = Clamp(input.analogRY, -1.0f, 1.0f);
 
-    // Strafe (A/D)
-    if (input.IsKeyDown('A')) {
-        desiredVelX -= rightX * moveSpeed;
-        desiredVelY -= rightY * moveSpeed;
-    }
-    if (input.IsKeyDown('D')) {
-        desiredVelX += rightX * moveSpeed;
-        desiredVelY += rightY * moveSpeed;
-    }
+        desiredVelX += forwardX * (moveSpeed * analogY);
+        desiredVelY += forwardY * (moveSpeed * analogY);
+        desiredVelZ += forwardZ * (moveSpeed * analogY);
 
-    // Vertical (Space/Ctrl)
-    if (input.IsKeyDown(' ')) {
-        desiredVelX += upX * verticalSpeed;
-        desiredVelY += upY * verticalSpeed;
-        desiredVelZ += upZ * verticalSpeed;
-    }
-    if (IsCtrlDown(input)) {
-        desiredVelX -= upX * verticalSpeed;
-        desiredVelY -= upY * verticalSpeed;
-        desiredVelZ -= upZ * verticalSpeed;
+        desiredVelX += rightX * (moveSpeed * analogX);
+        desiredVelY += rightY * (moveSpeed * analogX);
+
+        desiredVelX += upX * (verticalSpeed * analogZ);
+        desiredVelY += upY * (verticalSpeed * analogZ);
+        desiredVelZ += upZ * (verticalSpeed * analogZ);
+    } else {
+        // Forward/backward (W/S)
+        if (input.IsKeyDown('W')) {
+            desiredVelX += forwardX * moveSpeed;
+            desiredVelY += forwardY * moveSpeed;
+            desiredVelZ += forwardZ * moveSpeed;
+        }
+        if (input.IsKeyDown('S')) {
+            desiredVelX -= forwardX * moveSpeed;
+            desiredVelY -= forwardY * moveSpeed;
+            desiredVelZ -= forwardZ * moveSpeed;
+        }
+
+        // Strafe (A/D)
+        if (input.IsKeyDown('A')) {
+            desiredVelX -= rightX * moveSpeed;
+            desiredVelY -= rightY * moveSpeed;
+        }
+        if (input.IsKeyDown('D')) {
+            desiredVelX += rightX * moveSpeed;
+            desiredVelY += rightY * moveSpeed;
+        }
+
+        // Vertical (Space/Ctrl)
+        if (input.IsKeyDown(' ')) {
+            desiredVelX += upX * verticalSpeed;
+            desiredVelY += upY * verticalSpeed;
+            desiredVelZ += upZ * verticalSpeed;
+        }
+        if (IsCtrlDown(input)) {
+            desiredVelX -= upX * verticalSpeed;
+            desiredVelY -= upY * verticalSpeed;
+            desiredVelZ -= upZ * verticalSpeed;
+        }
     }
 
     // Normalize diagonal movement to prevent faster speed
@@ -426,7 +448,7 @@ void CFreecamController::UpdateMovement(const InputState& input, float deltaTime
 
     // Determine max speed based on what keys are pressed
     float maxSpeed = moveSpeed;
-    if (input.IsKeyDown(' ') || IsCtrlDown(input)) {
+    if ((input.analogEnabled && fabsf(input.analogRY) > 0.0001f) || (!input.analogEnabled && (input.IsKeyDown(' ') || IsCtrlDown(input)))) {
         // If vertical movement, use the larger of the two speeds
         maxSpeed = (verticalSpeed > moveSpeed) ? verticalSpeed : moveSpeed;
     }
