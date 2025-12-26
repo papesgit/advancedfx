@@ -50,6 +50,10 @@ CFreecamController::CFreecamController()
     , m_MouseButton4Hold(0.0f), m_MouseButton5Hold(0.0f)
     , m_TargetRoll(0), m_CurrentRoll(0), m_RollVelocity(0.0f), m_LastLateralVelocity(0.0f)
     , m_LastSmoothedX(0.0f), m_LastSmoothedY(0.0f), m_LastSmoothedZ(0.0f)
+    , m_RawQuat(1.0, 0.0, 0.0, 0.0)
+    , m_SmoothedQuat(1.0, 0.0, 0.0, 0.0)
+    , m_RotVelocity(0.0, 0.0, 0.0)
+    , m_HoldRotVelocity(0.0, 0.0, 0.0)
     , m_PlayerLockActive(false)
     , m_LastKeyVDown(false)
     , m_PlayerLockHandle(-1)
@@ -96,6 +100,10 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_LastSmoothedX = 0.0f;
         m_LastSmoothedY = 0.0f;
         m_LastSmoothedZ = 0.0f;
+        m_RawQuat = BuildQuat(m_Transform);
+        m_SmoothedQuat = m_RawQuat;
+        m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
+        m_HoldRotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
         m_PlayerLockActive = false;
         m_LastKeyVDown = false;
         m_PlayerLockHandle = -1;
@@ -170,6 +178,10 @@ void CFreecamController::SetHoldMovementMode(HoldMovementMode mode) {
 void CFreecamController::Reset(const CameraTransform& transform) {
     m_Transform = transform;
     m_SmoothedTransform = transform;
+    m_RawQuat = BuildQuat(transform);
+    m_SmoothedQuat = m_RawQuat;
+    m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
+    m_HoldRotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
     m_VelocityX = m_VelocityY = m_VelocityZ = 0;
     m_MouseVelocityX = m_MouseVelocityY = 0;
     m_HoldYawVelocity = 0;
@@ -196,6 +208,8 @@ void CFreecamController::Reset(const CameraTransform& transform) {
 
 void CFreecamController::SetSmoothedTransform(const CameraTransform& transform) {
     m_SmoothedTransform = transform;
+    m_SmoothedQuat = BuildQuat(transform);
+    m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
     m_bInitialized = true;
 }
 
@@ -239,11 +253,15 @@ void CFreecamController::Update(const InputState& input, float deltaTime) {
         }
     }
 
+    m_RawQuat = BuildQuat(m_Transform);
+
     // Always apply smoothing (even when input is disabled) to maintain camera position
     if (m_Config.smoothEnabled) {
         ApplySmoothing(deltaTime);
     } else {
         m_SmoothedTransform = m_Transform;
+        m_SmoothedQuat = m_RawQuat;
+        m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
     }
 }
 
@@ -268,53 +286,29 @@ void CFreecamController::UpdateMouseLook(const InputState& input, float deltaTim
     if (m_Config.clampPitch) {
         m_Transform.pitch = Clamp(m_Transform.pitch, -89.0f, 89.0f);
     }
-
-    // Wrap yaw to [-180, 180]
-    while (m_Transform.yaw > 180.0f) m_Transform.yaw -= 360.0f;
-    while (m_Transform.yaw < -180.0f) m_Transform.yaw += 360.0f;
 }
 
 void CFreecamController::ComputeHoldAngularVelocity() {
     m_HoldYawVelocity = 0.0f;
     m_HoldPitchVelocity = 0.0f;
+    m_HoldRotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
 
-    if (!m_Config.smoothEnabled || m_CurrentHalfRot <= 0.0f) {
+    if (m_Config.smoothEnabled) {
+        m_HoldRotVelocity = m_RotVelocity;
         return;
     }
 
-    float targetYaw = m_Transform.yaw;
-    float currentYaw = m_SmoothedTransform.yaw;
-    while (targetYaw - currentYaw > 180.0f) targetYaw -= 360.0f;
-    while (targetYaw - currentYaw < -180.0f) targetYaw += 360.0f;
-
-    float deltaYaw = targetYaw - currentYaw;
-    float deltaPitch = m_Transform.pitch - m_SmoothedTransform.pitch;
-
-    const float rate = logf(2.0f) / m_CurrentHalfRot;
-    m_HoldYawVelocity = deltaYaw * rate;
-    m_HoldPitchVelocity = deltaPitch * rate;
+    m_HoldRotVelocity = GetWorldAngularVelocity(m_MouseVelocityX, m_MouseVelocityY, 0.0f, m_Transform);
 }
 
 void CFreecamController::ApplyHoldRotation(float deltaTime) {
-    float deltaYaw = m_HoldYawVelocity * deltaTime;
-    float deltaPitch = m_HoldPitchVelocity * deltaTime;
-
-    m_Transform.yaw += deltaYaw;
-    m_Transform.pitch += deltaPitch;
-
-    // Store velocities for roll calculation
-    if (deltaTime > 0) {
-        m_MouseVelocityX = deltaYaw / deltaTime;
-        m_MouseVelocityY = deltaPitch / deltaTime;
-    }
+    m_RawQuat = IntegrateQuat(m_RawQuat, m_HoldRotVelocity, deltaTime);
+    UpdateAnglesFromQuat(m_RawQuat, m_Transform, m_Transform);
 
     if (m_Config.clampPitch) {
         m_Transform.pitch = Clamp(m_Transform.pitch, -89.0f, 89.0f);
+        m_RawQuat = BuildQuat(m_Transform);
     }
-
-    // Wrap yaw to [-180, 180]
-    while (m_Transform.yaw > 180.0f) m_Transform.yaw -= 360.0f;
-    while (m_Transform.yaw < -180.0f) m_Transform.yaw += 360.0f;
 }
 
 void CFreecamController::ComputeHoldMovementBasis() {
@@ -643,9 +637,6 @@ void CFreecamController::ApplySmoothing(float deltaTime) {
     float posBlend = (m_Config.halfVec > 0) ?
         1.0f - expf((-logf(2.0f) * deltaTime) / m_Config.halfVec) : 1.0f;
 
-    float rotBlend = (m_CurrentHalfRot > 0) ?
-        1.0f - expf((-logf(2.0f) * deltaTime) / m_CurrentHalfRot) : 1.0f;
-
     float fovBlend = (m_Config.halfFov > 0) ?
         1.0f - expf((-logf(2.0f) * deltaTime) / m_Config.halfFov) : 1.0f;
 
@@ -654,17 +645,37 @@ void CFreecamController::ApplySmoothing(float deltaTime) {
     m_SmoothedTransform.y = Lerp(m_SmoothedTransform.y, m_Transform.y, posBlend);
     m_SmoothedTransform.z = Lerp(m_SmoothedTransform.z, m_Transform.z, posBlend);
 
-    // Rotation smoothing (handle yaw wrap)
-    float targetYaw = m_Transform.yaw;
-    float currentYaw = m_SmoothedTransform.yaw;
+    // Rotation smoothing (critically damped 2nd-order)
+    Afx::Math::Quaternion targetQuat = m_RawQuat;
+    if (m_CurrentHalfRot > 0.0f) {
+        const double omega = log(2.0) / m_CurrentHalfRot;
+        const double damping = 1.0;
 
-    // Wrap yaw to avoid long way around
-    while (targetYaw - currentYaw > 180.0f) targetYaw -= 360.0f;
-    while (targetYaw - currentYaw < -180.0f) targetYaw += 360.0f;
+        Afx::Math::Quaternion qErr = targetQuat * m_SmoothedQuat.Conjugate();
+        if (qErr.W < 0.0) {
+            qErr = Afx::Math::Quaternion(-qErr.W, -qErr.X, -qErr.Y, -qErr.Z);
+        }
 
-    m_SmoothedTransform.pitch = Lerp(m_SmoothedTransform.pitch, m_Transform.pitch, rotBlend);
-    m_SmoothedTransform.yaw = Lerp(currentYaw, targetYaw, rotBlend);
-    m_SmoothedTransform.roll = Lerp(m_SmoothedTransform.roll, m_Transform.roll, rotBlend);
+        double w = qErr.W;
+        w = (std::max)(-1.0, (std::min)(1.0, w));
+        double angle = 2.0 * acos(w);
+        double sinHalf = sqrt((std::max)(0.0, 1.0 - w * w));
+        Afx::Math::Vector3 axis = sinHalf < 1e-6
+            ? Afx::Math::Vector3(1.0, 0.0, 0.0)
+            : Afx::Math::Vector3(qErr.X / sinHalf, qErr.Y / sinHalf, qErr.Z / sinHalf);
+
+        Afx::Math::Vector3 error = axis * angle;
+        Afx::Math::Vector3 wdot =
+            (omega * omega) * error -
+            (2.0 * damping * omega) * m_RotVelocity;
+        m_RotVelocity += wdot * deltaTime;
+        m_SmoothedQuat = IntegrateQuat(m_SmoothedQuat, m_RotVelocity, deltaTime);
+    } else {
+        m_SmoothedQuat = targetQuat;
+        m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
+    }
+
+    UpdateAnglesFromQuat(m_SmoothedQuat, m_SmoothedTransform, m_SmoothedTransform);
 
     // FOV smoothing
     m_SmoothedTransform.fov = Lerp(m_SmoothedTransform.fov, m_Transform.fov, fovBlend);
@@ -874,7 +885,60 @@ float CFreecamController::SmoothDamp(float current, float target, float& current
     return target + (change + temp) * exp;
 }
 
-void CFreecamController::GetForwardVector(float pitch, float yaw, float& outX, float& outY, float& outZ) {
+Afx::Math::Quaternion CFreecamController::BuildQuat(const CameraTransform& transform) const {
+    Afx::Math::QEulerAngles euler(transform.pitch, transform.yaw, transform.roll);
+    Afx::Math::QREulerAngles qr = Afx::Math::QREulerAngles::FromQEulerAngles(euler);
+    return Afx::Math::Quaternion::FromQREulerAngles(qr).Normalized();
+}
+
+void CFreecamController::UpdateAnglesFromQuat(const Afx::Math::Quaternion& q, CameraTransform& out, const CameraTransform& hint) const {
+    Afx::Math::QEulerAngles angles = q.ToQREulerAngles().ToQEulerAngles();
+    auto normalizeNear = [](float value, float target) {
+        float delta = target - value;
+        float turns = roundf(delta / 360.0f);
+        return value + turns * 360.0f;
+    };
+
+    out.pitch = normalizeNear((float)angles.Pitch, hint.pitch);
+    out.yaw = normalizeNear((float)angles.Yaw, hint.yaw);
+    out.roll = normalizeNear((float)angles.Roll, hint.roll);
+}
+
+Afx::Math::Vector3 CFreecamController::GetWorldAngularVelocity(float yawRateDeg, float pitchRateDeg, float rollRateDeg, const CameraTransform& transform) const {
+    float forwardX, forwardY, forwardZ;
+    GetForwardVector(transform.pitch, transform.yaw, forwardX, forwardY, forwardZ);
+    float rightX, rightY, rightZ;
+    GetRightVector(transform.yaw, rightX, rightY, rightZ);
+    float upX, upY, upZ;
+    GetUpVector(transform.pitch, transform.yaw, upX, upY, upZ);
+
+    const double degToRad = M_PI / 180.0;
+    const double yawRate = yawRateDeg * degToRad;
+    const double pitchRate = pitchRateDeg * degToRad;
+    const double rollRate = rollRateDeg * degToRad;
+
+    return Afx::Math::Vector3(
+        upX * yawRate + rightX * pitchRate + forwardX * rollRate,
+        upY * yawRate + rightY * pitchRate + forwardY * rollRate,
+        upZ * yawRate + rightZ * pitchRate + forwardZ * rollRate
+    );
+}
+
+Afx::Math::Quaternion CFreecamController::IntegrateQuat(const Afx::Math::Quaternion& q, const Afx::Math::Vector3& angularVelocity, float deltaTime) const {
+    double speed = angularVelocity.Length();
+    if (speed <= 1e-8 || deltaTime <= 0.0f) {
+        return q;
+    }
+
+    double angle = speed * deltaTime;
+    double half = 0.5 * angle;
+    double sinHalf = sin(half);
+    Afx::Math::Vector3 axis = (1.0 / speed) * angularVelocity;
+    Afx::Math::Quaternion dq(cos(half), axis.X * sinHalf, axis.Y * sinHalf, axis.Z * sinHalf);
+    return (dq * q).Normalized();
+}
+
+void CFreecamController::GetForwardVector(float pitch, float yaw, float& outX, float& outY, float& outZ) const {
     float pitchRad = pitch * (M_PI / 180.0f);
     float yawRad = yaw * (M_PI / 180.0f);
 
@@ -883,7 +947,7 @@ void CFreecamController::GetForwardVector(float pitch, float yaw, float& outX, f
     outZ = -sinf(pitchRad);
 }
 
-void CFreecamController::GetRightVector(float yaw, float& outX, float& outY, float& outZ) {
+void CFreecamController::GetRightVector(float yaw, float& outX, float& outY, float& outZ) const {
     float yawRad = yaw * (M_PI / 180.0f);
 
     outX = sinf(yawRad);
@@ -891,7 +955,7 @@ void CFreecamController::GetRightVector(float yaw, float& outX, float& outY, flo
     outZ = 0;
 }
 
-void CFreecamController::GetUpVector(float pitch, float yaw, float& outX, float& outY, float& outZ) {
+void CFreecamController::GetUpVector(float pitch, float yaw, float& outX, float& outY, float& outZ) const {
     float pitchRad = pitch * (M_PI / 180.0f);
     float yawRad = yaw * (M_PI / 180.0f);
 

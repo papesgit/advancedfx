@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ObsInputReceiver.h"
+#include "../shared/AfxMath.h"
 #include <chrono>
 
 /// Camera transform for CS2 view
@@ -157,14 +158,18 @@ private:
     void ApplyHoldRotation(float deltaTime);
     void ComputeHoldMovementBasis();
     void ApplyHoldMovement(float deltaTime);
+    Afx::Math::Quaternion BuildQuat(const CameraTransform& transform) const;
+    void UpdateAnglesFromQuat(const Afx::Math::Quaternion& q, CameraTransform& out, const CameraTransform& hint) const;
+    Afx::Math::Vector3 GetWorldAngularVelocity(float yawRateDeg, float pitchRateDeg, float rollRateDeg, const CameraTransform& transform) const;
+    Afx::Math::Quaternion IntegrateQuat(const Afx::Math::Quaternion& q, const Afx::Math::Vector3& angularVelocity, float deltaTime) const;
 
     // Math helpers
     float Clamp(float value, float min, float max);
     float Lerp(float a, float b, float t);
     float SmoothDamp(float current, float target, float& currentVelocity, float smoothTime, float deltaTime);
-    void GetForwardVector(float pitch, float yaw, float& outX, float& outY, float& outZ);
-    void GetRightVector(float yaw, float& outX, float& outY, float& outZ);
-    void GetUpVector(float pitch, float yaw, float& outX, float& outY, float& outZ);
+    void GetForwardVector(float pitch, float yaw, float& outX, float& outY, float& outZ) const;
+    void GetRightVector(float yaw, float& outX, float& outY, float& outZ) const;
+    void GetUpVector(float pitch, float yaw, float& outX, float& outY, float& outZ) const;
 
     bool m_bEnabled;
     bool m_bInputEnabled;  // Gates input processing without disabling camera
@@ -206,6 +211,10 @@ private:
     float m_LastSmoothedX;
     float m_LastSmoothedY;
     float m_LastSmoothedZ;
+    Afx::Math::Quaternion m_RawQuat;
+    Afx::Math::Quaternion m_SmoothedQuat;
+    Afx::Math::Vector3 m_RotVelocity;
+    Afx::Math::Vector3 m_HoldRotVelocity;
 
     // Player lock state
     bool m_LastKeyVDown;
