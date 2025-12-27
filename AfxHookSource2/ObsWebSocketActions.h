@@ -60,6 +60,8 @@ struct FreecamConfigDelta {
 	float lockHalfRotTransition = 0.0f;
 	bool hasHalfFov = false;
 	float halfFov = 0.0f;
+	bool hasRotCriticalDamping = false;
+	bool rotCriticalDamping = false;
 };
 
 struct FreecamHandoffPayload {

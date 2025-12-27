@@ -32,6 +32,20 @@ bool IsShiftDown(const InputState& input) {
 bool IsAltDown(const InputState& input) {
     return input.IsAnyKeyDown({kVkLeftAlt, kVkRightAlt, kVkAlt});
 }
+
+double CalcDeltaExpSmooth(double deltaT, double deltaVal) {
+    const double limitTime = 19.931568569324174087221916576936;
+    if (deltaT < 0.0) {
+        return 0.0;
+    }
+    if (limitTime < deltaT) {
+        return deltaVal;
+    }
+
+    const double halfTime = 0.69314718055994530941723212145818;
+    double x = 1.0 / exp(deltaT * halfTime);
+    return (1.0 - x) * deltaVal;
+}
 }
 
 CFreecamController::CFreecamController()
@@ -645,31 +659,46 @@ void CFreecamController::ApplySmoothing(float deltaTime) {
     m_SmoothedTransform.y = Lerp(m_SmoothedTransform.y, m_Transform.y, posBlend);
     m_SmoothedTransform.z = Lerp(m_SmoothedTransform.z, m_Transform.z, posBlend);
 
-    // Rotation smoothing (critically damped 2nd-order)
+    // Rotation smoothing (critical damping or long-path slerp)
     Afx::Math::Quaternion targetQuat = m_RawQuat;
     if (m_CurrentHalfRot > 0.0f) {
-        const double omega = log(2.0) / m_CurrentHalfRot;
-        const double damping = 1.0;
+        if (m_Config.rotCriticalDamping) {
+            const double omega = log(2.0) / m_CurrentHalfRot;
+            const double damping = 1.0;
 
-        Afx::Math::Quaternion qErr = targetQuat * m_SmoothedQuat.Conjugate();
-        if (qErr.W < 0.0) {
-            qErr = Afx::Math::Quaternion(-qErr.W, -qErr.X, -qErr.Y, -qErr.Z);
+            Afx::Math::Quaternion qErr = targetQuat * m_SmoothedQuat.Conjugate();
+
+            double w = qErr.W;
+            w = (std::max)(-1.0, (std::min)(1.0, w));
+            double angle = 2.0 * acos(w);
+            double sinHalf = sqrt((std::max)(0.0, 1.0 - w * w));
+            Afx::Math::Vector3 axis = sinHalf < 1e-6
+                ? Afx::Math::Vector3(1.0, 0.0, 0.0)
+                : Afx::Math::Vector3(qErr.X / sinHalf, qErr.Y / sinHalf, qErr.Z / sinHalf);
+
+            Afx::Math::Vector3 error = axis * angle;
+            Afx::Math::Vector3 wdot =
+                (omega * omega) * error -
+                (2.0 * damping * omega) * m_RotVelocity;
+            m_RotVelocity += wdot * deltaTime;
+            m_SmoothedQuat = IntegrateQuat(m_SmoothedQuat, m_RotVelocity, deltaTime);
+        } else {
+            const double t = deltaTime / m_CurrentHalfRot;
+            Afx::Math::Vector3 axis;
+            double targetAngle = m_SmoothedQuat.GetAng(targetQuat, axis);
+            double stepAngle = CalcDeltaExpSmooth(t, targetAngle);
+
+            if (fabs(stepAngle) > AFX_MATH_EPS && fabs(targetAngle) > AFX_MATH_EPS) {
+                m_SmoothedQuat = m_SmoothedQuat.Slerp(targetQuat, stepAngle / targetAngle).Normalized();
+                if (deltaTime > 0.0f) {
+                    m_RotVelocity = axis * (stepAngle / deltaTime);
+                } else {
+                    m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
+                }
+            } else {
+                m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
+            }
         }
-
-        double w = qErr.W;
-        w = (std::max)(-1.0, (std::min)(1.0, w));
-        double angle = 2.0 * acos(w);
-        double sinHalf = sqrt((std::max)(0.0, 1.0 - w * w));
-        Afx::Math::Vector3 axis = sinHalf < 1e-6
-            ? Afx::Math::Vector3(1.0, 0.0, 0.0)
-            : Afx::Math::Vector3(qErr.X / sinHalf, qErr.Y / sinHalf, qErr.Z / sinHalf);
-
-        Afx::Math::Vector3 error = axis * angle;
-        Afx::Math::Vector3 wdot =
-            (omega * omega) * error -
-            (2.0 * damping * omega) * m_RotVelocity;
-        m_RotVelocity += wdot * deltaTime;
-        m_SmoothedQuat = IntegrateQuat(m_SmoothedQuat, m_RotVelocity, deltaTime);
     } else {
         m_SmoothedQuat = targetQuat;
         m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);

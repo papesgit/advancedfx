@@ -221,6 +221,12 @@ namespace {
 			message += "halfFov=" + std::to_string(delta.halfFov) + " ";
 			updated = true;
 		}
+		if (args.contains("rotCriticalDamping")) {
+			delta.hasRotCriticalDamping = true;
+			delta.rotCriticalDamping = args["rotCriticalDamping"].get<bool>();
+			message += "rotCriticalDamping=" + std::string(delta.rotCriticalDamping ? "true" : "false") + " ";
+			updated = true;
+		}
 
 		return updated;
 	}

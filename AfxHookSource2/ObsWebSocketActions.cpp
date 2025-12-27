@@ -75,6 +75,7 @@ namespace {
 		if (delta.hasLockHalfRot) config.lockHalfRot = delta.lockHalfRot;
 		if (delta.hasLockHalfRotTransition) config.lockHalfRotTransition = delta.lockHalfRotTransition;
 		if (delta.hasHalfFov) config.halfFov = delta.halfFov;
+		if (delta.hasRotCriticalDamping) config.rotCriticalDamping = delta.rotCriticalDamping;
 	}
 }
 
