@@ -344,19 +344,24 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 			payload.fov = args["fov"].get<float>();
 		}
 
-		payload.hasSmoothTransform = args.contains("smoothPosX") && args.contains("smoothPosY") && args.contains("smoothPosZ")
-			&& args.contains("smoothPitch") && args.contains("smoothYaw") && args.contains("smoothRoll");
+		payload.hasSmoothTransform = args.contains("smoothPosX") && args.contains("smoothPosY") && args.contains("smoothPosZ");
 		if (payload.hasSmoothTransform) {
+			payload.smoothTransform = payload.transform;
 			payload.smoothTransform.x = args["smoothPosX"].get<float>();
 			payload.smoothTransform.y = args["smoothPosY"].get<float>();
 			payload.smoothTransform.z = args["smoothPosZ"].get<float>();
-			payload.smoothTransform.pitch = args["smoothPitch"].get<float>();
-			payload.smoothTransform.yaw = args["smoothYaw"].get<float>();
-			payload.smoothTransform.roll = args["smoothRoll"].get<float>();
 			if (args.contains("smoothFov")) {
 				payload.hasSmoothFov = true;
 				payload.smoothFov = args["smoothFov"].get<float>();
 			}
+		}
+		payload.hasSmoothQuat = args.contains("smoothQuatW") && args.contains("smoothQuatX")
+			&& args.contains("smoothQuatY") && args.contains("smoothQuatZ");
+		if (payload.hasSmoothQuat) {
+			payload.smoothQuat.W = args["smoothQuatW"].get<float>();
+			payload.smoothQuat.X = args["smoothQuatX"].get<float>();
+			payload.smoothQuat.Y = args["smoothQuatY"].get<float>();
+			payload.smoothQuat.Z = args["smoothQuatZ"].get<float>();
 		}
 
 		if (args.contains("speedScalar")) {

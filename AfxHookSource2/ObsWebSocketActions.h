@@ -72,6 +72,8 @@ struct FreecamHandoffPayload {
 	float fov = 90.0f;
 	bool hasSmoothTransform = false;
 	CameraTransform smoothTransform;
+	bool hasSmoothQuat = false;
+	Afx::Math::Quaternion smoothQuat;
 	bool hasSmoothFov = false;
 	float smoothFov = 90.0f;
 	bool hasSpeedScalar = false;

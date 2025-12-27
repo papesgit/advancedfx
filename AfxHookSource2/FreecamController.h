@@ -140,6 +140,7 @@ public:
 
     /// Override smoothed transform (for seamless handoff)
     void SetSmoothedTransform(const CameraTransform& transform);
+    void SetSmoothedTransformWithQuat(const CameraTransform& transform, const Afx::Math::Quaternion& smoothQuat);
 
     /// Reset camera to origin
     void Reset();

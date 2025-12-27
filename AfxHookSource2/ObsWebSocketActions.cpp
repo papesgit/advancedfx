@@ -215,7 +215,11 @@ void ObsWebSocket_ProcessActions() {
 				if (action.handoff.hasSmoothTransform) {
 					CameraTransform smoothTransform = action.handoff.smoothTransform;
 					smoothTransform.fov = action.handoff.hasSmoothFov ? action.handoff.smoothFov : transform.fov;
-					g_pFreecam->SetSmoothedTransform(smoothTransform);
+					if (action.handoff.hasSmoothQuat) {
+						g_pFreecam->SetSmoothedTransformWithQuat(smoothTransform, action.handoff.smoothQuat);
+					} else {
+						g_pFreecam->SetSmoothedTransform(smoothTransform);
+					}
 				}
 			}
 			g_pFreecam->SetInputEnabled(true);

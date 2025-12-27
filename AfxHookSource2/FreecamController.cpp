@@ -227,6 +227,14 @@ void CFreecamController::SetSmoothedTransform(const CameraTransform& transform) 
     m_bInitialized = true;
 }
 
+void CFreecamController::SetSmoothedTransformWithQuat(const CameraTransform& transform, const Afx::Math::Quaternion& smoothQuat) {
+    m_SmoothedTransform = transform;
+    m_SmoothedQuat = smoothQuat.Normalized();
+    UpdateAnglesFromQuat(m_SmoothedQuat, m_SmoothedTransform, transform);
+    m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
+    m_bInitialized = true;
+}
+
 void CFreecamController::Reset() {
     CameraTransform origin;
     Reset(origin);
@@ -943,16 +951,57 @@ Afx::Math::Quaternion CFreecamController::BuildQuat(const CameraTransform& trans
 }
 
 void CFreecamController::UpdateAnglesFromQuat(const Afx::Math::Quaternion& q, CameraTransform& out, const CameraTransform& hint) const {
-    Afx::Math::QEulerAngles angles = q.ToQREulerAngles().ToQEulerAngles();
     auto normalizeNear = [](float value, float target) {
         float delta = target - value;
         float turns = roundf(delta / 360.0f);
         return value + turns * 360.0f;
     };
+    auto dot = [](const Afx::Math::Vector3& a, const Afx::Math::Vector3& b) {
+        return a.X * b.X + a.Y * b.Y + a.Z * b.Z;
+    };
 
-    out.pitch = normalizeNear((float)angles.Pitch, hint.pitch);
-    out.yaw = normalizeNear((float)angles.Yaw, hint.yaw);
-    out.roll = normalizeNear((float)angles.Roll, hint.roll);
+    auto cross = [](const Afx::Math::Vector3& a, const Afx::Math::Vector3& b) {
+        return Afx::Math::Vector3(
+            a.Y * b.Z - a.Z * b.Y,
+            a.Z * b.X - a.X * b.Z,
+            a.X * b.Y - a.Y * b.X
+        );
+    };
+
+    auto rotate = [](const Afx::Math::Quaternion& quat, const Afx::Math::Vector3& v) {
+        Afx::Math::Quaternion qv(0.0, v.X, v.Y, v.Z);
+        Afx::Math::Quaternion res = quat * qv * quat.Conjugate();
+        return Afx::Math::Vector3(res.X, res.Y, res.Z);
+    };
+
+    Afx::Math::Vector3 forward = rotate(q, Afx::Math::Vector3(1.0, 0.0, 0.0));
+    Afx::Math::Vector3 up = rotate(q, Afx::Math::Vector3(0.0, 0.0, 1.0));
+    double fLen = forward.Length();
+    double uLen = up.Length();
+    if (fLen > 1e-8) forward /= fLen;
+    if (uLen > 1e-8) up /= uLen;
+
+    float yaw = (float)(atan2(forward.Y, forward.X) * (180.0 / M_PI));
+    float pitch = (float)(-asin((std::max)(-1.0, (std::min)(1.0, forward.Z))) * (180.0 / M_PI));
+
+    float baseRightX, baseRightY, baseRightZ;
+    GetRightVector(yaw, baseRightX, baseRightY, baseRightZ);
+    float baseForwardX, baseForwardY, baseForwardZ;
+    GetForwardVector(pitch, yaw, baseForwardX, baseForwardY, baseForwardZ);
+    Afx::Math::Vector3 baseUp = cross(
+        Afx::Math::Vector3(baseRightX, baseRightY, baseRightZ),
+        Afx::Math::Vector3(baseForwardX, baseForwardY, baseForwardZ)
+    ).Normalize();
+
+    Afx::Math::Vector3 fwd = Afx::Math::Vector3(baseForwardX, baseForwardY, baseForwardZ).Normalize();
+    Afx::Math::Vector3 crossUp = cross(baseUp, up);
+    double sinRoll = dot(crossUp, fwd);
+    double cosRoll = dot(baseUp, up);
+    float roll = (float)(atan2(sinRoll, cosRoll) * (180.0 / M_PI));
+
+    out.pitch = normalizeNear(pitch, hint.pitch);
+    out.yaw = normalizeNear(yaw, hint.yaw);
+    out.roll = normalizeNear(roll, hint.roll);
 }
 
 Afx::Math::Vector3 CFreecamController::GetWorldAngularVelocity(float yawRateDeg, float pitchRateDeg, float rollRateDeg, const CameraTransform& transform) const {
