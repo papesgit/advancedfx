@@ -227,6 +227,12 @@ namespace {
 			message += "rotCriticalDamping=" + std::string(delta.rotCriticalDamping ? "true" : "false") + " ";
 			updated = true;
 		}
+		if (args.contains("rotDampingRatio")) {
+			delta.hasRotDampingRatio = true;
+			delta.rotDampingRatio = args["rotDampingRatio"].get<float>();
+			message += "rotDampingRatio=" + std::to_string(delta.rotDampingRatio) + " ";
+			updated = true;
+		}
 
 		return updated;
 	}

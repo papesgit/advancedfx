@@ -54,6 +54,7 @@ struct FreecamConfig {
     float lockHalfRotTransition;  // Duration to blend halfRot <-> lockHalfRot (seconds)
     float halfFov;  // Half-time for FOV smoothing (seconds)
     bool rotCriticalDamping;  // Use critically damped rotation smoothing (vs long-path slerp)
+    float rotDampingRatio;  // Damping ratio for critical damping (>= 1.0)
 
     FreecamConfig()
         : mouseSensitivity(0.12f)
@@ -82,6 +83,7 @@ struct FreecamConfig {
         , lockHalfRotTransition(1.0f)
         , halfFov(0.5f)             // Exponential half-time for FOV
         , rotCriticalDamping(false)
+        , rotDampingRatio(1.0f)
     {}
 };
 

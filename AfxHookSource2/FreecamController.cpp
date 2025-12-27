@@ -661,10 +661,24 @@ void CFreecamController::ApplySmoothing(float deltaTime) {
 
     // Rotation smoothing (critical damping or long-path slerp)
     Afx::Math::Quaternion targetQuat = m_RawQuat;
+    if (m_PlayerLockActive || m_HalfRotTransitionActive) {
+        // Player lock (and its transition) always uses shortest path.
+        double dot = Afx::Math::DotProduct(targetQuat, m_SmoothedQuat);
+        if (dot < 0.0) {
+            targetQuat = Afx::Math::Quaternion(-targetQuat.W, -targetQuat.X, -targetQuat.Y, -targetQuat.Z);
+        }
+    }
+    if (m_PlayerLockActive) {
+        // Always take the shortest path while player lock is active.
+        double dot = Afx::Math::DotProduct(targetQuat, m_SmoothedQuat);
+        if (dot < 0.0) {
+            targetQuat = Afx::Math::Quaternion(-targetQuat.W, -targetQuat.X, -targetQuat.Y, -targetQuat.Z);
+        }
+    }
     if (m_CurrentHalfRot > 0.0f) {
         if (m_Config.rotCriticalDamping) {
             const double omega = log(2.0) / m_CurrentHalfRot;
-            const double damping = 1.0;
+            const double damping = (std::max)(1.0, (double)m_Config.rotDampingRatio);
 
             Afx::Math::Quaternion qErr = targetQuat * m_SmoothedQuat.Conjugate();
 
@@ -862,6 +876,14 @@ void CFreecamController::UpdateHalfRotTransition(float deltaTime) {
     m_CurrentHalfRot = Lerp(m_HalfRotTransitionStart, m_HalfRotTransitionTarget, t);
     if (t >= 1.0f) {
         m_HalfRotTransitionActive = false;
+        if (!m_PlayerLockActive) {
+            // Align quaternion hemisphere after lock transition to prevent long-path snap.
+            double dot = Afx::Math::DotProduct(m_RawQuat, m_SmoothedQuat);
+            if (dot < 0.0) {
+                m_SmoothedQuat = Afx::Math::Quaternion(-m_SmoothedQuat.W, -m_SmoothedQuat.X, -m_SmoothedQuat.Y, -m_SmoothedQuat.Z);
+            }
+            m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
+        }
     }
 }
 
