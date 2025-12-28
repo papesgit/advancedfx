@@ -310,26 +310,51 @@ void CFreecamController::UpdateMouseLook(const InputState& input, float deltaTim
     }
 }
 
+static Afx::Math::Vector3 RotateByQuat(const Afx::Math::Quaternion& q, const Afx::Math::Vector3& v) {
+    Afx::Math::Quaternion qv(0.0, v.X, v.Y, v.Z);
+    Afx::Math::Quaternion res = q * qv * q.Conjugate();
+    return Afx::Math::Vector3(res.X, res.Y, res.Z);
+}
+
 void CFreecamController::ComputeHoldAngularVelocity() {
-    m_HoldYawVelocity = 0.0f;
-    m_HoldPitchVelocity = 0.0f;
+    m_HoldYawVelocity = m_MouseVelocityX;
+    m_HoldPitchVelocity = m_MouseVelocityY;
     m_HoldRotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
 
-    if (m_Config.smoothEnabled) {
-        m_HoldRotVelocity = m_RotVelocity;
+    if (!m_Config.smoothEnabled)
+        return;
+
+    const CameraTransform& view = m_SmoothedTransform;
+
+    float rightX, rightY, rightZ;
+    GetRightVector(view.yaw, rightX, rightY, rightZ);
+
+    // Convert smoothed angular velocity into WORLD space before extracting yaw/pitch rates:
+    Afx::Math::Vector3 omegaWorld = RotateByQuat(m_SmoothedQuat, m_RotVelocity);
+
+    const double radToDeg = 180.0 / M_PI;
+
+    // Source-style yaw is about WORLD +Z:
+    const double yawRateRad = omegaWorld.Z;
+
+    // Positive pitch looks DOWN in your convention => minus sign:
+    const double pitchRateRad = -(omegaWorld.X * rightX + omegaWorld.Y * rightY + omegaWorld.Z * rightZ);
+
+    m_HoldYawVelocity = (float)(yawRateRad * radToDeg);
+    m_HoldPitchVelocity = (float)(pitchRateRad * radToDeg);
+}
+
+
+void CFreecamController::ApplyHoldRotation(float deltaTime) {
+    if (deltaTime <= 0.0f) {
         return;
     }
 
-    m_HoldRotVelocity = GetWorldAngularVelocity(m_MouseVelocityX, m_MouseVelocityY, 0.0f, m_Transform);
-}
-
-void CFreecamController::ApplyHoldRotation(float deltaTime) {
-    m_RawQuat = IntegrateQuat(m_RawQuat, m_HoldRotVelocity, deltaTime);
-    UpdateAnglesFromQuat(m_RawQuat, m_Transform, m_Transform);
+    m_Transform.yaw += m_HoldYawVelocity * deltaTime;
+    m_Transform.pitch += m_HoldPitchVelocity * deltaTime;
 
     if (m_Config.clampPitch) {
         m_Transform.pitch = Clamp(m_Transform.pitch, -89.0f, 89.0f);
-        m_RawQuat = BuildQuat(m_Transform);
     }
 }
 
