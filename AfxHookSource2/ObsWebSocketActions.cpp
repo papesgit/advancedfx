@@ -204,6 +204,10 @@ void ObsWebSocket_ProcessActions() {
 			if (!g_pFreecam) break;
 			ApplyFreecamConfigDelta(g_pFreecam->GetConfig(), action.handoff.configDelta);
 			{
+				const bool wasEnabled = g_pFreecam->IsEnabled();
+				if (!wasEnabled) {
+					g_pFreecam->SetEnabled(true);
+				}
 				CameraTransform transform = action.handoff.transform;
 				if (action.handoff.hasFov) {
 					transform.fov = action.handoff.fov;
@@ -223,7 +227,6 @@ void ObsWebSocket_ProcessActions() {
 				}
 			}
 			g_pFreecam->SetInputEnabled(true);
-			g_pFreecam->SetEnabled(true);
 			if (action.handoff.hasSpeedScalar) {
 				g_pFreecam->SetSpeedScalar(action.handoff.speedScalar);
 			}
