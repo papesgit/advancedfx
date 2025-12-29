@@ -67,10 +67,10 @@ struct FreecamConfig {
         , rollSpeed(45.0f)
         , rollSmoothing(0.8f)
         , leanStrength(1.0f)
-        , leanAccelScale(0.0015f)
-        , leanVelocityScale(0.01f)
+        , leanAccelScale(0.025f)
+        , leanVelocityScale(0.005f)
         , leanMaxAngle(20.0f)
-        , leanHalfTime(0.18f)
+        , leanHalfTime(0.30f)
         , clampPitch(false)
         , fovMin(10.0f)
         , fovMax(150.0f)
@@ -79,9 +79,9 @@ struct FreecamConfig {
         , smoothEnabled(true)
         , halfVec(0.5f)             // Exponential half-time for position
         , halfRot(0.5f)             // Exponential half-time for rotation
-        , lockHalfRot(0.2f)
+        , lockHalfRot(0.1f)
         , lockHalfRotTransition(1.0f)
-        , halfFov(0.5f)             // Exponential half-time for FOV
+        , halfFov(0.8f)             // Exponential half-time for FOV
         , rotCriticalDamping(false)
         , rotDampingRatio(1.0f)
     {}
