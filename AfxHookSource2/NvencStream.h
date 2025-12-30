@@ -101,6 +101,7 @@ private:
     ID3D11Texture2D* m_pStagingTexture; // For format conversion
     ID3D11RenderTargetView* m_pStagingRTV;
     ID3D11ShaderResourceView* m_pSourceSRV;
+    ID3D11Texture2D* m_pSourceCopyTexture;
     ID3D11PixelShader* m_pConvertShader;
     ID3D11VertexShader* m_pFullscreenVS;
     ID3D11SamplerState* m_pSamplerState;
@@ -128,6 +129,11 @@ private:
     // Debug info (accessible after start)
     DXGI_FORMAT m_SourceFormat;
     DXGI_FORMAT m_EncoderFormat;
+    DXGI_FORMAT m_SourceSrvFormat = DXGI_FORMAT_UNKNOWN;
+    uint32_t m_SourceSrvWidth = 0;
+    uint32_t m_SourceSrvHeight = 0;
+    uint32_t m_SourceSrvSampleCount = 0;
+    bool m_SourceSrvUsesCopy = false;
 
     // Network streaming
     std::atomic<bool> m_bStreamingEnabled;

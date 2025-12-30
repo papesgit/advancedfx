@@ -95,6 +95,7 @@ CNvencStream::CNvencStream()
     , m_pStagingTexture(nullptr)
     , m_pStagingRTV(nullptr)
     , m_pSourceSRV(nullptr)
+    , m_pSourceCopyTexture(nullptr)
     , m_pConvertShader(nullptr)
     , m_pFullscreenVS(nullptr)
     , m_pSamplerState(nullptr)
@@ -106,6 +107,11 @@ CNvencStream::CNvencStream()
     , m_nDroppedFrames(0)
     , m_SourceFormat(DXGI_FORMAT_UNKNOWN)
     , m_EncoderFormat(DXGI_FORMAT_UNKNOWN)
+    , m_SourceSrvFormat(DXGI_FORMAT_UNKNOWN)
+    , m_SourceSrvWidth(0)
+    , m_SourceSrvHeight(0)
+    , m_SourceSrvSampleCount(0)
+    , m_SourceSrvUsesCopy(false)
     , m_bStreamingEnabled(false)
     , m_Socket(INVALID_SOCKET)
     , m_RtpSequence(0)
@@ -674,6 +680,9 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
                 else if (srcDesc.Format == 28) {
                     *m_pDebugLog << "  -> RGBA (DXGI_FORMAT_R8G8B8A8_UNORM)" << std::endl;
                 }
+                else if (srcDesc.Format == 29) {
+                    *m_pDebugLog << "  -> RGBA sRGB (DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)" << std::endl;
+                }
                 else {
                     *m_pDebugLog << "  -> Unknown/Other format" << std::endl;
                 }
@@ -712,7 +721,7 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
                     *m_pDebugLog << "  -> RGBA (DXGI_FORMAT_R8G8B8A8_UNORM)" << std::endl;
                 }
                 else if (dstDesc.Format == 29) {
-                    *m_pDebugLog << "  -> ARGB (DXGI_FORMAT_A8R8G8B8_UNORM - not standard!)" << std::endl;
+                    *m_pDebugLog << "  -> RGBA sRGB (DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)" << std::endl;
                 }
 
                 // Check if formats match
@@ -730,28 +739,115 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
 
         // Use shader to convert RGBA to BGRA
         if (m_pStagingTexture && m_pFullscreenVS && m_pConvertShader) {
+            D3D11_TEXTURE2D_DESC srcDesc;
+            pTexture->GetDesc(&srcDesc);
+
+            auto BuildSrvDesc = [](const D3D11_TEXTURE2D_DESC& desc) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+                srvDesc.Format = desc.Format;
+                if (desc.SampleDesc.Count > 1) {
+                    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+                }
+                else {
+                    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                    srvDesc.Texture2D.MipLevels = 1;
+                    srvDesc.Texture2D.MostDetailedMip = 0;
+                }
+                return srvDesc;
+            };
+
+            const bool needsRecreate =
+                !m_pSourceSRV ||
+                m_SourceSrvFormat != srcDesc.Format ||
+                m_SourceSrvWidth != srcDesc.Width ||
+                m_SourceSrvHeight != srcDesc.Height ||
+                m_SourceSrvSampleCount != srcDesc.SampleDesc.Count;
+
+            if (needsRecreate) {
+                if (m_pSourceSRV) {
+                    m_pSourceSRV->Release();
+                    m_pSourceSRV = nullptr;
+                }
+                if (m_pSourceCopyTexture) {
+                    m_pSourceCopyTexture->Release();
+                    m_pSourceCopyTexture = nullptr;
+                }
+                m_SourceSrvUsesCopy = false;
+
+                m_SourceSrvFormat = srcDesc.Format;
+                m_SourceSrvWidth = srcDesc.Width;
+                m_SourceSrvHeight = srcDesc.Height;
+                m_SourceSrvSampleCount = srcDesc.SampleDesc.Count;
+            }
+
             // Create shader resource view for source texture (once)
             if (!m_pSourceSRV) {
-                D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-                D3D11_TEXTURE2D_DESC srcDesc;
-                pTexture->GetDesc(&srcDesc);
-                srvDesc.Format = srcDesc.Format;
-                srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-                srvDesc.Texture2D.MipLevels = 1;
-                srvDesc.Texture2D.MostDetailedMip = 0;
+                D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = BuildSrvDesc(srcDesc);
 
                 HRESULT hr = m_pDevice->CreateShaderResourceView(pTexture, &srvDesc, &m_pSourceSRV);
                 if (FAILED(hr)) {
                     if (m_pDebugLog && m_pDebugLog->is_open()) {
-                        *m_pDebugLog << "ERROR: Failed to create shader resource view" << std::endl;
+                        *m_pDebugLog << "WARNING: Failed to create SRV on source texture (format "
+                                     << srcDesc.Format << "), retrying with shader-readable copy." << std::endl;
                         m_pDebugLog->flush();
                     }
-                    return;
+
+                    D3D11_TEXTURE2D_DESC copyDesc = srcDesc;
+                    if (copyDesc.SampleDesc.Count > 1) {
+                        copyDesc.SampleDesc.Count = 1;
+                        copyDesc.SampleDesc.Quality = 0;
+                    }
+                    copyDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                    copyDesc.CPUAccessFlags = 0;
+                    copyDesc.Usage = D3D11_USAGE_DEFAULT;
+                    copyDesc.MiscFlags = 0;
+
+                    hr = m_pDevice->CreateTexture2D(&copyDesc, nullptr, &m_pSourceCopyTexture);
+                    if (FAILED(hr)) {
+                        if (m_pDebugLog && m_pDebugLog->is_open()) {
+                            *m_pDebugLog << "ERROR: Failed to create shader-readable source copy" << std::endl;
+                            m_pDebugLog->flush();
+                        }
+                        return;
+                    }
+
+                    D3D11_SHADER_RESOURCE_VIEW_DESC copySrvDesc = BuildSrvDesc(copyDesc);
+                    hr = m_pDevice->CreateShaderResourceView(m_pSourceCopyTexture, &copySrvDesc, &m_pSourceSRV);
+                    if (FAILED(hr)) {
+                        if (m_pDebugLog && m_pDebugLog->is_open()) {
+                            *m_pDebugLog << "ERROR: Failed to create SRV for source copy" << std::endl;
+                            m_pDebugLog->flush();
+                        }
+                        return;
+                    }
+
+                    m_SourceSrvUsesCopy = true;
+                }
+                else {
+                    m_SourceSrvUsesCopy = false;
+                    if (m_pSourceCopyTexture) {
+                        m_pSourceCopyTexture->Release();
+                        m_pSourceCopyTexture = nullptr;
+                    }
                 }
 
                 if (m_pDebugLog && m_pDebugLog->is_open()) {
-                    *m_pDebugLog << "Created shader resource view for format conversion" << std::endl;
+                    if (m_SourceSrvUsesCopy) {
+                        *m_pDebugLog << "Using shader-readable source copy for SRV (format "
+                                     << srcDesc.Format << ")" << std::endl;
+                    } else {
+                        *m_pDebugLog << "Created shader resource view for format conversion" << std::endl;
+                    }
                     m_pDebugLog->flush();
+                }
+            }
+
+            if (m_SourceSrvUsesCopy && m_pSourceCopyTexture) {
+                if (m_SourceSrvSampleCount > 1) {
+                    pContext->ResolveSubresource(m_pSourceCopyTexture, 0, pTexture, 0, srcDesc.Format);
+                }
+                else {
+                    pContext->CopyResource(m_pSourceCopyTexture, pTexture);
                 }
             }
 
@@ -1229,6 +1325,11 @@ void CNvencStream::Cleanup()
         m_pSourceSRV = nullptr;
     }
 
+    if (m_pSourceCopyTexture) {
+        m_pSourceCopyTexture->Release();
+        m_pSourceCopyTexture = nullptr;
+    }
+
     if (m_pStagingRTV) {
         m_pStagingRTV->Release();
         m_pStagingRTV = nullptr;
@@ -1250,6 +1351,11 @@ void CNvencStream::Cleanup()
         m_pDevice = nullptr;
     }
     m_bSentKeyframe = false;
+    m_SourceSrvFormat = DXGI_FORMAT_UNKNOWN;
+    m_SourceSrvWidth = 0;
+    m_SourceSrvHeight = 0;
+    m_SourceSrvSampleCount = 0;
+    m_SourceSrvUsesCopy = false;
 }
 
 void CNvencStream::ParseParameterSets(const uint8_t* data, size_t size)
