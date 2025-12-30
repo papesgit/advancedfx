@@ -1204,6 +1204,21 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 		Afx::Math::QEulerAngles attachedAngles(0.0, 0.0, 0.0);
 
 	float attachedFov = 90.0f;
+	if (g_AttachmentCamera.animation.enabled
+		&& g_AttachmentCamera.animation.hasTransition
+		&& !g_AttachmentCamera.animation.transitionApplied
+		&& g_AttachmentCamera.animation.targetControllerIndex != -1
+		&& g_pEngineToClient) {
+
+		const double now = g_MirvTime.curtime_get();
+		const double animT = now - g_AttachmentCamera.animation.startTime;
+		if (animT >= g_AttachmentCamera.animation.transitionTime) {
+			std::string cmd = "spec_mode 2; spec_player " + std::to_string(g_AttachmentCamera.animation.targetControllerIndex);
+			g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
+			g_AttachmentCamera.animation.transitionApplied = true;
+		}
+	}
+
 	if (TryComputeAttachmentCamera(g_AttachmentCamera, attachedOrigin, attachedAngles, attachedFov)) {
 		Tx = (float)attachedOrigin.X;
 		Ty = (float)attachedOrigin.Y;

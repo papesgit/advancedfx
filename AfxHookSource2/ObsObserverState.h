@@ -23,6 +23,7 @@ struct AttachmentCameraAnimationState {
 	bool hasTransition = false;
 	double transitionTime = 0.0;
 	int targetControllerIndex = -1;
+	bool transitionApplied = false;
 };
 
 struct AttachmentCameraState {

@@ -452,6 +452,7 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 			state.animation.hasTransition = false;
 			state.animation.transitionTime = 0.0;
 			state.animation.targetControllerIndex = -1;
+			state.animation.transitionApplied = false;
 
 			if (state.animation.enabled) {
 				if (anim.contains("events") && anim["events"].is_array()) {
