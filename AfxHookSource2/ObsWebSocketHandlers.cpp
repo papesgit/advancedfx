@@ -7,6 +7,7 @@
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
 #include "../shared/AfxConsole.h"
 
+#include <algorithm>
 #include <sstream>
 
 using json = nlohmann::json;
@@ -438,6 +439,107 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		} catch (...) {
 			respond(MakeCommandResult("attach_camera", false, "Invalid offset_pos or offset_angles payload"));
 			return;
+		}
+
+		// Optional attach animation.
+		if (args.contains("animation") && args["animation"].is_object()) {
+			const auto& anim = args["animation"];
+			state.animation.enabled = anim.contains("enabled") && anim["enabled"].is_boolean()
+				? anim["enabled"].get<bool>()
+				: true;
+
+			state.animation.keyframes.clear();
+			state.animation.hasTransition = false;
+			state.animation.transitionTime = 0.0;
+			state.animation.targetControllerIndex = -1;
+
+			if (state.animation.enabled) {
+				if (anim.contains("events") && anim["events"].is_array()) {
+					for (const auto& ev : anim["events"]) {
+						if (!ev.is_object()) continue;
+						const std::string type = ev.contains("type") && ev["type"].is_string()
+							? ev["type"].get<std::string>()
+							: "keyframe";
+						const double time = ev.contains("time") && ev["time"].is_number()
+							? ev["time"].get<double>()
+							: 0.0;
+						const int order = ev.contains("order") && ev["order"].is_number_integer()
+							? ev["order"].get<int>()
+							: 0;
+
+						if (0 == _stricmp(type.c_str(), "transition")) {
+							if (state.animation.hasTransition) {
+								respond(MakeCommandResult("attach_camera", false, "Only one transition event is supported"));
+								return;
+							}
+							state.animation.hasTransition = true;
+							state.animation.transitionTime = time;
+							continue;
+						}
+
+						AttachmentCameraKeyframe kf;
+						kf.time = time;
+						kf.order = order;
+
+						if (ev.contains("delta_pos") && ev["delta_pos"].is_object()) {
+							const auto& dp = ev["delta_pos"];
+							if (dp.contains("x") && dp["x"].is_number()) kf.deltaPos.x = (float)dp["x"].get<double>();
+							if (dp.contains("y") && dp["y"].is_number()) kf.deltaPos.y = (float)dp["y"].get<double>();
+							if (dp.contains("z") && dp["z"].is_number()) kf.deltaPos.z = (float)dp["z"].get<double>();
+						}
+
+						if (ev.contains("delta_angles") && ev["delta_angles"].is_object()) {
+							const auto& da = ev["delta_angles"];
+							const double pitch = da.contains("pitch") && da["pitch"].is_number() ? da["pitch"].get<double>() : 0.0;
+							const double yaw = da.contains("yaw") && da["yaw"].is_number() ? da["yaw"].get<double>() : 0.0;
+							const double roll = da.contains("roll") && da["roll"].is_number() ? da["roll"].get<double>() : 0.0;
+							kf.deltaAngles = Afx::Math::QEulerAngles(pitch, yaw, roll);
+						}
+
+						if (ev.contains("fov") && ev["fov"].is_number()) {
+							kf.hasFov = true;
+							kf.fov = (float)ev["fov"].get<double>();
+						}
+
+						state.animation.keyframes.push_back(std::move(kf));
+					}
+				}
+
+				// Ensure implicit base keyframe at t=0, order=0.
+				bool hasBase = false;
+				for (const auto& kf : state.animation.keyframes) {
+					if (kf.time == 0.0 && kf.order == 0) {
+						hasBase = true;
+						break;
+					}
+				}
+				if (!hasBase) {
+					state.animation.keyframes.push_back(AttachmentCameraKeyframe{});
+				}
+
+				std::sort(state.animation.keyframes.begin(), state.animation.keyframes.end(), [](const AttachmentCameraKeyframe& a, const AttachmentCameraKeyframe& b) {
+					if (a.time < b.time) return true;
+					if (a.time > b.time) return false;
+					return a.order < b.order;
+				});
+
+				if (state.animation.hasTransition) {
+					if (!args.contains("target_observer_slot") || !args["target_observer_slot"].is_number_integer()) {
+						respond(MakeCommandResult("attach_camera", false, "Missing target_observer_slot for transition"));
+						return;
+					}
+					int targetSlot = args["target_observer_slot"].get<int>();
+					if (targetSlot < 0 || targetSlot > 9) {
+						respond(MakeCommandResult("attach_camera", false, "target_observer_slot must be 0-9"));
+						return;
+					}
+					if (g_SpectatorBindings[targetSlot] == -1) {
+						respond(MakeCommandResult("attach_camera", false, "target_observer_slot not mapped to a controller"));
+						return;
+					}
+					state.animation.targetControllerIndex = g_SpectatorBindings[targetSlot];
+				}
+			}
 		}
 
 		ObsWebSocket_QueueAttachCamera(state);

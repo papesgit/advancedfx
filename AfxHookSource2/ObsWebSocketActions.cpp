@@ -238,6 +238,9 @@ void ObsWebSocket_ProcessActions() {
 			break;
 		case ActionType::AttachCamera:
 			g_AttachmentCamera = action.attachment;
+			g_AttachmentCamera.animation.startTime = g_AttachmentCamera.animation.enabled
+				? g_MirvTime.curtime_get()
+				: 0.0;
 			g_AttachmentCameraHadError = false;
 			if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
 			if (g_pEngineToClient) {

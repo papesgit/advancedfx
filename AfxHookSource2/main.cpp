@@ -859,7 +859,16 @@ static CEntityInstance* GetPawnFromControllerIndex(int controllerIndex) {
 static bool TryComputeAttachmentCamera(const AttachmentCameraState& state, Afx::Math::Vector3& outOrigin, Afx::Math::QEulerAngles& outAngles, float & outFov) {
 	if (!state.active) return false;
 
-	auto pawn = GetPawnFromControllerIndex(state.controllerIndex);
+	int controllerIndex = state.controllerIndex;
+	if (state.animation.enabled && state.animation.hasTransition && state.animation.targetControllerIndex != -1) {
+		const double now = g_MirvTime.curtime_get();
+		const double animT = now - state.animation.startTime;
+		if (animT >= state.animation.transitionTime) {
+			controllerIndex = state.animation.targetControllerIndex;
+		}
+	}
+
+	auto pawn = GetPawnFromControllerIndex(controllerIndex);
 	if (!pawn) return false;
 
 	uint8_t attachmentIdx = state.attachmentIndex;
@@ -875,15 +884,78 @@ static bool TryComputeAttachmentCamera(const AttachmentCameraState& state, Afx::
 	Afx::Math::Quaternion offsetQuat = Afx::Math::Quaternion::FromQREulerAngles(
 		Afx::Math::QREulerAngles::FromQEulerAngles(state.offsetAngles)
 	).Normalized();
-	Afx::Math::Quaternion combinedQuat = (baseQuat * offsetQuat).Normalized();
+
+	SOURCESDK::Vector deltaPos = { 0.0f, 0.0f, 0.0f };
+	Afx::Math::Quaternion deltaQuat = Afx::Math::Quaternion::FromQREulerAngles(
+		Afx::Math::QREulerAngles::FromQEulerAngles(Afx::Math::QEulerAngles(0.0, 0.0, 0.0))
+	).Normalized();
+	float fov = state.fov;
+
+	if (state.animation.enabled && !state.animation.keyframes.empty()) {
+		const double now = g_MirvTime.curtime_get();
+		double t = now - state.animation.startTime;
+		if (t < 0.0) t = 0.0;
+
+		const auto& keyframes = state.animation.keyframes;
+		const AttachmentCameraKeyframe* k0 = &keyframes.front();
+		const AttachmentCameraKeyframe* k1 = &keyframes.back();
+
+		if (t <= keyframes.front().time) {
+			k0 = k1 = &keyframes.front();
+		} else if (t >= keyframes.back().time) {
+			k0 = k1 = &keyframes.back();
+		} else {
+			for (size_t i = 1; i < keyframes.size(); ++i) {
+				if (t < keyframes[i].time) {
+					k0 = &keyframes[i - 1];
+					k1 = &keyframes[i];
+					break;
+				}
+			}
+		}
+
+		double alpha = 0.0;
+		if (k0 != k1) {
+			const double dt = k1->time - k0->time;
+			alpha = dt > 1.0e-9 ? (t - k0->time) / dt : 0.0;
+			if (alpha < 0.0) alpha = 0.0;
+			if (alpha > 1.0) alpha = 1.0;
+		}
+
+		auto lerp = [](float a, float b, double t) -> float {
+			return (float)(a + (b - a) * t);
+		};
+
+		deltaPos.x = lerp(k0->deltaPos.x, k1->deltaPos.x, alpha);
+		deltaPos.y = lerp(k0->deltaPos.y, k1->deltaPos.y, alpha);
+		deltaPos.z = lerp(k0->deltaPos.z, k1->deltaPos.z, alpha);
+
+		Afx::Math::Quaternion q0 = Afx::Math::Quaternion::FromQREulerAngles(
+			Afx::Math::QREulerAngles::FromQEulerAngles(k0->deltaAngles)
+		).Normalized();
+		Afx::Math::Quaternion q1 = Afx::Math::Quaternion::FromQREulerAngles(
+			Afx::Math::QREulerAngles::FromQEulerAngles(k1->deltaAngles)
+		).Normalized();
+		deltaQuat = q0.Slerp(q1, (float)alpha).Normalized();
+
+		const float f0 = k0->hasFov ? k0->fov : state.fov;
+		const float f1 = k1->hasFov ? k1->fov : state.fov;
+		fov = lerp(f0, f1, alpha);
+	}
+
+	Afx::Math::Quaternion combinedQuat = (baseQuat * (offsetQuat * deltaQuat)).Normalized();
 
 	Afx::Math::Vector3 combinedOrigin(attachmentOrigin.x, attachmentOrigin.y, attachmentOrigin.z);
-	Afx::Math::Vector3 offsetVec(state.offsetPos.x, state.offsetPos.y, state.offsetPos.z);
+	Afx::Math::Vector3 offsetVec(
+		state.offsetPos.x + deltaPos.x,
+		state.offsetPos.y + deltaPos.y,
+		state.offsetPos.z + deltaPos.z
+	);
 	combinedOrigin += RotateVectorByQuat(combinedQuat, offsetVec);
 
 	outOrigin = combinedOrigin;
 	outAngles = combinedQuat.ToQREulerAngles().ToQEulerAngles();
-	outFov = state.fov;
+	outFov = fov;
 
 	return true;
 }
