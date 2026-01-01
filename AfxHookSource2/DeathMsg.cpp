@@ -19,6 +19,9 @@
 #include "ClientEntitySystem.h"
 #include "SchemaSystem.h"
 #include "MirvColors.h" 
+#include "ObsWebSocketServer.h"
+
+#include "../deps/release/nlohmann/json.hpp"
 
 #include <set>
 #include <algorithm>
@@ -29,6 +32,8 @@
 // doing it messy way here for now because lazy
 
 // credit https://github.com/danielkrupinski/Osiris
+
+using json = nlohmann::json;
 
 void* g_CStylePropertyOpacity_vtable = 0;
 
@@ -1029,6 +1034,49 @@ void __fastcall handleDeathnotice(u_char* hudDeathNotice, SOURCESDK::CS2::IGameE
 
 	if (myWrapper.block.use && myWrapper.block.value) {
 		return;
+	}
+
+	if (g_pObsWebSocket && g_pObsWebSocket->IsActive()) {
+		auto makePlayerPayload = [](int userId) -> json {
+			if (userId < 0) {
+				return nullptr;
+			}
+
+			json payload;
+			auto info = getPlayerInfoFromControllerIndex(userId + 1);
+			payload["observer_slot"] = info.playerController ? info.specKey : -1;
+			if (info.name && 0 != strlen(info.name)) {
+				payload["name"] = info.name;
+			} else {
+				payload["name"] = nullptr;
+			}
+
+			int teamNumber = 0;
+			if (info.playerController) {
+				teamNumber = *(int*)((u_char*)(info.playerController) + g_clientDllOffsets.C_BaseEntity.m_iTeamNum);
+			}
+			payload["team"] = teamNumber;
+
+			return payload;
+		};
+
+		const char* weapon = myWrapper.GetString(myWrapper.hashString("weapon"));
+		json payload{
+			{"type", "killfeed_event"},
+			{"attacker", makePlayerPayload(uidAttacker)},
+			{"victim", makePlayerPayload(uidVictim)},
+			{"assister", makePlayerPayload(uidAssister)},
+			{"weapon", weapon ? weapon : ""},
+			{"wallbang", 0 != myWrapper.GetInt(myWrapper.hashString("penetrated"))},
+			{"headshot", 0 != myWrapper.GetInt(myWrapper.hashString("headshot"))},
+			{"noscope", 0 != myWrapper.GetInt(myWrapper.hashString("noscope"))},
+			{"through_smoke", 0 != myWrapper.GetInt(myWrapper.hashString("thrusmoke"))},
+			{"in_air", 0 != myWrapper.GetInt(myWrapper.hashString("attackerinair"))},
+			{"blind", 0 != myWrapper.GetInt(myWrapper.hashString("attackerblind"))},
+			{"flash_assist", 0 != myWrapper.GetInt(myWrapper.hashString("assistedflash"))}
+		};
+
+		g_pObsWebSocket->BroadcastJson(payload.dump());
 	}
 
 	if (g_MirvDeathMsgGlobals.useHighlightId)

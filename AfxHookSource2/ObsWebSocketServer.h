@@ -49,3 +49,6 @@ private:
     CommandCallback m_CommandCallback;
     mutable std::mutex m_ServerMutex;
 };
+
+// Owned by main.cpp
+extern CObsWebSocketServer* g_pObsWebSocket;
