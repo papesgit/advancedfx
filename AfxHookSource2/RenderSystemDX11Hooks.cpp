@@ -73,7 +73,8 @@ bool g_bCompositeSmoke = false;
 bool g_bExpectPresent = false;
 ID3D11RenderTargetView* g_BeforeUiRT = nullptr;
 
-static const wchar_t* g_SharedTextureName = L"HLAE_ObsSharedTexture";
+static bool g_bSharedTextureKeyedMutexLogged = false;
+static bool g_bSharedTextureHandleLogged = false;
 
 class CAfxSharedTextureHost {
 public:
@@ -83,7 +84,12 @@ public:
         Reset();
     }
 
+    HANDLE GetSharedHandle() const {
+        return m_SharedHandle;
+    }
+
     void Reset() {
+        if (m_pKeyedMutex) { m_pKeyedMutex->Release(); m_pKeyedMutex = nullptr; }
         if (m_pSampler) { m_pSampler->Release(); m_pSampler = nullptr; }
         if (m_pFullscreenVS) { m_pFullscreenVS->Release(); m_pFullscreenVS = nullptr; }
         if (m_pCopyPS) { m_pCopyPS->Release(); m_pCopyPS = nullptr; }
@@ -109,7 +115,6 @@ public:
 
         D3D11_TEXTURE2D_DESC srcDesc;
         pSource->GetDesc(&srcDesc);
-
         DXGI_FORMAT normalizedSourceFormat = NormalizeFormat(srcDesc.Format);
         if (DXGI_FORMAT_R8G8B8A8_UNORM != normalizedSourceFormat && DXGI_FORMAT_B8G8R8A8_UNORM != normalizedSourceFormat) {
             static bool s_Warned = false;
@@ -126,6 +131,13 @@ public:
             return;
         }
         device->Release();
+
+        if (m_pKeyedMutex) {
+            HRESULT hrLock = m_pKeyedMutex->AcquireSync(0, 0);
+            if (FAILED(hrLock)) {
+                return;
+            }
+        }
 
         ID3D11Texture2D* sourceForSampling = pSource;
         if (srcDesc.SampleDesc.Count > 1 && m_pResolveTexture) {
@@ -217,6 +229,10 @@ public:
         if (oldDepth) oldDepth->Release();
         if (oldRS) oldRS->Release();
         if (srv) srv->Release();
+
+        if (m_pKeyedMutex) {
+            m_pKeyedMutex->ReleaseSync(1);
+        }
     }
 
 private:
@@ -287,10 +303,18 @@ private:
             sharedDesc.Usage = D3D11_USAGE_DEFAULT;
             sharedDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
             sharedDesc.CPUAccessFlags = 0;
-            sharedDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+            sharedDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
 
-            if (FAILED(m_pDevice->CreateTexture2D(&sharedDesc, nullptr, &m_pSharedTexture))) {
-                advancedfx::Warning("AFXERROR: Failed to create shared texture resource.\n");
+            HRESULT hrCreateShared = m_pDevice->CreateTexture2D(&sharedDesc, nullptr, &m_pSharedTexture);
+            if (FAILED(hrCreateShared)) {
+                advancedfx::Warning(
+                    "AFXERROR: Failed to create shared texture resource (0x%x). flags=0x%x size=%ux%u fmt=%u\n",
+                    hrCreateShared,
+                    sharedDesc.MiscFlags,
+                    sharedDesc.Width,
+                    sharedDesc.Height,
+                    (unsigned)sharedDesc.Format
+                );
                 return false;
             }
 
@@ -302,14 +326,47 @@ private:
                 advancedfx::Warning("AFXERROR: Failed to create shared texture RTV.\n");
                 return false;
             }
+            if (m_pKeyedMutex) { m_pKeyedMutex->Release(); m_pKeyedMutex = nullptr; }
+            if (m_SharedHandle) { CloseHandle(m_SharedHandle); m_SharedHandle = nullptr; }
 
-            IDXGIResource1* dxgiRes = nullptr;
-            if (SUCCEEDED(m_pSharedTexture->QueryInterface(__uuidof(IDXGIResource1), (void**)&dxgiRes))) {
-                HRESULT sharedResult = dxgiRes->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, g_SharedTextureName, &m_SharedHandle);
+            IDXGIResource* dxgiRes = nullptr;
+            if (SUCCEEDED(m_pSharedTexture->QueryInterface(__uuidof(IDXGIResource), (void**)&dxgiRes))) {
+                HRESULT sharedResult = dxgiRes->GetSharedHandle(&m_SharedHandle);
                 if (FAILED(sharedResult)) {
-                    advancedfx::Warning("AFXWarning: Failed to create shared texture handle (0x%x).\n", sharedResult);
+                    advancedfx::Warning("AFXWarning: Failed to get shared texture handle (0x%x).\n", sharedResult);
+                    m_SharedHandle = nullptr;
+                }
+                else if (!m_SharedHandle || m_SharedHandle == INVALID_HANDLE_VALUE) {
+                    advancedfx::Warning("AFXWarning: Shared texture handle invalid after GetSharedHandle.\n");
+                    m_SharedHandle = nullptr;
+                }
+                else if (!g_bSharedTextureHandleLogged) {
+                    advancedfx::Message("Shared texture handle ready.\n");
+                    g_bSharedTextureHandleLogged = true;
                 }
                 dxgiRes->Release();
+            }
+
+            if (SUCCEEDED(m_pSharedTexture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&m_pKeyedMutex))) {
+                if (!g_bSharedTextureKeyedMutexLogged) {
+                    advancedfx::Message("Shared texture keyed mutex: available.\n");
+                    g_bSharedTextureKeyedMutexLogged = true;
+                }
+            } else if (!g_bSharedTextureKeyedMutexLogged) {
+                advancedfx::Warning("Shared texture keyed mutex: unavailable.\n");
+                g_bSharedTextureKeyedMutexLogged = true;
+            }
+            if (!g_bSharedTextureKeyedMutexLogged) {
+                IDXGIKeyedMutex* keyedMutex = nullptr;
+                HRESULT hrMutex = m_pSharedTexture->QueryInterface(__uuidof(IDXGIKeyedMutex), (void**)&keyedMutex);
+                if (SUCCEEDED(hrMutex) && keyedMutex) {
+                    advancedfx::Message("Shared texture keyed mutex: available.\n");
+                    keyedMutex->Release();
+                }
+                else {
+                    advancedfx::Warning("Shared texture keyed mutex: unavailable (0x%x).\n", hrMutex);
+                }
+                g_bSharedTextureKeyedMutexLogged = true;
             }
 
             m_Width = srcDesc.Width;
@@ -438,10 +495,32 @@ float4 main(PS_INPUT input) : SV_TARGET {
     ID3D11DepthStencilState* m_pNoDepth = nullptr;
     ID3D11RasterizerState* m_pRasterizer = nullptr;
     HANDLE m_SharedHandle = nullptr;
+    IDXGIKeyedMutex* m_pKeyedMutex = nullptr;
     UINT m_Width = 0;
     UINT m_Height = 0;
     DXGI_FORMAT m_SourceFormat = DXGI_FORMAT_UNKNOWN;
 } g_SharedTextureHost;
+
+bool AfxSharedTexture_DuplicateHandleForPid(unsigned int /*pid*/, unsigned long long & outHandleValue, std::string & outError) {
+    outHandleValue = 0;
+    outError.clear();
+
+    static auto s_lastNotReadyLog = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+
+    HANDLE sharedHandle = g_SharedTextureHost.GetSharedHandle();
+    if (!sharedHandle || sharedHandle == INVALID_HANDLE_VALUE) {
+        outError = "shared texture not ready";
+        auto now = std::chrono::steady_clock::now();
+        if (now - s_lastNotReadyLog >= std::chrono::seconds(1)) {
+            advancedfx::Warning("sharedtex_register: shared texture not ready.\n");
+            s_lastNotReadyLog = now;
+        }
+        return false;
+    }
+
+    outHandleValue = static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(sharedHandle));
+    return true;
+}
 
 class CAfxCpuTexture
 : public advancedfx::CRefCountedThreadSafe

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 
 #define ADVANCEDFX_STARTMOVIE_WAV_KEY "advancedfx-802bb089-972b-4841-bdf3-5108175ab59d"
@@ -23,3 +25,5 @@ void Hook_RenderSystemDX11(void * hModule);
 void Hook_SceneSystem(void * hModule);
 
 void RenderSystemDX11_SupplyProjectionMatrix(const SOURCESDK::VMatrix & projectionMatrix);
+
+bool AfxSharedTexture_DuplicateHandleForPid(unsigned int pid, unsigned long long & outHandleValue, std::string & outError);

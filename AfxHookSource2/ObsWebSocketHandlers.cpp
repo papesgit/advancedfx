@@ -2,6 +2,7 @@
 
 #include "ObsSpectatorBindings.h"
 #include "ObsWebSocketActions.h"
+#include "RenderSystemDX11Hooks.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
@@ -570,6 +571,31 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		bool useAlt = args["useAlt"].get<bool>();
 		ObsWebSocket_QueueSetAltSpectatorBindings(useAlt);
 		respond(MakeCommandResult("spectator_bindings_mode", true, useAlt ? "Alt spectator bindings enabled" : "Alt spectator bindings disabled"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("sharedtex_register", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("pid") || !args["pid"].is_number_integer()) {
+			respond(MakeCommandResult("sharedtex_register", false, "Missing or invalid pid"));
+			return;
+		}
+
+		unsigned int pid = args["pid"].get<unsigned int>();
+		unsigned long long handleValue = 0;
+		std::string error;
+		if (!AfxSharedTexture_DuplicateHandleForPid(pid, handleValue, error)) {
+			respond(MakeCommandResult("sharedtex_register", false, error.empty() ? "Failed to duplicate shared texture handle" : error));
+			return;
+		}
+
+		std::ostringstream oss;
+		oss << "0x" << std::hex << handleValue;
+		json result{
+			{"type", "sharedtex_handle"},
+			{"ok", true},
+			{"pid", pid},
+			{"handle", oss.str()}
+		};
+		respond(result);
 	});
 
 	g_ObsWebSocketProtocol.SetExecCommandHandler([](const std::string& cmd, const CObsWebSocketProtocol::JsonResponder& respond) {
