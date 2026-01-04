@@ -75,6 +75,10 @@ ID3D11RenderTargetView* g_BeforeUiRT = nullptr;
 
 static bool g_bSharedTextureKeyedMutexLogged = false;
 static bool g_bSharedTextureHandleLogged = false;
+static bool g_bSharedTextureEnabled = true;
+static UINT g_SharedTextureTargetWidth = 0;
+static UINT g_SharedTextureTargetHeight = 0;
+static double g_SharedTextureFpsCap = 0.0;
 
 class CAfxSharedTextureHost {
 public:
@@ -108,6 +112,7 @@ public:
 
     void Update(ID3D11DeviceContext* pContext, ID3D11Texture2D* pSource) {
         if (!pContext || !pSource) return;
+        if (!g_bSharedTextureEnabled) return;
 
         ID3D11Device* device = nullptr;
         pContext->GetDevice(&device);
@@ -124,6 +129,19 @@ public:
             }
             device->Release();
             return;
+        }
+
+        if (g_SharedTextureFpsCap > 0.0) {
+            auto now = std::chrono::steady_clock::now();
+            if (m_LastUpdateTime.time_since_epoch().count() != 0) {
+                const double minIntervalMs = 1000.0 / g_SharedTextureFpsCap;
+                auto elapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - m_LastUpdateTime).count();
+                if (elapsedMs < minIntervalMs) {
+                    device->Release();
+                    return;
+                }
+            }
+            m_LastUpdateTime = now;
         }
 
         if (!EnsureResources(device, srcDesc, normalizedSourceFormat)) {
@@ -282,9 +300,12 @@ private:
             m_pResolveTexture = nullptr;
         }
 
+        UINT desiredWidth = g_SharedTextureTargetWidth > 0 ? g_SharedTextureTargetWidth : srcDesc.Width;
+        UINT desiredHeight = g_SharedTextureTargetHeight > 0 ? g_SharedTextureTargetHeight : srcDesc.Height;
+
         bool needsTexture = m_pSharedTexture == nullptr
-            || m_Width != srcDesc.Width
-            || m_Height != srcDesc.Height
+            || m_Width != desiredWidth
+            || m_Height != desiredHeight
             || m_SourceFormat != normalizedSourceFormat;
 
         if (needsTexture) {
@@ -293,8 +314,8 @@ private:
             if (m_SharedHandle) { CloseHandle(m_SharedHandle); m_SharedHandle = nullptr; }
 
             D3D11_TEXTURE2D_DESC sharedDesc{};
-            sharedDesc.Width = srcDesc.Width;
-            sharedDesc.Height = srcDesc.Height;
+            sharedDesc.Width = desiredWidth;
+            sharedDesc.Height = desiredHeight;
             sharedDesc.MipLevels = 1;
             sharedDesc.ArraySize = 1;
             sharedDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -369,8 +390,8 @@ private:
                 g_bSharedTextureKeyedMutexLogged = true;
             }
 
-            m_Width = srcDesc.Width;
-            m_Height = srcDesc.Height;
+            m_Width = desiredWidth;
+            m_Height = desiredHeight;
             m_SourceFormat = normalizedSourceFormat;
         }
 
@@ -499,6 +520,7 @@ float4 main(PS_INPUT input) : SV_TARGET {
     UINT m_Width = 0;
     UINT m_Height = 0;
     DXGI_FORMAT m_SourceFormat = DXGI_FORMAT_UNKNOWN;
+    std::chrono::steady_clock::time_point m_LastUpdateTime{};
 } g_SharedTextureHost;
 
 bool AfxSharedTexture_DuplicateHandleForPid(unsigned int /*pid*/, unsigned long long & outHandleValue, std::string & outError) {
@@ -5211,6 +5233,77 @@ CON_COMMAND(mirv_nvenc, "NVIDIA NVENC hardware encoding (experimental).")
 		"Example: %s stream enable 127.0.0.1 5000\n",
 		cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0
 	);
+}
+
+CON_COMMAND(mirv_sharedtex, "Shared texture control.")
+{
+    int argc = args->ArgC();
+    const char* cmd0 = args->ArgV(0);
+
+    if (2 <= argc) {
+        const char* cmd1 = args->ArgV(1);
+        if (0 == _stricmp(cmd1, "enabled")) {
+            if (3 <= argc) {
+                g_bSharedTextureEnabled = 0 != atoi(args->ArgV(2));
+                advancedfx::Message("Shared texture %s.\n", g_bSharedTextureEnabled ? "enabled" : "disabled");
+                return;
+            }
+            advancedfx::Message(
+                "%s enabled 0|1 - Disable/enable shared texture output.\n"
+                "Current value: %s\n",
+                cmd0,
+                g_bSharedTextureEnabled ? "1" : "0"
+            );
+            return;
+        }
+        else if (0 == _stricmp(cmd1, "resolution")) {
+            if (4 <= argc) {
+                UINT w = static_cast<UINT>(atoi(args->ArgV(2)));
+                UINT h = static_cast<UINT>(atoi(args->ArgV(3)));
+                if (w > 0 && h > 0) {
+                    g_SharedTextureTargetWidth = w;
+                    g_SharedTextureTargetHeight = h;
+                    advancedfx::Message("Shared texture resolution set to %ux%u.\n", w, h);
+                    return;
+                }
+            }
+            if (3 <= argc && 0 == _stricmp(args->ArgV(2), "default")) {
+                g_SharedTextureTargetWidth = 0;
+                g_SharedTextureTargetHeight = 0;
+                advancedfx::Message("Shared texture resolution override cleared.\n");
+                return;
+            }
+            advancedfx::Message(
+                "%s resolution <width> <height>|default - Override shared texture size.\n",
+                cmd0
+            );
+            return;
+        }
+        else if (0 == _stricmp(cmd1, "fps")) {
+            if (3 <= argc) {
+                double fps = atof(args->ArgV(2));
+                if (fps < 0.0) fps = 0.0;
+                g_SharedTextureFpsCap = fps;
+                advancedfx::Message("Shared texture FPS cap set to %.2f (%s).\n", fps, fps > 0.0 ? "limited" : "unlimited");
+                return;
+            }
+            std::string fpsStr = g_SharedTextureFpsCap > 0.0 ? std::to_string(g_SharedTextureFpsCap) : "unlimited";
+            advancedfx::Message(
+                "%s fps <value|0> - Cap shared texture FPS (0 = uncapped).\n"
+                "Current value: %s\n",
+                cmd0,
+                fpsStr.c_str()
+            );
+            return;
+        }
+    }
+
+    advancedfx::Message(
+        "%s enabled 0|1 - Disable/enable shared texture output.\n"
+        "%s resolution <width> <height>|default - Override shared texture size.\n"
+        "%s fps <value|0> - Cap shared texture FPS (0 = uncapped).\n",
+        cmd0, cmd0, cmd0
+    );
 }
 
 CON_COMMAND(mirv_reshade, "Control ReShade_advancedfx ReShade addon.")
