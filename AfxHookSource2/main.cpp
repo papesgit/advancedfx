@@ -856,17 +856,35 @@ static CEntityInstance* GetPawnFromControllerIndex(int controllerIndex) {
 	return (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIndex);
 }
 
-static bool TryComputeAttachmentCamera(const AttachmentCameraState& state, Afx::Math::Vector3& outOrigin, Afx::Math::QEulerAngles& outAngles, float & outFov) {
-	if (!state.active) return false;
+static double EaseTransition(double t, AttachmentCameraTransitionEasing easing) {
+	if (t <= 0.0) return 0.0;
+	if (t >= 1.0) return 1.0;
 
-	int controllerIndex = state.controllerIndex;
-	if (state.animation.enabled && state.animation.hasTransition && state.animation.targetControllerIndex != -1) {
-		const double now = g_MirvTime.curtime_get();
-		const double animT = now - state.animation.startTime;
-		if (animT >= state.animation.transitionTime) {
-			controllerIndex = state.animation.targetControllerIndex;
+	switch (easing) {
+	case AttachmentCameraTransitionEasing::Linear:
+		return t;
+	case AttachmentCameraTransitionEasing::EaseInOutCubic:
+		if (t < 0.5) {
+			return 4.0 * t * t * t;
 		}
+		{
+			const double k = -2.0 * t + 2.0;
+			return 1.0 - (k * k * k) / 2.0;
+		}
+	case AttachmentCameraTransitionEasing::Smoothstep:
+	default:
+		return t * t * (3.0 - 2.0 * t);
 	}
+}
+
+static bool ComputeAttachmentCameraTransform(
+	const AttachmentCameraState& state,
+	int controllerIndex,
+	double animT,
+	Afx::Math::Vector3& outOrigin,
+	Afx::Math::Quaternion& outQuat,
+	float& outFov) {
+	if (!state.active) return false;
 
 	auto pawn = GetPawnFromControllerIndex(controllerIndex);
 	if (!pawn) return false;
@@ -892,8 +910,7 @@ static bool TryComputeAttachmentCamera(const AttachmentCameraState& state, Afx::
 	float fov = state.fov;
 
 	if (state.animation.enabled && !state.animation.keyframes.empty()) {
-		const double now = g_MirvTime.curtime_get();
-		double t = now - state.animation.startTime;
+		double t = animT;
 		if (t < 0.0) t = 0.0;
 
 		const auto& keyframes = state.animation.keyframes;
@@ -954,9 +971,89 @@ static bool TryComputeAttachmentCamera(const AttachmentCameraState& state, Afx::
 	combinedOrigin += RotateVectorByQuat(combinedQuat, offsetVec);
 
 	outOrigin = combinedOrigin;
-	outAngles = combinedQuat.ToQREulerAngles().ToQEulerAngles();
+	outQuat = combinedQuat;
 	outFov = fov;
 
+	return true;
+}
+
+static bool TryComputeAttachmentCamera(const AttachmentCameraState& state, Afx::Math::Vector3& outOrigin, Afx::Math::QEulerAngles& outAngles, float & outFov) {
+	if (!state.active) return false;
+
+	const double now = g_MirvTime.curtime_get();
+	double animT = state.animation.enabled ? now - state.animation.startTime : 0.0;
+	if (animT < 0.0) animT = 0.0;
+
+	const bool hasTransition = state.animation.enabled
+		&& state.animation.hasTransition
+		&& state.animation.targetControllerIndex != -1;
+	const double transitionStart = state.animation.transitionTime;
+	const double transitionDuration = state.animation.transitionDuration;
+	const double transitionEnd = transitionStart + transitionDuration;
+	const bool hasBlend = hasTransition && transitionDuration > 0.0;
+
+	double animEvalT = animT;
+	if (hasBlend && animT >= transitionStart) {
+		if (animT < transitionEnd) {
+			animEvalT = transitionStart;
+		} else {
+			animEvalT = animT - transitionDuration;
+		}
+	}
+
+	if (hasBlend && animT >= transitionStart && animT < transitionEnd) {
+		Afx::Math::Vector3 origin0;
+		Afx::Math::Vector3 origin1;
+		Afx::Math::Quaternion quat0;
+		Afx::Math::Quaternion quat1;
+		float fov0 = state.fov;
+		float fov1 = state.fov;
+
+		if (!ComputeAttachmentCameraTransform(state, state.controllerIndex, animEvalT, origin0, quat0, fov0)) return false;
+		if (!ComputeAttachmentCameraTransform(state, state.animation.targetControllerIndex, animEvalT, origin1, quat1, fov1)) return false;
+
+		double alpha = (transitionDuration > 1.0e-9) ? (animT - transitionStart) / transitionDuration : 1.0;
+		if (alpha < 0.0) alpha = 0.0;
+		if (alpha > 1.0) alpha = 1.0;
+		alpha = EaseTransition(alpha, state.animation.transitionEasing);
+
+		auto lerpVec = [](const Afx::Math::Vector3& a, const Afx::Math::Vector3& b, double t) -> Afx::Math::Vector3 {
+			return Afx::Math::Vector3(
+				a.X + (b.X - a.X) * t,
+				a.Y + (b.Y - a.Y) * t,
+				a.Z + (b.Z - a.Z) * t
+			);
+		};
+
+		auto lerp = [](float a, float b, double t) -> float {
+			return (float)(a + (b - a) * t);
+		};
+
+		Afx::Math::Vector3 blendedOrigin = lerpVec(origin0, origin1, alpha);
+		Afx::Math::Quaternion blendedQuat = quat0.Slerp(quat1, (float)alpha).Normalized();
+		float blendedFov = lerp(fov0, fov1, alpha);
+
+		outOrigin = blendedOrigin;
+		outAngles = blendedQuat.ToQREulerAngles().ToQEulerAngles();
+		outFov = blendedFov;
+		return true;
+	}
+
+	int controllerIndex = state.controllerIndex;
+	if (hasTransition) {
+		if (hasBlend) {
+			if (animT >= transitionEnd) {
+				controllerIndex = state.animation.targetControllerIndex;
+			}
+		} else if (animT >= transitionStart) {
+			controllerIndex = state.animation.targetControllerIndex;
+		}
+	}
+
+	Afx::Math::Quaternion outQuat;
+	if (!ComputeAttachmentCameraTransform(state, controllerIndex, animEvalT, outOrigin, outQuat, outFov)) return false;
+
+	outAngles = outQuat.ToQREulerAngles().ToQEulerAngles();
 	return true;
 }
 
@@ -1206,13 +1303,27 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	float attachedFov = 90.0f;
 	if (g_AttachmentCamera.animation.enabled
 		&& g_AttachmentCamera.animation.hasTransition
-		&& !g_AttachmentCamera.animation.transitionApplied
 		&& g_AttachmentCamera.animation.targetControllerIndex != -1
 		&& g_pEngineToClient) {
 
 		const double now = g_MirvTime.curtime_get();
 		const double animT = now - g_AttachmentCamera.animation.startTime;
-		if (animT >= g_AttachmentCamera.animation.transitionTime) {
+		const double transitionStart = g_AttachmentCamera.animation.transitionTime;
+		const double transitionDuration = g_AttachmentCamera.animation.transitionDuration;
+		const double transitionEnd = transitionStart + transitionDuration;
+
+		if (transitionDuration > 0.0) {
+			if (!g_AttachmentCamera.animation.transitionMode4Applied && animT >= transitionStart) {
+				g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
+				g_AttachmentCamera.animation.transitionMode4Applied = true;
+			}
+
+			if (!g_AttachmentCamera.animation.transitionApplied && animT >= transitionEnd) {
+				std::string cmd = "spec_mode 2; spec_player " + std::to_string(g_AttachmentCamera.animation.targetControllerIndex);
+				g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
+				g_AttachmentCamera.animation.transitionApplied = true;
+			}
+		} else if (!g_AttachmentCamera.animation.transitionApplied && animT >= transitionStart) {
 			std::string cmd = "spec_mode 2; spec_player " + std::to_string(g_AttachmentCamera.animation.targetControllerIndex);
 			g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
 			g_AttachmentCamera.animation.transitionApplied = true;

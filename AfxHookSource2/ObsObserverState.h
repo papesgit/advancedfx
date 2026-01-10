@@ -7,6 +7,12 @@
 #include <vector>
 #include <string>
 
+enum class AttachmentCameraTransitionEasing {
+	Linear,
+	Smoothstep,
+	EaseInOutCubic
+};
+
 struct AttachmentCameraKeyframe {
 	double time = 0.0;
 	int order = 0;
@@ -22,8 +28,11 @@ struct AttachmentCameraAnimationState {
 	std::vector<AttachmentCameraKeyframe> keyframes;
 	bool hasTransition = false;
 	double transitionTime = 0.0;
+	double transitionDuration = 0.0;
+	AttachmentCameraTransitionEasing transitionEasing = AttachmentCameraTransitionEasing::Smoothstep;
 	int targetControllerIndex = -1;
 	bool transitionApplied = false;
+	bool transitionMode4Applied = false;
 };
 
 struct AttachmentCameraState {

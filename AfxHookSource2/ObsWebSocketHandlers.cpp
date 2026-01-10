@@ -452,8 +452,11 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 			state.animation.keyframes.clear();
 			state.animation.hasTransition = false;
 			state.animation.transitionTime = 0.0;
+			state.animation.transitionDuration = 0.0;
+			state.animation.transitionEasing = AttachmentCameraTransitionEasing::Smoothstep;
 			state.animation.targetControllerIndex = -1;
 			state.animation.transitionApplied = false;
+			state.animation.transitionMode4Applied = false;
 
 			if (state.animation.enabled) {
 				if (anim.contains("events") && anim["events"].is_array()) {
@@ -476,6 +479,21 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 							}
 							state.animation.hasTransition = true;
 							state.animation.transitionTime = time;
+							state.animation.transitionDuration = ev.contains("duration") && ev["duration"].is_number()
+								? ev["duration"].get<double>()
+								: 0.0;
+							if (state.animation.transitionDuration < 0.0) state.animation.transitionDuration = 0.0;
+							state.animation.transitionEasing = AttachmentCameraTransitionEasing::Smoothstep;
+							if (ev.contains("easing") && ev["easing"].is_string()) {
+								const auto easing = ev["easing"].get<std::string>();
+								if (0 == _stricmp(easing.c_str(), "linear")) {
+									state.animation.transitionEasing = AttachmentCameraTransitionEasing::Linear;
+								} else if (0 == _stricmp(easing.c_str(), "easeinoutcubic")) {
+									state.animation.transitionEasing = AttachmentCameraTransitionEasing::EaseInOutCubic;
+								} else {
+									state.animation.transitionEasing = AttachmentCameraTransitionEasing::Smoothstep;
+								}
+							}
 							continue;
 						}
 
