@@ -500,6 +500,30 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 						AttachmentCameraKeyframe kf;
 						kf.time = time;
 						kf.order = order;
+						kf.easingCurve = AttachmentCameraKeyframeEasingCurve::Linear;
+						kf.easingMode = AttachmentCameraKeyframeEase::EaseInOut;
+
+						if (ev.contains("easing_curve") && ev["easing_curve"].is_string()) {
+							const auto curve = ev["easing_curve"].get<std::string>();
+							if (0 == _stricmp(curve.c_str(), "smoothstep")) {
+								kf.easingCurve = AttachmentCameraKeyframeEasingCurve::Smoothstep;
+							} else if (0 == _stricmp(curve.c_str(), "cubic")) {
+								kf.easingCurve = AttachmentCameraKeyframeEasingCurve::Cubic;
+							} else {
+								kf.easingCurve = AttachmentCameraKeyframeEasingCurve::Linear;
+							}
+						}
+
+						if (ev.contains("easing_mode") && ev["easing_mode"].is_string()) {
+							const auto mode = ev["easing_mode"].get<std::string>();
+							if (0 == _stricmp(mode.c_str(), "easein")) {
+								kf.easingMode = AttachmentCameraKeyframeEase::EaseIn;
+							} else if (0 == _stricmp(mode.c_str(), "easeout")) {
+								kf.easingMode = AttachmentCameraKeyframeEase::EaseOut;
+							} else {
+								kf.easingMode = AttachmentCameraKeyframeEase::EaseInOut;
+							}
+						}
 
 						if (ev.contains("delta_pos") && ev["delta_pos"].is_object()) {
 							const auto& dp = ev["delta_pos"];

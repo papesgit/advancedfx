@@ -13,6 +13,18 @@ enum class AttachmentCameraTransitionEasing {
 	EaseInOutCubic
 };
 
+enum class AttachmentCameraKeyframeEasingCurve {
+	Linear,
+	Smoothstep,
+	Cubic
+};
+
+enum class AttachmentCameraKeyframeEase {
+	EaseIn,
+	EaseOut,
+	EaseInOut
+};
+
 struct AttachmentCameraKeyframe {
 	double time = 0.0;
 	int order = 0;
@@ -20,6 +32,8 @@ struct AttachmentCameraKeyframe {
 	Afx::Math::QEulerAngles deltaAngles = Afx::Math::QEulerAngles(0.0, 0.0, 0.0);
 	bool hasFov = false;
 	float fov = 90.0f;
+	AttachmentCameraKeyframeEasingCurve easingCurve = AttachmentCameraKeyframeEasingCurve::Linear;
+	AttachmentCameraKeyframeEase easingMode = AttachmentCameraKeyframeEase::EaseInOut;
 };
 
 struct AttachmentCameraAnimationState {

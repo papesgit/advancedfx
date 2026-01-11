@@ -856,24 +856,58 @@ static CEntityInstance* GetPawnFromControllerIndex(int controllerIndex) {
 	return (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIndex);
 }
 
-static double EaseTransition(double t, AttachmentCameraTransitionEasing easing) {
+static double EaseCurve(double t, AttachmentCameraKeyframeEasingCurve curve, AttachmentCameraKeyframeEase mode) {
 	if (t <= 0.0) return 0.0;
 	if (t >= 1.0) return 1.0;
 
+	switch (curve) {
+	case AttachmentCameraKeyframeEasingCurve::Smoothstep:
+		switch (mode) {
+		case AttachmentCameraKeyframeEase::EaseIn:
+			{
+				const double k = 1.0 - t;
+				return 1.0 - (k * k);
+			}
+		case AttachmentCameraKeyframeEase::EaseOut:
+			return t * t;
+		case AttachmentCameraKeyframeEase::EaseInOut:
+		default:
+			return t * t * (3.0 - 2.0 * t);
+		}
+	case AttachmentCameraKeyframeEasingCurve::Cubic:
+		switch (mode) {
+		case AttachmentCameraKeyframeEase::EaseIn:
+			{
+				const double k = 1.0 - t;
+				return 1.0 - (k * k * k);
+			}
+		case AttachmentCameraKeyframeEase::EaseOut:
+			return t * t * t;
+		case AttachmentCameraKeyframeEase::EaseInOut:
+		default:
+			if (t < 0.5) {
+				return 4.0 * t * t * t;
+			}
+			{
+				const double k = -2.0 * t + 2.0;
+				return 1.0 - (k * k * k) / 2.0;
+			}
+		}
+	case AttachmentCameraKeyframeEasingCurve::Linear:
+	default:
+		return t;
+	}
+}
+
+static AttachmentCameraKeyframeEasingCurve ToKeyframeCurve(AttachmentCameraTransitionEasing easing) {
 	switch (easing) {
 	case AttachmentCameraTransitionEasing::Linear:
-		return t;
+		return AttachmentCameraKeyframeEasingCurve::Linear;
 	case AttachmentCameraTransitionEasing::EaseInOutCubic:
-		if (t < 0.5) {
-			return 4.0 * t * t * t;
-		}
-		{
-			const double k = -2.0 * t + 2.0;
-			return 1.0 - (k * k * k) / 2.0;
-		}
+		return AttachmentCameraKeyframeEasingCurve::Cubic;
 	case AttachmentCameraTransitionEasing::Smoothstep:
 	default:
-		return t * t * (3.0 - 2.0 * t);
+		return AttachmentCameraKeyframeEasingCurve::Smoothstep;
 	}
 }
 
@@ -937,6 +971,22 @@ static bool ComputeAttachmentCameraTransform(
 			alpha = dt > 1.0e-9 ? (t - k0->time) / dt : 0.0;
 			if (alpha < 0.0) alpha = 0.0;
 			if (alpha > 1.0) alpha = 1.0;
+		}
+		if (k0 != k1) {
+			const bool easeOut = k0->easingCurve != AttachmentCameraKeyframeEasingCurve::Linear
+				&& (k0->easingMode == AttachmentCameraKeyframeEase::EaseOut
+					|| k0->easingMode == AttachmentCameraKeyframeEase::EaseInOut);
+			const bool easeIn = k1->easingCurve != AttachmentCameraKeyframeEasingCurve::Linear
+				&& (k1->easingMode == AttachmentCameraKeyframeEase::EaseIn
+					|| k1->easingMode == AttachmentCameraKeyframeEase::EaseInOut);
+
+			if (easeOut || easeIn) {
+				const auto curve = easeIn ? k1->easingCurve : k0->easingCurve;
+				const auto mode = easeIn && easeOut
+					? AttachmentCameraKeyframeEase::EaseInOut
+					: (easeIn ? AttachmentCameraKeyframeEase::EaseIn : AttachmentCameraKeyframeEase::EaseOut);
+				alpha = EaseCurve(alpha, curve, mode);
+			}
 		}
 
 		auto lerp = [](float a, float b, double t) -> float {
@@ -1015,7 +1065,7 @@ static bool TryComputeAttachmentCamera(const AttachmentCameraState& state, Afx::
 		double alpha = (transitionDuration > 1.0e-9) ? (animT - transitionStart) / transitionDuration : 1.0;
 		if (alpha < 0.0) alpha = 0.0;
 		if (alpha > 1.0) alpha = 1.0;
-		alpha = EaseTransition(alpha, state.animation.transitionEasing);
+		alpha = EaseCurve(alpha, ToKeyframeCurve(state.animation.transitionEasing), AttachmentCameraKeyframeEase::EaseInOut);
 
 		auto lerpVec = [](const Afx::Math::Vector3& a, const Afx::Math::Vector3& b, double t) -> Afx::Math::Vector3 {
 			return Afx::Math::Vector3(
