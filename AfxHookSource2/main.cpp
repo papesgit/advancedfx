@@ -841,6 +841,44 @@ static Afx::Math::Vector3 RotateVectorByQuat(const Afx::Math::Quaternion& q, con
 	return Afx::Math::Vector3(result.X, result.Y, result.Z);
 }
 
+static Afx::Math::Quaternion AxisAngleQuat(const Afx::Math::Vector3& axis, double radians) {
+	Afx::Math::Vector3 n = axis;
+	if (n.Length() <= 1.0e-9) {
+		return Afx::Math::Quaternion(1.0, 0.0, 0.0, 0.0);
+	}
+	n.Normalize();
+	const double half = 0.5 * radians;
+	const double s = sin(half);
+	return Afx::Math::Quaternion(cos(half), n.X * s, n.Y * s, n.Z * s);
+}
+
+static Afx::Math::Quaternion ApplyAxisRotation(
+	const Afx::Math::Quaternion& q,
+	double degrees,
+	const Afx::Math::Vector3& axis,
+	AttachmentCameraRotationBasis basis) {
+	if (fabs(degrees) <= 1.0e-9) return q;
+	const double radians = degrees * (M_PI / 180.0);
+	const Afx::Math::Quaternion rot = AxisAngleQuat(axis, radians);
+	return (basis == AttachmentCameraRotationBasis::World ? rot * q : q * rot).Normalized();
+}
+
+static Afx::Math::Quaternion ApplyEulerWithBasis(
+	const Afx::Math::Quaternion& base,
+	const Afx::Math::QEulerAngles& angles,
+	AttachmentCameraRotationBasis basisPitch,
+	AttachmentCameraRotationBasis basisYaw,
+	AttachmentCameraRotationBasis basisRoll) {
+	Afx::Math::Quaternion q = base;
+	const Afx::Math::Vector3 axisPitch(0.0, 1.0, 0.0);
+	const Afx::Math::Vector3 axisYaw(0.0, 0.0, 1.0);
+	const Afx::Math::Vector3 axisRoll(1.0, 0.0, 0.0);
+	q = ApplyAxisRotation(q, angles.Pitch, axisPitch, basisPitch);
+	q = ApplyAxisRotation(q, angles.Yaw, axisYaw, basisYaw);
+	q = ApplyAxisRotation(q, angles.Roll, axisRoll, basisRoll);
+	return q.Normalized();
+}
+
 static CEntityInstance* GetPawnFromControllerIndex(int controllerIndex) {
 	if (!g_pEntityList || !g_GetEntityFromIndex) return nullptr;
 
@@ -933,14 +971,19 @@ static bool ComputeAttachmentCameraTransform(
 	if (!pawn->GetAttachment(attachmentIdx, attachmentOrigin, attachmentAngles)) return false;
 
 	Afx::Math::Quaternion baseQuat = SourceQuatToAfx(attachmentAngles).Normalized();
-	Afx::Math::Quaternion offsetQuat = Afx::Math::Quaternion::FromQREulerAngles(
-		Afx::Math::QREulerAngles::FromQEulerAngles(state.offsetAngles)
-	).Normalized();
+	Afx::Math::Quaternion baseQuatForRotation = baseQuat;
+	if (state.rotationLockPitch || state.rotationLockYaw || state.rotationLockRoll) {
+		Afx::Math::QEulerAngles baseAngles = baseQuat.ToQREulerAngles().ToQEulerAngles();
+		if (state.rotationLockPitch) baseAngles.Pitch = 0.0;
+		if (state.rotationLockYaw) baseAngles.Yaw = 0.0;
+		if (state.rotationLockRoll) baseAngles.Roll = 0.0;
+		baseQuatForRotation = Afx::Math::Quaternion::FromQREulerAngles(
+			Afx::Math::QREulerAngles::FromQEulerAngles(baseAngles)
+		).Normalized();
+	}
 
 	SOURCESDK::Vector deltaPos = { 0.0f, 0.0f, 0.0f };
-	Afx::Math::Quaternion deltaQuat = Afx::Math::Quaternion::FromQREulerAngles(
-		Afx::Math::QREulerAngles::FromQEulerAngles(Afx::Math::QEulerAngles(0.0, 0.0, 0.0))
-	).Normalized();
+	Afx::Math::QEulerAngles deltaAngles(0.0, 0.0, 0.0);
 	float fov = state.fov;
 
 	if (state.animation.enabled && !state.animation.keyframes.empty()) {
@@ -1003,14 +1046,26 @@ static bool ComputeAttachmentCameraTransform(
 		Afx::Math::Quaternion q1 = Afx::Math::Quaternion::FromQREulerAngles(
 			Afx::Math::QREulerAngles::FromQEulerAngles(k1->deltaAngles)
 		).Normalized();
-		deltaQuat = q0.Slerp(q1, (float)alpha).Normalized();
+		Afx::Math::Quaternion deltaQuat = q0.Slerp(q1, (float)alpha).Normalized();
+		deltaAngles = deltaQuat.ToQREulerAngles().ToQEulerAngles();
 
 		const float f0 = k0->hasFov ? k0->fov : state.fov;
 		const float f1 = k1->hasFov ? k1->fov : state.fov;
 		fov = lerp(f0, f1, alpha);
 	}
 
-	Afx::Math::Quaternion combinedQuat = (baseQuat * (offsetQuat * deltaQuat)).Normalized();
+	Afx::Math::Quaternion combinedQuat = ApplyEulerWithBasis(
+		baseQuatForRotation,
+		state.offsetAngles,
+		state.rotationBasisPitch,
+		state.rotationBasisYaw,
+		state.rotationBasisRoll);
+	combinedQuat = ApplyEulerWithBasis(
+		combinedQuat,
+		deltaAngles,
+		state.rotationBasisPitch,
+		state.rotationBasisYaw,
+		state.rotationBasisRoll);
 
 	Afx::Math::Vector3 combinedOrigin(attachmentOrigin.x, attachmentOrigin.y, attachmentOrigin.z);
 	Afx::Math::Vector3 offsetVec(
@@ -1018,7 +1073,10 @@ static bool ComputeAttachmentCameraTransform(
 		state.offsetPos.y + deltaPos.y,
 		state.offsetPos.z + deltaPos.z
 	);
-	combinedOrigin += RotateVectorByQuat(combinedQuat, offsetVec);
+	const Afx::Math::Quaternion positionQuat = state.rotationReference == AttachmentCameraRotationReference::OffsetLocal
+		? baseQuat
+		: combinedQuat;
+	combinedOrigin += RotateVectorByQuat(positionQuat, offsetVec);
 
 	outOrigin = combinedOrigin;
 	outQuat = combinedQuat;

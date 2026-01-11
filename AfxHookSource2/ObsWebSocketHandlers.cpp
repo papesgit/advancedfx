@@ -442,6 +442,46 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 			return;
 		}
 
+		state.rotationReference = AttachmentCameraRotationReference::Attachment;
+		state.rotationBasisPitch = AttachmentCameraRotationBasis::Attachment;
+		state.rotationBasisYaw = AttachmentCameraRotationBasis::Attachment;
+		state.rotationBasisRoll = AttachmentCameraRotationBasis::Attachment;
+
+		if (args.contains("rotation_reference") && args["rotation_reference"].is_string()) {
+			const auto reference = args["rotation_reference"].get<std::string>();
+			if (0 == _stricmp(reference.c_str(), "offset_local")) {
+				state.rotationReference = AttachmentCameraRotationReference::OffsetLocal;
+			}
+		}
+
+		if (args.contains("rotation_basis") && args["rotation_basis"].is_object()) {
+			const auto& basis = args["rotation_basis"];
+			auto parseBasis = [](const json& obj, const char* key, AttachmentCameraRotationBasis fallback) {
+				if (!obj.contains(key) || !obj[key].is_string()) return fallback;
+				const auto value = obj[key].get<std::string>();
+				if (0 == _stricmp(value.c_str(), "world")) {
+					return AttachmentCameraRotationBasis::World;
+				}
+				return AttachmentCameraRotationBasis::Attachment;
+			};
+			state.rotationBasisPitch = parseBasis(basis, "pitch", state.rotationBasisPitch);
+			state.rotationBasisYaw = parseBasis(basis, "yaw", state.rotationBasisYaw);
+			state.rotationBasisRoll = parseBasis(basis, "roll", state.rotationBasisRoll);
+		}
+
+		state.rotationLockPitch = false;
+		state.rotationLockYaw = false;
+		state.rotationLockRoll = false;
+		if (args.contains("rotation_axis_lock") && args["rotation_axis_lock"].is_object()) {
+			const auto& locks = args["rotation_axis_lock"];
+			auto parseLock = [](const json& obj, const char* key) {
+				return obj.contains(key) && obj[key].is_boolean() ? obj[key].get<bool>() : false;
+			};
+			state.rotationLockPitch = parseLock(locks, "pitch");
+			state.rotationLockYaw = parseLock(locks, "yaw");
+			state.rotationLockRoll = parseLock(locks, "roll");
+		}
+
 		// Optional attach animation.
 		if (args.contains("animation") && args["animation"].is_object()) {
 			const auto& anim = args["animation"];

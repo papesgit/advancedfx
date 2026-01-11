@@ -25,6 +25,16 @@ enum class AttachmentCameraKeyframeEase {
 	EaseInOut
 };
 
+enum class AttachmentCameraRotationReference {
+	Attachment,
+	OffsetLocal
+};
+
+enum class AttachmentCameraRotationBasis {
+	Attachment,
+	World
+};
+
 struct AttachmentCameraKeyframe {
 	double time = 0.0;
 	int order = 0;
@@ -58,6 +68,13 @@ struct AttachmentCameraState {
 	SOURCESDK::Vector offsetPos = {0.0f, 0.0f, 0.0f};
 	Afx::Math::QEulerAngles offsetAngles = Afx::Math::QEulerAngles(0.0, 0.0, 0.0);
 	float fov = 90.0f;
+	AttachmentCameraRotationReference rotationReference = AttachmentCameraRotationReference::Attachment;
+	AttachmentCameraRotationBasis rotationBasisPitch = AttachmentCameraRotationBasis::Attachment;
+	AttachmentCameraRotationBasis rotationBasisYaw = AttachmentCameraRotationBasis::Attachment;
+	AttachmentCameraRotationBasis rotationBasisRoll = AttachmentCameraRotationBasis::Attachment;
+	bool rotationLockPitch = false;
+	bool rotationLockYaw = false;
+	bool rotationLockRoll = false;
 	AttachmentCameraAnimationState animation;
 };
 
