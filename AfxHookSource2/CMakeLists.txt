@@ -104,6 +104,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     afx_hook_source2_rs
 	dxguid.lib
     d3dcompiler.lib
+    windowscodecs.lib
+    ole32.lib
     bcrypt.lib # corrosion fails to detect this
     ws2_32.lib # Winsock for WebSocket and UDP
     crypt32.lib # SHA-1 hashing for WebSocket handshake
@@ -256,6 +258,9 @@ target_sources(${PROJECT_NAME} PRIVATE
 
 	MirvFix.cpp
 	MirvFix.h
+
+    MirvImage.cpp
+    MirvImage.h
 
 	MirvTime.cpp
 	MirvTime.h

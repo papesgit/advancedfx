@@ -4,6 +4,7 @@
 #include "RenderSystemDX11Hooks.h"
 
 #include "CampathDrawer.h"
+#include "MirvImage.h"
 #include "RenderServiceHooks.h"
 #include "ReShadeAdvancedfx.h"
 #include "WrpConsole.h"
@@ -1880,6 +1881,7 @@ HRESULT STDMETHODCALLTYPE New_CreateRenderTargetView(  ID3D11Device * This,
                     g_DepthCompositor.OnTargetEnd();
                     //CAfxShaderResourceViews::Clear();
                     g_CampathDrawer.EndDevice();
+                    g_MirvImageDrawer.EndDevice();
                     g_SharedTextureHost.Reset();
                     g_pDevice->Release();
                     g_pDevice = nullptr;
@@ -1897,6 +1899,7 @@ HRESULT STDMETHODCALLTYPE New_CreateRenderTargetView(  ID3D11Device * This,
                 g_pDevice = This;
                 g_pDevice->AddRef();
                 g_CampathDrawer.BeginDevice(This);
+                g_MirvImageDrawer.BeginDevice(This);
             }
             pTexture->Release();
         }
@@ -2024,6 +2027,7 @@ void STDMETHODCALLTYPE New_OMSetRenderTargets( ID3D11DeviceContext * This,
                 g_pImmediateContext->RSGetViewports(&numViewPorts, &g_ViewPort);
 
                 g_CampathDrawer.OnRenderThread_Draw(g_pImmediateContext, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
+                g_MirvImageDrawer.OnRenderThread_Draw(g_pImmediateContext, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
 
                 g_bInOwnDraw = false;
             }

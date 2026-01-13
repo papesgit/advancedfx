@@ -33,7 +33,7 @@ VS_OUTPUT main( const VS_INPUT i )
 		
 	float4 curProj = projPos(i.xyz);
 	
-	o.xyzw = curProj / curProj.w;
+	o.xyzw = curProj;
 	o.t0 = i.t0.xy;
 	
 	return o;
