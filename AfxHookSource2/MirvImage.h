@@ -10,6 +10,8 @@
 
 #include "../shared/AfxMath.h"
 
+struct IDXGIKeyedMutex;
+
 class CMirvImageDrawer
 {
 public:
@@ -29,6 +31,13 @@ public:
 	void LoadImage(const char* name, const char* fileName);
 	void UnloadImage(const char* name);
 	void ListImages();
+
+	void RegisterAtlas(const char* name, const char* handleStr, UINT width, UINT height, const char* formatStr, const char* alphaStr, bool keyedMutex);
+	void UnregisterAtlas(const char* name);
+	void ListAtlases();
+	void SetAtlasRegion(const char* atlasName, const char* regionId, float u0, float v0, float u1, float v1, double defaultW, double defaultH);
+	void UseAtlasRegion(const char* name, const char* atlasName, const char* regionId);
+	void ProbeAtlas(const char* atlasName, int x, int y);
 
 	void SetPosition(const char* name, double x, double y, double z);
 	void SetAngles(const char* name, double pitch, double yaw, double roll);
@@ -58,6 +67,8 @@ private:
 	{
 		std::string name;
 		std::wstring filePath;
+		std::string atlasName;
+		std::string regionId;
 		Afx::Math::Vector3 position = Afx::Math::Vector3(0.0, 0.0, 0.0);
 		double pitch = 0.0;
 		double yaw = 0.0;
@@ -72,10 +83,74 @@ private:
 		ID3D11ShaderResourceView* srv = nullptr;
 		UINT width = 0;
 		UINT height = 0;
+		float u0 = 0.0f;
+		float v0 = 0.0f;
+		float u1 = 1.0f;
+		float v1 = 1.0f;
+		bool useAtlas = false;
+	};
+
+	struct AtlasRegion
+	{
+		std::string id;
+		float u0 = 0.0f;
+		float v0 = 0.0f;
+		float u1 = 1.0f;
+		float v1 = 1.0f;
+		double defaultW = 1.0;
+		double defaultH = 1.0;
+	};
+
+	struct AtlasTexture
+	{
+		HANDLE handle = nullptr;
+		ID3D11Texture2D* texture = nullptr;
+		ID3D11ShaderResourceView* srv = nullptr;
+		IDXGIKeyedMutex* keyedMutexObj = nullptr;
+		bool loggedOpenFail = false;
+		bool loggedMutexFail = false;
+	};
+
+	enum class AtlasFormat {
+		BGRA8,
+		RGBA8
+	};
+
+	enum class AlphaMode {
+		Premultiplied,
+		Straight
+	};
+
+	struct AtlasEntry
+	{
+		std::string name;
+		UINT width = 0;
+		UINT height = 0;
+		AtlasFormat format = AtlasFormat::BGRA8;
+		AlphaMode alphaMode = AlphaMode::Premultiplied;
+		bool keyedMutex = false;
+
+		AtlasTexture texture;
+
+		ID3D11Texture2D* localTexture = nullptr;
+		ID3D11ShaderResourceView* localSrv = nullptr;
+		DXGI_FORMAT localFormat = DXGI_FORMAT_UNKNOWN;
+		UINT localWidth = 0;
+		UINT localHeight = 0;
+		bool localValid = false;
+
+		std::vector<AtlasRegion> regions;
 	};
 
 	ImageEntry* FindImageLocked(const std::string& name);
+	AtlasEntry* FindAtlasLocked(const std::string& name);
+	AtlasRegion* FindAtlasRegionLocked(AtlasEntry& atlas, const std::string& regionId);
 	void ReleaseImageResources(ImageEntry& entry);
+	void ReleaseAtlasResources(AtlasEntry& entry);
+	void EnsureLocalAtlasResources(AtlasEntry& entry, const D3D11_TEXTURE2D_DESC& desc);
+	bool TryOpenSharedTexture(AtlasEntry& entry);
+	bool AcquireAtlas(AtlasEntry& entry, DWORD key);
+	void ReleaseAtlas(AtlasEntry& entry, DWORD key);
 
 	bool LoadTextureFromFile(
 		const std::wstring& filePath,
@@ -88,9 +163,15 @@ private:
 	bool SetMatrixConstantBuffer();
 	void EnsureDeviceResources();
 	void DrawImages();
+	void HandlePendingProbe();
 
 	std::mutex m_Mutex;
 	std::vector<ImageEntry> m_Images;
+	std::vector<AtlasEntry> m_Atlases;
+	bool m_ProbePending = false;
+	std::string m_ProbeAtlasName;
+	int m_ProbeX = 0;
+	int m_ProbeY = 0;
 
 	ID3D11Device* m_Device = nullptr;
 	ID3D11DeviceContext* m_DeviceContext = nullptr;
@@ -104,6 +185,7 @@ private:
 	ID3D11SamplerState* m_SamplerState = nullptr;
 	ID3D11RasterizerState* m_RasterizerState = nullptr;
 	ID3D11BlendState* m_BlendState = nullptr;
+	ID3D11BlendState* m_BlendStatePremul = nullptr;
 	ID3D11InputLayout* m_InputLayout = nullptr;
 	ID3D11Buffer* m_ConstantBuffer = nullptr;
 	ID3D11VertexShader* m_VertexShader = nullptr;

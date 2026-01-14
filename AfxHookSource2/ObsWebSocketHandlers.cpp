@@ -3,6 +3,7 @@
 #include "ObsSpectatorBindings.h"
 #include "ObsWebSocketActions.h"
 #include "RenderSystemDX11Hooks.h"
+#include "MirvImage.h"
 #include "MirvTime.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
@@ -714,6 +715,124 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 			{"handle", oss.str()}
 		};
 		respond(result);
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.register", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("name") || !args["name"].is_string()) {
+			respond(MakeCommandResult("gfx.register", false, "Missing or invalid name"));
+			return;
+		}
+		if (!args.contains("width") || !args["width"].is_number_integer()) {
+			respond(MakeCommandResult("gfx.register", false, "Missing or invalid width"));
+			return;
+		}
+		if (!args.contains("height") || !args["height"].is_number_integer()) {
+			respond(MakeCommandResult("gfx.register", false, "Missing or invalid height"));
+			return;
+		}
+
+		const std::string name = args["name"].get<std::string>();
+		const UINT width = static_cast<UINT>(args["width"].get<int>());
+		const UINT height = static_cast<UINT>(args["height"].get<int>());
+
+		if (!args.contains("handle") || !args["handle"].is_string()) {
+			respond(MakeCommandResult("gfx.register", false, "Missing or invalid handle"));
+			return;
+		}
+
+		std::string format = "BGRA8";
+		if (args.contains("format") && args["format"].is_string()) {
+			format = args["format"].get<std::string>();
+		}
+		std::string alphaMode = "premultiplied";
+		if (args.contains("alphaMode") && args["alphaMode"].is_string()) {
+			alphaMode = args["alphaMode"].get<std::string>();
+		}
+		bool keyedMutex = true;
+		if (args.contains("keyedMutex") && args["keyedMutex"].is_boolean()) {
+			keyedMutex = args["keyedMutex"].get<bool>();
+		}
+
+		const std::string handle = args["handle"].get<std::string>();
+		g_MirvImageDrawer.RegisterAtlas(name.c_str(), handle.c_str(), width, height, format.c_str(), alphaMode.c_str(), keyedMutex);
+
+		if (args.contains("regions") && args["regions"].is_array()) {
+			for (const auto& region : args["regions"]) {
+				if (!region.is_object()) continue;
+				if (!region.contains("id") || !region["id"].is_string()) continue;
+				if (!region.contains("u0") || !region.contains("v0") || !region.contains("u1") || !region.contains("v1")) continue;
+				if (!region["u0"].is_number() || !region["v0"].is_number() || !region["u1"].is_number() || !region["v1"].is_number()) continue;
+
+				double defaultW = 1.0;
+				double defaultH = 1.0;
+				if (region.contains("defaultSize") && region["defaultSize"].is_array() && region["defaultSize"].size() == 2) {
+					if (region["defaultSize"][0].is_number()) defaultW = region["defaultSize"][0].get<double>();
+					if (region["defaultSize"][1].is_number()) defaultH = region["defaultSize"][1].get<double>();
+				}
+
+				g_MirvImageDrawer.SetAtlasRegion(
+					name.c_str(),
+					region["id"].get<std::string>().c_str(),
+					(float)region["u0"].get<double>(),
+					(float)region["v0"].get<double>(),
+					(float)region["u1"].get<double>(),
+					(float)region["v1"].get<double>(),
+					defaultW,
+					defaultH
+				);
+			}
+		}
+
+		respond(MakeCommandResult("gfx.register", true, "Atlas registered"));
+	});
+
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.updateRegions", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("name") || !args["name"].is_string()) {
+			respond(MakeCommandResult("gfx.updateRegions", false, "Missing or invalid name"));
+			return;
+		}
+		if (!args.contains("regions") || !args["regions"].is_array()) {
+			respond(MakeCommandResult("gfx.updateRegions", false, "Missing or invalid regions"));
+			return;
+		}
+
+		const std::string name = args["name"].get<std::string>();
+		for (const auto& region : args["regions"]) {
+			if (!region.is_object()) continue;
+			if (!region.contains("id") || !region["id"].is_string()) continue;
+			if (!region.contains("u0") || !region.contains("v0") || !region.contains("u1") || !region.contains("v1")) continue;
+			if (!region["u0"].is_number() || !region["v0"].is_number() || !region["u1"].is_number() || !region["v1"].is_number()) continue;
+
+			double defaultW = 1.0;
+			double defaultH = 1.0;
+			if (region.contains("defaultSize") && region["defaultSize"].is_array() && region["defaultSize"].size() == 2) {
+				if (region["defaultSize"][0].is_number()) defaultW = region["defaultSize"][0].get<double>();
+				if (region["defaultSize"][1].is_number()) defaultH = region["defaultSize"][1].get<double>();
+			}
+
+			g_MirvImageDrawer.SetAtlasRegion(
+				name.c_str(),
+				region["id"].get<std::string>().c_str(),
+				(float)region["u0"].get<double>(),
+				(float)region["v0"].get<double>(),
+				(float)region["u1"].get<double>(),
+				(float)region["v1"].get<double>(),
+				defaultW,
+				defaultH
+			);
+		}
+
+		respond(MakeCommandResult("gfx.updateRegions", true, "Regions updated"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.unregister", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("name") || !args["name"].is_string()) {
+			respond(MakeCommandResult("gfx.unregister", false, "Missing or invalid name"));
+			return;
+		}
+		g_MirvImageDrawer.UnregisterAtlas(args["name"].get<std::string>().c_str());
+		respond(MakeCommandResult("gfx.unregister", true, "Atlas unregistered"));
 	});
 
 	g_ObsWebSocketProtocol.SetExecCommandHandler([](const std::string& cmd, const CObsWebSocketProtocol::JsonResponder& respond) {
