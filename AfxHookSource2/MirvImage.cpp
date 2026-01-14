@@ -90,6 +90,7 @@ void CMirvImageDrawer::EndDevice() {
 	if (m_RasterizerState) { m_RasterizerState->Release(); m_RasterizerState = nullptr; }
 	if (m_SamplerState) { m_SamplerState->Release(); m_SamplerState = nullptr; }
 	if (m_DepthStateOff) { m_DepthStateOff->Release(); m_DepthStateOff = nullptr; }
+	if (m_DepthStateWrite) { m_DepthStateWrite->Release(); m_DepthStateWrite = nullptr; }
 	if (m_DepthStateOn) { m_DepthStateOn->Release(); m_DepthStateOn = nullptr; }
 
 	if (m_DeviceContext) { m_DeviceContext->Release(); m_DeviceContext = nullptr; }
@@ -176,13 +177,14 @@ void CMirvImageDrawer::ListImages() {
 	advancedfx::Message("mirv_image: %zu image(s)\n", m_Images.size());
 	for (const auto& entry : m_Images) {
 		advancedfx::Message(
-			"  %s pos(%.2f %.2f %.2f) ang(%.2f %.2f %.2f) scale(%.2f %.2f) visible=%d depth=%d%s\n",
+			"  %s pos(%.2f %.2f %.2f) ang(%.2f %.2f %.2f) scale(%.2f %.2f) visible=%d depth=%d depthWrite=%d%s\n",
 			entry.name.c_str(),
 			entry.position.X, entry.position.Y, entry.position.Z,
 			entry.pitch, entry.yaw, entry.roll,
 			entry.scaleX, entry.scaleY,
 			entry.visible ? 1 : 0,
 			entry.depthTest ? 1 : 0,
+			entry.depthWrite ? 1 : 0,
 			entry.useAtlas ? " atlas" : ""
 		);
 	}
@@ -229,6 +231,14 @@ void CMirvImageDrawer::SetDepthTest(const char* name, bool value) {
 	ImageEntry* entry = FindImageLocked(name);
 	if (!entry) return;
 	entry->depthTest = value;
+}
+
+void CMirvImageDrawer::SetDepthWrite(const char* name, bool value) {
+	if (!name) return;
+	std::lock_guard<std::mutex> lock(m_Mutex);
+	ImageEntry* entry = FindImageLocked(name);
+	if (!entry) return;
+	entry->depthWrite = value;
 }
 
 void CMirvImageDrawer::RegisterAtlas(const char* name, const char* handleStr, UINT width, UINT height, const char* formatStr, const char* alphaStr, bool keyedMutex) {
@@ -724,7 +734,7 @@ bool CMirvImageDrawer::LoadTextureFromFile(
 void CMirvImageDrawer::EnsureDeviceResources() {
 	if (!m_Device || !m_DeviceContext) return;
 	if (m_VertexShader && m_PixelShader && m_InputLayout && m_ConstantBuffer && m_VertexBuffer
-		&& m_BlendState && m_BlendStatePremul && m_RasterizerState && m_SamplerState && m_DepthStateOn && m_DepthStateOff) {
+		&& m_BlendState && m_BlendStatePremul && m_RasterizerState && m_SamplerState && m_DepthStateOn && m_DepthStateWrite && m_DepthStateOff) {
 		return;
 	}
 
@@ -774,6 +784,13 @@ void CMirvImageDrawer::EnsureDeviceResources() {
 		depthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
 		depthDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
 		m_Device->CreateDepthStencilState(&depthDesc, &m_DepthStateOn);
+	}
+	{
+		D3D11_DEPTH_STENCIL_DESC depthDesc = {};
+		depthDesc.DepthEnable = TRUE;
+		depthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+		depthDesc.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+		m_Device->CreateDepthStencilState(&depthDesc, &m_DepthStateWrite);
 	}
 	{
 		D3D11_DEPTH_STENCIL_DESC depthDesc = {};
@@ -855,7 +872,7 @@ bool CMirvImageDrawer::SetMatrixConstantBuffer() {
 void CMirvImageDrawer::DrawImages() {
 	if (!(m_Device && m_DeviceContext && m_VertexShader && m_PixelShader && m_InputLayout && m_ConstantBuffer
 		&& m_VertexBuffer && m_BlendState && m_RasterizerState && m_SamplerState && m_DepthStateOn
-		&& m_DepthStateOff && m_ImmediateContext && m_Rtv && m_pViewPort)) {
+		&& m_DepthStateWrite && m_DepthStateOff && m_ImmediateContext && m_Rtv && m_pViewPort)) {
 		return;
 	}
 
@@ -876,52 +893,104 @@ void CMirvImageDrawer::DrawImages() {
 	m_DeviceContext->PSSetSamplers(0, 1, &m_SamplerState);
 	m_DeviceContext->RSSetState(m_RasterizerState);
 	{
-		std::lock_guard<std::mutex> lock(m_Mutex);
-		for (auto& entry : m_Images) {
-		if (!entry.useAtlas && entry.pendingLoad && !entry.filePath.empty()) {
-			ReleaseImageResources(entry);
-			entry.pendingLoad = false;
-			if (!LoadTextureFromFile(entry.filePath, &entry.texture, &entry.srv, &entry.width, &entry.height)) {
-				advancedfx::Warning("mirv_image: failed to load image.\n");
-			}
-		}
-		if (!entry.visible) continue;
+		struct RenderItem {
+			ImageEntry* entry = nullptr;
+			double depth = 0.0;
+			size_t order = 0;
+		};
+		std::vector<RenderItem> renderList;
 
-		ID3D11ShaderResourceView* srv = entry.srv;
-		AlphaMode alphaMode = AlphaMode::Straight;
-		if (entry.useAtlas) {
-			AtlasEntry* atlas = FindAtlasLocked(entry.atlasName);
-			if (!atlas) continue;
-			if (!TryOpenSharedTexture(*atlas)) continue;
-			AtlasRegion* region = FindAtlasRegionLocked(*atlas, entry.regionId);
-			if (!region) continue;
-			AtlasTexture& tex = atlas->texture;
-			if (tex.texture) {
-				if (AcquireAtlas(*atlas, 1)) {
-					D3D11_TEXTURE2D_DESC desc = {};
-					tex.texture->GetDesc(&desc);
-					EnsureLocalAtlasResources(*atlas, desc);
-					if (atlas->localTexture) {
-						m_ImmediateContext->CopyResource(atlas->localTexture, tex.texture);
-						atlas->localValid = true;
-					}
-					ReleaseAtlas(*atlas, 0);
+		std::lock_guard<std::mutex> lock(m_Mutex);
+		renderList.reserve(m_Images.size());
+		size_t order = 0;
+		for (auto& entry : m_Images) {
+			if (!entry.useAtlas && entry.pendingLoad && !entry.filePath.empty()) {
+				ReleaseImageResources(entry);
+				entry.pendingLoad = false;
+				if (!LoadTextureFromFile(entry.filePath, &entry.texture, &entry.srv, &entry.width, &entry.height)) {
+					advancedfx::Warning("mirv_image: failed to load image.\n");
 				}
 			}
-			entry.u0 = region->u0;
-			entry.v0 = region->v0;
-			entry.u1 = region->u1;
-			entry.v1 = region->v1;
-			if (entry.scaleX <= 0.0 && entry.scaleY <= 0.0) {
-				entry.scaleX = region->defaultW;
-				entry.scaleY = region->defaultH;
+			if (!entry.visible) { ++order; continue; }
+
+			ID3D11ShaderResourceView* srv = entry.srv;
+			AlphaMode alphaMode = AlphaMode::Straight;
+			if (entry.useAtlas) {
+				AtlasEntry* atlas = FindAtlasLocked(entry.atlasName);
+				if (!atlas) { ++order; continue; }
+				if (!TryOpenSharedTexture(*atlas)) { ++order; continue; }
+				AtlasRegion* region = FindAtlasRegionLocked(*atlas, entry.regionId);
+				if (!region) { ++order; continue; }
+				AtlasTexture& tex = atlas->texture;
+				if (tex.texture) {
+					if (AcquireAtlas(*atlas, 1)) {
+						D3D11_TEXTURE2D_DESC desc = {};
+						tex.texture->GetDesc(&desc);
+						EnsureLocalAtlasResources(*atlas, desc);
+						if (atlas->localTexture) {
+							m_ImmediateContext->CopyResource(atlas->localTexture, tex.texture);
+							atlas->localValid = true;
+						}
+						ReleaseAtlas(*atlas, 0);
+					}
+				}
+				entry.u0 = region->u0;
+				entry.v0 = region->v0;
+				entry.u1 = region->u1;
+				entry.v1 = region->v1;
+				if (entry.scaleX <= 0.0 && entry.scaleY <= 0.0) {
+					entry.scaleX = region->defaultW;
+					entry.scaleY = region->defaultH;
+				}
+				srv = atlas->localSrv;
+				alphaMode = atlas->alphaMode;
+			} else {
+				if (!entry.srv) { ++order; continue; }
 			}
-			srv = atlas->localSrv;
-			alphaMode = atlas->alphaMode;
-		} else {
-			if (!entry.srv) continue;
+			if (!srv) { ++order; continue; }
+
+			double clipZ = g_WorldToScreenMatrix.m[2][0] * entry.position.X
+				+ g_WorldToScreenMatrix.m[2][1] * entry.position.Y
+				+ g_WorldToScreenMatrix.m[2][2] * entry.position.Z
+				+ g_WorldToScreenMatrix.m[2][3];
+			double clipW = g_WorldToScreenMatrix.m[3][0] * entry.position.X
+				+ g_WorldToScreenMatrix.m[3][1] * entry.position.Y
+				+ g_WorldToScreenMatrix.m[3][2] * entry.position.Z
+				+ g_WorldToScreenMatrix.m[3][3];
+			double depth = clipW != 0.0 ? clipZ / clipW : clipZ;
+
+			renderList.push_back({ &entry, depth, order });
+			++order;
 		}
-		if (!srv) continue;
+
+		std::stable_sort(renderList.begin(), renderList.end(),
+			[](const RenderItem& a, const RenderItem& b) {
+				if (a.entry->depthTest != b.entry->depthTest) {
+					return a.entry->depthTest > b.entry->depthTest;
+				}
+				if (a.entry->depthWrite != b.entry->depthWrite) {
+					return a.entry->depthWrite > b.entry->depthWrite;
+				}
+				if (!a.entry->depthWrite) {
+					return a.depth > b.depth;
+				}
+				return a.order < b.order;
+			}
+		);
+
+		for (const auto& item : renderList) {
+			ImageEntry& entry = *item.entry;
+
+			ID3D11ShaderResourceView* srv = entry.srv;
+			AlphaMode alphaMode = AlphaMode::Straight;
+			if (entry.useAtlas) {
+				AtlasEntry* atlas = FindAtlasLocked(entry.atlasName);
+				if (!atlas) continue;
+				if (!TryOpenSharedTexture(*atlas)) continue;
+				srv = atlas->localSrv;
+				alphaMode = atlas->alphaMode;
+			}
+			if (!srv) continue;
 
 		double forward[3] = {};
 		double right[3] = {};
@@ -954,7 +1023,10 @@ void CMirvImageDrawer::DrawImages() {
 		ID3D11BlendState* blendState = alphaMode == AlphaMode::Premultiplied ? m_BlendStatePremul : m_BlendState;
 		m_DeviceContext->OMSetBlendState(blendState, nullptr, 0xffffffff);
 
-		ID3D11DepthStencilState* depthState = entry.depthTest ? m_DepthStateOn : m_DepthStateOff;
+		ID3D11DepthStencilState* depthState = m_DepthStateOff;
+		if (entry.depthTest) {
+			depthState = entry.depthWrite ? m_DepthStateWrite : m_DepthStateOn;
+		}
 		m_DeviceContext->OMSetDepthStencilState(depthState, 0);
 		m_DeviceContext->PSSetShaderResources(0, 1, &srv);
 		m_DeviceContext->Draw(4, 0);
@@ -1015,6 +1087,11 @@ CON_COMMAND(mirv_image, "3D image drawing in world space.")
 		} else if (0 == _stricmp(cmd1, "depth")) {
 			if (4 <= argc) {
 				g_MirvImageDrawer.SetDepthTest(args->ArgV(2), 0 != atoi(args->ArgV(3)));
+				return;
+			}
+		} else if (0 == _stricmp(cmd1, "depthwrite")) {
+			if (4 <= argc) {
+				g_MirvImageDrawer.SetDepthWrite(args->ArgV(2), 0 != atoi(args->ArgV(3)));
 				return;
 			}
 		} else if (0 == _stricmp(cmd1, "atlas")) {
@@ -1078,6 +1155,7 @@ CON_COMMAND(mirv_image, "3D image drawing in world space.")
 		"%s scale <name> <sx> <sy> - Set world size.\n"
 		"%s show <name> 0|1 - Show or hide image.\n"
 		"%s depth <name> 0|1 - Disable or enable depth testing.\n"
+		"%s depthwrite <name> 0|1 - Disable or enable depth writing (use 0 for proper transparency).\n"
 		"%s use <name> <atlas> <regionId> - Bind image to atlas region.\n"
 		"%s atlas register <atlas> <handle> <width> <height> <format> <alphaMode> [keyedMutex]\n"
 		"%s atlas unregister <atlas>\n"

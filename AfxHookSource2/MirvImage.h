@@ -44,6 +44,7 @@ public:
 	void SetScale(const char* name, double sx, double sy);
 	void SetVisible(const char* name, bool value);
 	void SetDepthTest(const char* name, bool value);
+	void SetDepthWrite(const char* name, bool value);
 
 private:
 	struct Vertex
@@ -77,6 +78,7 @@ private:
 		double scaleY = 1.0;
 		bool visible = true;
 		bool depthTest = true;
+		bool depthWrite = true;
 		bool pendingLoad = false;
 
 		ID3D11Texture2D* texture = nullptr;
@@ -181,6 +183,7 @@ private:
 	ID3D11DepthStencilView* m_Dsv = nullptr;
 
 	ID3D11DepthStencilState* m_DepthStateOn = nullptr;
+	ID3D11DepthStencilState* m_DepthStateWrite = nullptr;
 	ID3D11DepthStencilState* m_DepthStateOff = nullptr;
 	ID3D11SamplerState* m_SamplerState = nullptr;
 	ID3D11RasterizerState* m_RasterizerState = nullptr;
