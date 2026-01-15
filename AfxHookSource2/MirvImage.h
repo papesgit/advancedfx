@@ -36,6 +36,7 @@ public:
 	void UnregisterAtlas(const char* name);
 	void ListAtlases();
 	void SetAtlasRegion(const char* atlasName, const char* regionId, float u0, float v0, float u1, float v1, double defaultW, double defaultH);
+	void RemoveAtlasRegion(const char* atlasName, const char* regionId);
 	void UseAtlasRegion(const char* name, const char* atlasName, const char* regionId);
 	void ProbeAtlas(const char* atlasName, int x, int y);
 
@@ -45,6 +46,55 @@ public:
 	void SetVisible(const char* name, bool value);
 	void SetDepthTest(const char* name, bool value);
 	void SetDepthWrite(const char* name, bool value);
+
+	enum class AtlasFormat {
+		BGRA8,
+		RGBA8
+	};
+
+	enum class AlphaMode {
+		Premultiplied,
+		Straight
+	};
+
+	struct AtlasRegionSnapshot {
+		std::string id;
+		float u0 = 0.0f;
+		float v0 = 0.0f;
+		float u1 = 1.0f;
+		float v1 = 1.0f;
+		double defaultW = 1.0;
+		double defaultH = 1.0;
+	};
+	struct AtlasSnapshot {
+		std::string name;
+		HANDLE handle = nullptr;
+		UINT width = 0;
+		UINT height = 0;
+		AtlasFormat format = AtlasFormat::BGRA8;
+		AlphaMode alphaMode = AlphaMode::Premultiplied;
+		bool keyedMutex = false;
+		bool open = false;
+		bool keyed = false;
+		std::vector<AtlasRegionSnapshot> regions;
+	};
+	struct ImageSnapshot {
+		std::string name;
+		Afx::Math::Vector3 position = Afx::Math::Vector3(0.0, 0.0, 0.0);
+		double pitch = 0.0;
+		double yaw = 0.0;
+		double roll = 0.0;
+		double scaleX = 1.0;
+		double scaleY = 1.0;
+		bool visible = true;
+		bool depthTest = true;
+		bool depthWrite = true;
+		bool useAtlas = false;
+		std::string atlasName;
+		std::string regionId;
+	};
+	void GetAtlasSnapshot(std::vector<AtlasSnapshot>& out);
+	void GetImageSnapshot(std::vector<ImageSnapshot>& out);
 
 private:
 	struct Vertex
@@ -111,16 +161,6 @@ private:
 		IDXGIKeyedMutex* keyedMutexObj = nullptr;
 		bool loggedOpenFail = false;
 		bool loggedMutexFail = false;
-	};
-
-	enum class AtlasFormat {
-		BGRA8,
-		RGBA8
-	};
-
-	enum class AlphaMode {
-		Premultiplied,
-		Straight
 	};
 
 	struct AtlasEntry

@@ -786,6 +786,148 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		respond(MakeCommandResult("gfx.register", true, "Atlas registered"));
 	});
 
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.atlas.create", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("name") || !args["name"].is_string()) {
+			respond(MakeCommandResult("gfx.atlas.create", false, "Missing or invalid name"));
+			return;
+		}
+		if (!args.contains("handle") || !args["handle"].is_string()) {
+			respond(MakeCommandResult("gfx.atlas.create", false, "Missing or invalid handle"));
+			return;
+		}
+		if (!args.contains("width") || !args["width"].is_number_integer()) {
+			respond(MakeCommandResult("gfx.atlas.create", false, "Missing or invalid width"));
+			return;
+		}
+		if (!args.contains("height") || !args["height"].is_number_integer()) {
+			respond(MakeCommandResult("gfx.atlas.create", false, "Missing or invalid height"));
+			return;
+		}
+
+		const std::string name = args["name"].get<std::string>();
+		const std::string handle = args["handle"].get<std::string>();
+		const UINT width = static_cast<UINT>(args["width"].get<int>());
+		const UINT height = static_cast<UINT>(args["height"].get<int>());
+
+		std::string format = "BGRA8";
+		if (args.contains("format") && args["format"].is_string()) {
+			format = args["format"].get<std::string>();
+		}
+		std::string alphaMode = "premultiplied";
+		if (args.contains("alphaMode") && args["alphaMode"].is_string()) {
+			alphaMode = args["alphaMode"].get<std::string>();
+		}
+		bool keyedMutex = true;
+		if (args.contains("keyedMutex") && args["keyedMutex"].is_boolean()) {
+			keyedMutex = args["keyedMutex"].get<bool>();
+		}
+
+		g_MirvImageDrawer.RegisterAtlas(name.c_str(), handle.c_str(), width, height, format.c_str(), alphaMode.c_str(), keyedMutex);
+		respond(MakeCommandResult("gfx.atlas.create", true, "Atlas created"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.atlas.destroy", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("name") || !args["name"].is_string()) {
+			respond(MakeCommandResult("gfx.atlas.destroy", false, "Missing or invalid name"));
+			return;
+		}
+		g_MirvImageDrawer.UnregisterAtlas(args["name"].get<std::string>().c_str());
+		respond(MakeCommandResult("gfx.atlas.destroy", true, "Atlas destroyed"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.atlas.list", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
+		std::vector<CMirvImageDrawer::AtlasSnapshot> atlases;
+		g_MirvImageDrawer.GetAtlasSnapshot(atlases);
+
+		json list = json::array();
+		for (const auto& atlas : atlases) {
+			json regions = json::array();
+			for (const auto& region : atlas.regions) {
+				regions.push_back({
+					{"id", region.id},
+					{"u0", region.u0},
+					{"v0", region.v0},
+					{"u1", region.u1},
+					{"v1", region.v1},
+					{"defaultSize", { region.defaultW, region.defaultH }}
+				});
+			}
+			std::ostringstream handleStream;
+			handleStream << "0x" << std::hex << (uintptr_t)atlas.handle;
+			list.push_back({
+				{"name", atlas.name},
+				{"handle", handleStream.str()},
+				{"width", atlas.width},
+				{"height", atlas.height},
+				{"format", atlas.format == CMirvImageDrawer::AtlasFormat::RGBA8 ? "RGBA8" : "BGRA8"},
+				{"alphaMode", atlas.alphaMode == CMirvImageDrawer::AlphaMode::Straight ? "straight" : "premultiplied"},
+				{"keyedMutex", atlas.keyedMutex},
+				{"open", atlas.open},
+				{"keyed", atlas.keyed},
+				{"regions", regions}
+			});
+		}
+
+		json result{
+			{"type", "gfx.atlas.list"},
+			{"ok", true},
+			{"atlases", list}
+		};
+		respond(result);
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.atlas.region.set", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("atlas") || !args["atlas"].is_string()) {
+			respond(MakeCommandResult("gfx.atlas.region.set", false, "Missing or invalid atlas"));
+			return;
+		}
+		if (!args.contains("id") || !args["id"].is_string()) {
+			respond(MakeCommandResult("gfx.atlas.region.set", false, "Missing or invalid id"));
+			return;
+		}
+		if (!args.contains("u0") || !args.contains("v0") || !args.contains("u1") || !args.contains("v1")) {
+			respond(MakeCommandResult("gfx.atlas.region.set", false, "Missing uv coordinates"));
+			return;
+		}
+
+		const std::string atlas = args["atlas"].get<std::string>();
+		const std::string id = args["id"].get<std::string>();
+		double defaultW = 1.0;
+		double defaultH = 1.0;
+		if (args.contains("defaultSize") && args["defaultSize"].is_array() && args["defaultSize"].size() == 2) {
+			if (args["defaultSize"][0].is_number()) defaultW = args["defaultSize"][0].get<double>();
+			if (args["defaultSize"][1].is_number()) defaultH = args["defaultSize"][1].get<double>();
+		}
+
+		g_MirvImageDrawer.SetAtlasRegion(
+			atlas.c_str(),
+			id.c_str(),
+			(float)args["u0"].get<double>(),
+			(float)args["v0"].get<double>(),
+			(float)args["u1"].get<double>(),
+			(float)args["v1"].get<double>(),
+			defaultW,
+			defaultH
+		);
+		respond(MakeCommandResult("gfx.atlas.region.set", true, "Region set"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.atlas.region.remove", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("atlas") || !args["atlas"].is_string()) {
+			respond(MakeCommandResult("gfx.atlas.region.remove", false, "Missing or invalid atlas"));
+			return;
+		}
+		if (!args.contains("id") || !args["id"].is_string()) {
+			respond(MakeCommandResult("gfx.atlas.region.remove", false, "Missing or invalid id"));
+			return;
+		}
+		g_MirvImageDrawer.RemoveAtlasRegion(
+			args["atlas"].get<std::string>().c_str(),
+			args["id"].get<std::string>().c_str()
+		);
+		respond(MakeCommandResult("gfx.atlas.region.remove", true, "Region removed"));
+	});
+
 
 	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.updateRegions", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
 		if (!args.contains("name") || !args["name"].is_string()) {
@@ -833,6 +975,137 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		}
 		g_MirvImageDrawer.UnregisterAtlas(args["name"].get<std::string>().c_str());
 		respond(MakeCommandResult("gfx.unregister", true, "Atlas unregistered"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.instance.create", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("name") || !args["name"].is_string()) {
+			respond(MakeCommandResult("gfx.instance.create", false, "Missing or invalid name"));
+			return;
+		}
+		if (!args.contains("atlas") || !args["atlas"].is_string()) {
+			respond(MakeCommandResult("gfx.instance.create", false, "Missing or invalid atlas"));
+			return;
+		}
+		if (!args.contains("region") || !args["region"].is_string()) {
+			respond(MakeCommandResult("gfx.instance.create", false, "Missing or invalid region"));
+			return;
+		}
+
+		const std::string name = args["name"].get<std::string>();
+		const std::string atlas = args["atlas"].get<std::string>();
+		const std::string region = args["region"].get<std::string>();
+
+		g_MirvImageDrawer.UseAtlasRegion(name.c_str(), atlas.c_str(), region.c_str());
+
+		if (args.contains("pos") && args["pos"].is_array() && args["pos"].size() == 3) {
+			g_MirvImageDrawer.SetPosition(name.c_str(),
+				args["pos"][0].get<double>(),
+				args["pos"][1].get<double>(),
+				args["pos"][2].get<double>());
+		}
+		if (args.contains("ang") && args["ang"].is_array() && args["ang"].size() == 3) {
+			g_MirvImageDrawer.SetAngles(name.c_str(),
+				args["ang"][0].get<double>(),
+				args["ang"][1].get<double>(),
+				args["ang"][2].get<double>());
+		}
+		if (args.contains("scale") && args["scale"].is_array() && args["scale"].size() == 2) {
+			g_MirvImageDrawer.SetScale(name.c_str(),
+				args["scale"][0].get<double>(),
+				args["scale"][1].get<double>());
+		}
+		if (args.contains("visible") && args["visible"].is_boolean()) {
+			g_MirvImageDrawer.SetVisible(name.c_str(), args["visible"].get<bool>());
+		}
+		if (args.contains("depthTest") && args["depthTest"].is_boolean()) {
+			g_MirvImageDrawer.SetDepthTest(name.c_str(), args["depthTest"].get<bool>());
+		}
+		if (args.contains("depthWrite") && args["depthWrite"].is_boolean()) {
+			g_MirvImageDrawer.SetDepthWrite(name.c_str(), args["depthWrite"].get<bool>());
+		}
+
+		respond(MakeCommandResult("gfx.instance.create", true, "Instance created"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.instance.update", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("name") || !args["name"].is_string()) {
+			respond(MakeCommandResult("gfx.instance.update", false, "Missing or invalid name"));
+			return;
+		}
+		const std::string name = args["name"].get<std::string>();
+
+		if (args.contains("atlas") && args["atlas"].is_string() && args.contains("region") && args["region"].is_string()) {
+			g_MirvImageDrawer.UseAtlasRegion(
+				name.c_str(),
+				args["atlas"].get<std::string>().c_str(),
+				args["region"].get<std::string>().c_str()
+			);
+		}
+		if (args.contains("pos") && args["pos"].is_array() && args["pos"].size() == 3) {
+			g_MirvImageDrawer.SetPosition(name.c_str(),
+				args["pos"][0].get<double>(),
+				args["pos"][1].get<double>(),
+				args["pos"][2].get<double>());
+		}
+		if (args.contains("ang") && args["ang"].is_array() && args["ang"].size() == 3) {
+			g_MirvImageDrawer.SetAngles(name.c_str(),
+				args["ang"][0].get<double>(),
+				args["ang"][1].get<double>(),
+				args["ang"][2].get<double>());
+		}
+		if (args.contains("scale") && args["scale"].is_array() && args["scale"].size() == 2) {
+			g_MirvImageDrawer.SetScale(name.c_str(),
+				args["scale"][0].get<double>(),
+				args["scale"][1].get<double>());
+		}
+		if (args.contains("visible") && args["visible"].is_boolean()) {
+			g_MirvImageDrawer.SetVisible(name.c_str(), args["visible"].get<bool>());
+		}
+		if (args.contains("depthTest") && args["depthTest"].is_boolean()) {
+			g_MirvImageDrawer.SetDepthTest(name.c_str(), args["depthTest"].get<bool>());
+		}
+		if (args.contains("depthWrite") && args["depthWrite"].is_boolean()) {
+			g_MirvImageDrawer.SetDepthWrite(name.c_str(), args["depthWrite"].get<bool>());
+		}
+
+		respond(MakeCommandResult("gfx.instance.update", true, "Instance updated"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.instance.destroy", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("name") || !args["name"].is_string()) {
+			respond(MakeCommandResult("gfx.instance.destroy", false, "Missing or invalid name"));
+			return;
+		}
+		g_MirvImageDrawer.UnloadImage(args["name"].get<std::string>().c_str());
+		respond(MakeCommandResult("gfx.instance.destroy", true, "Instance destroyed"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.instance.list", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
+		std::vector<CMirvImageDrawer::ImageSnapshot> images;
+		g_MirvImageDrawer.GetImageSnapshot(images);
+
+		json list = json::array();
+		for (const auto& img : images) {
+			list.push_back({
+				{"name", img.name},
+				{"pos", { img.position.X, img.position.Y, img.position.Z }},
+				{"ang", { img.pitch, img.yaw, img.roll }},
+				{"scale", { img.scaleX, img.scaleY }},
+				{"visible", img.visible},
+				{"depthTest", img.depthTest},
+				{"depthWrite", img.depthWrite},
+				{"useAtlas", img.useAtlas},
+				{"atlas", img.atlasName},
+				{"region", img.regionId}
+			});
+		}
+
+		json result{
+			{"type", "gfx.instance.list"},
+			{"ok", true},
+			{"instances", list}
+		};
+		respond(result);
 	});
 
 	g_ObsWebSocketProtocol.SetExecCommandHandler([](const std::string& cmd, const CObsWebSocketProtocol::JsonResponder& respond) {

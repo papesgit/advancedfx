@@ -241,6 +241,60 @@ void CMirvImageDrawer::SetDepthWrite(const char* name, bool value) {
 	entry->depthWrite = value;
 }
 
+void CMirvImageDrawer::GetAtlasSnapshot(std::vector<AtlasSnapshot>& out) {
+	out.clear();
+	std::lock_guard<std::mutex> lock(m_Mutex);
+	out.reserve(m_Atlases.size());
+	for (auto& atlas : m_Atlases) {
+		AtlasSnapshot snap;
+		snap.name = atlas.name;
+		snap.handle = atlas.texture.handle;
+		snap.width = atlas.width;
+		snap.height = atlas.height;
+		snap.format = atlas.format;
+		snap.alphaMode = atlas.alphaMode;
+		snap.keyedMutex = atlas.keyedMutex;
+		snap.open = atlas.texture.srv != nullptr;
+		snap.keyed = atlas.texture.keyedMutexObj != nullptr;
+		snap.regions.reserve(atlas.regions.size());
+		for (const auto& region : atlas.regions) {
+			AtlasRegionSnapshot r;
+			r.id = region.id;
+			r.u0 = region.u0;
+			r.v0 = region.v0;
+			r.u1 = region.u1;
+			r.v1 = region.v1;
+			r.defaultW = region.defaultW;
+			r.defaultH = region.defaultH;
+			snap.regions.push_back(std::move(r));
+		}
+		out.push_back(std::move(snap));
+	}
+}
+
+void CMirvImageDrawer::GetImageSnapshot(std::vector<ImageSnapshot>& out) {
+	out.clear();
+	std::lock_guard<std::mutex> lock(m_Mutex);
+	out.reserve(m_Images.size());
+	for (const auto& entry : m_Images) {
+		ImageSnapshot snap;
+		snap.name = entry.name;
+		snap.position = entry.position;
+		snap.pitch = entry.pitch;
+		snap.yaw = entry.yaw;
+		snap.roll = entry.roll;
+		snap.scaleX = entry.scaleX;
+		snap.scaleY = entry.scaleY;
+		snap.visible = entry.visible;
+		snap.depthTest = entry.depthTest;
+		snap.depthWrite = entry.depthWrite;
+		snap.useAtlas = entry.useAtlas;
+		snap.atlasName = entry.atlasName;
+		snap.regionId = entry.regionId;
+		out.push_back(std::move(snap));
+	}
+}
+
 void CMirvImageDrawer::RegisterAtlas(const char* name, const char* handleStr, UINT width, UINT height, const char* formatStr, const char* alphaStr, bool keyedMutex) {
 	if (!name || !handleStr) return;
 	std::lock_guard<std::mutex> lock(m_Mutex);
@@ -321,6 +375,17 @@ void CMirvImageDrawer::SetAtlasRegion(const char* atlasName, const char* regionI
 	region->v1 = v1;
 	region->defaultW = defaultW;
 	region->defaultH = defaultH;
+}
+
+void CMirvImageDrawer::RemoveAtlasRegion(const char* atlasName, const char* regionId) {
+	if (!atlasName || !regionId) return;
+	std::lock_guard<std::mutex> lock(m_Mutex);
+	AtlasEntry* atlas = FindAtlasLocked(atlasName);
+	if (!atlas) return;
+	auto it = std::find_if(atlas->regions.begin(), atlas->regions.end(),
+		[regionId](const AtlasRegion& region) { return region.id == regionId; });
+	if (it == atlas->regions.end()) return;
+	atlas->regions.erase(it);
 }
 
 void CMirvImageDrawer::UseAtlasRegion(const char* name, const char* atlasName, const char* regionId) {
