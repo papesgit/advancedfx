@@ -46,6 +46,8 @@ public:
 	void SetVisible(const char* name, bool value);
 	void SetDepthTest(const char* name, bool value);
 	void SetDepthWrite(const char* name, bool value);
+	void SetAttachment(const char* name, int slot, bool useYaw, bool usePitch, bool useRoll, const char* attachmentName);
+	void UpdateAttachments();
 
 	enum class AtlasFormat {
 		BGRA8,
@@ -92,6 +94,11 @@ public:
 		bool useAtlas = false;
 		std::string atlasName;
 		std::string regionId;
+		int attachSlot = -1;
+		std::string attachAttachmentName;
+		bool attachUseYaw = false;
+		bool attachUsePitch = false;
+		bool attachUseRoll = false;
 	};
 	void GetAtlasSnapshot(std::vector<AtlasSnapshot>& out);
 	void GetImageSnapshot(std::vector<ImageSnapshot>& out);
@@ -130,6 +137,16 @@ private:
 		bool depthTest = true;
 		bool depthWrite = true;
 		bool pendingLoad = false;
+		int attachSlot = -1;
+		std::string attachAttachmentName;
+		bool attachUseYaw = false;
+		bool attachUsePitch = false;
+		bool attachUseRoll = false;
+		bool attachValid = false;
+		Afx::Math::Vector3 attachOrigin = Afx::Math::Vector3(0.0, 0.0, 0.0);
+		double attachPitch = 0.0;
+		double attachYaw = 0.0;
+		double attachRoll = 0.0;
 
 		ID3D11Texture2D* texture = nullptr;
 		ID3D11ShaderResourceView* srv = nullptr;

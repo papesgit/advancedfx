@@ -20,6 +20,7 @@
 #include "MirvCommands.h"
 #include "MirvColors.h"
 #include "MirvFix.h"
+#include "MirvImage.h"
 #include "MirvTime.h"
 #include "ObsObserverState.h"
 #include "ObsWebSocketServer.h"
@@ -1891,6 +1892,7 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
 	g_WorldToScreenMatrix.m[3][3] = proj[4*3+3];
 
 	g_CampathDrawer.OnEngineThread_SetupViewDone();
+	g_MirvImageDrawer.UpdateAttachments();
 }
 
 /*

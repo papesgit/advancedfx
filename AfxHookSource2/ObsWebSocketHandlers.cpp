@@ -997,6 +997,25 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 
 		g_MirvImageDrawer.UseAtlasRegion(name.c_str(), atlas.c_str(), region.c_str());
 
+		if (args.contains("attach") && args["attach"].is_object()) {
+			const auto& attach = args["attach"];
+			if (attach.contains("slot") && attach["slot"].is_number_integer()) {
+				int slot = attach["slot"].get<int>();
+				if (slot < -1 || slot > 9) {
+					respond(MakeCommandResult("gfx.instance.create", false, "attach.slot must be -1 or 0-9"));
+					return;
+				}
+				bool useYaw = attach.contains("useYaw") && attach["useYaw"].is_boolean() ? attach["useYaw"].get<bool>() : false;
+				bool usePitch = attach.contains("usePitch") && attach["usePitch"].is_boolean() ? attach["usePitch"].get<bool>() : false;
+				bool useRoll = attach.contains("useRoll") && attach["useRoll"].is_boolean() ? attach["useRoll"].get<bool>() : false;
+				std::string attachmentName;
+				if (attach.contains("attachment") && attach["attachment"].is_string()) {
+					attachmentName = attach["attachment"].get<std::string>();
+				}
+				g_MirvImageDrawer.SetAttachment(name.c_str(), slot, useYaw, usePitch, useRoll, attachmentName.c_str());
+			}
+		}
+
 		if (args.contains("pos") && args["pos"].is_array() && args["pos"].size() == 3) {
 			g_MirvImageDrawer.SetPosition(name.c_str(),
 				args["pos"][0].get<double>(),
@@ -1040,6 +1059,24 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 				args["atlas"].get<std::string>().c_str(),
 				args["region"].get<std::string>().c_str()
 			);
+		}
+		if (args.contains("attach") && args["attach"].is_object()) {
+			const auto& attach = args["attach"];
+			if (attach.contains("slot") && attach["slot"].is_number_integer()) {
+				int slot = attach["slot"].get<int>();
+				if (slot < -1 || slot > 9) {
+					respond(MakeCommandResult("gfx.instance.update", false, "attach.slot must be -1 or 0-9"));
+					return;
+				}
+				bool useYaw = attach.contains("useYaw") && attach["useYaw"].is_boolean() ? attach["useYaw"].get<bool>() : false;
+				bool usePitch = attach.contains("usePitch") && attach["usePitch"].is_boolean() ? attach["usePitch"].get<bool>() : false;
+				bool useRoll = attach.contains("useRoll") && attach["useRoll"].is_boolean() ? attach["useRoll"].get<bool>() : false;
+				std::string attachmentName;
+				if (attach.contains("attachment") && attach["attachment"].is_string()) {
+					attachmentName = attach["attachment"].get<std::string>();
+				}
+				g_MirvImageDrawer.SetAttachment(name.c_str(), slot, useYaw, usePitch, useRoll, attachmentName.c_str());
+			}
 		}
 		if (args.contains("pos") && args["pos"].is_array() && args["pos"].size() == 3) {
 			g_MirvImageDrawer.SetPosition(name.c_str(),
@@ -1096,7 +1133,14 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 				{"depthWrite", img.depthWrite},
 				{"useAtlas", img.useAtlas},
 				{"atlas", img.atlasName},
-				{"region", img.regionId}
+				{"region", img.regionId},
+				{"attach", {
+					{"slot", img.attachSlot},
+					{"attachment", img.attachAttachmentName},
+					{"useYaw", img.attachUseYaw},
+					{"usePitch", img.attachUsePitch},
+					{"useRoll", img.attachUseRoll}
+				}}
 			});
 		}
 

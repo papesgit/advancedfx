@@ -5,6 +5,8 @@
 #include "AfxShaders.h"
 #include "Globals.h"
 #include "hlaeFolder.h"
+#include "ClientEntitySystem.h"
+#include "ObsSpectatorBindings.h"
 
 #include "../shared/StringTools.h"
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
@@ -57,6 +59,46 @@ std::wstring BuildImagePath(const std::wstring& fileName) {
 	path += L"resources\\AfxHookSource2\\images\\";
 	path += fileName;
 	return path;
+}
+
+	bool TryGetAttachedTransform(int slot, const std::string& attachmentName, float outOrigin[3], float outAngles[3]) {
+		if (slot < 0 || slot > 9) return false;
+		if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) return false;
+		if (g_SpectatorBindings[slot] == -1) return false;
+
+	int controllerIndex = g_SpectatorBindings[slot];
+	auto controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, controllerIndex);
+	if (!controller || !controller->IsPlayerController()) return false;
+
+	auto pawnHandle = controller->GetPlayerPawnHandle();
+	if (!pawnHandle.IsValid()) return false;
+	int pawnIndex = pawnHandle.GetEntryIndex();
+	if (pawnIndex < 0) return false;
+
+	auto pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIndex);
+	if (!pawn || !pawn->IsPlayerPawn() || !pawn->GetHealth() > 0) return false;
+
+	if (attachmentName.empty()) {
+		pawn->GetRenderEyeOrigin(outOrigin);
+		pawn->GetRenderEyeAngles(outAngles);
+		return true;
+	}
+
+	uint8_t attachmentIdx = pawn->LookupAttachment(attachmentName.c_str());
+	SOURCESDK::Vector attachmentOrigin;
+	SOURCESDK::Quaternion attachmentAngles;
+	if (!pawn->GetAttachment(attachmentIdx, attachmentOrigin, attachmentAngles)) return false;
+
+	outOrigin[0] = attachmentOrigin.x;
+	outOrigin[1] = attachmentOrigin.y;
+	outOrigin[2] = attachmentOrigin.z;
+
+	Afx::Math::Quaternion quat(attachmentAngles.w, attachmentAngles.x, attachmentAngles.y, attachmentAngles.z);
+	Afx::Math::QEulerAngles euler = quat.ToQREulerAngles().ToQEulerAngles();
+	outAngles[0] = (float)euler.Pitch;
+	outAngles[1] = (float)euler.Yaw;
+	outAngles[2] = (float)euler.Roll;
+	return true;
 }
 
 } // namespace
@@ -176,8 +218,24 @@ void CMirvImageDrawer::ListImages() {
 	std::lock_guard<std::mutex> lock(m_Mutex);
 	advancedfx::Message("mirv_image: %zu image(s)\n", m_Images.size());
 	for (const auto& entry : m_Images) {
+		const char* attachInfo = "";
+		if (entry.attachSlot >= 0) {
+			static char attachBuffer[192];
+			_snprintf_s(
+				attachBuffer,
+				sizeof(attachBuffer),
+				" attach=slot%d yaw=%d pitch=%d roll=%d%s%s",
+				entry.attachSlot,
+				entry.attachUseYaw ? 1 : 0,
+				entry.attachUsePitch ? 1 : 0,
+				entry.attachUseRoll ? 1 : 0,
+				entry.attachAttachmentName.empty() ? "" : " attachment=",
+				entry.attachAttachmentName.empty() ? "" : entry.attachAttachmentName.c_str()
+			);
+			attachInfo = attachBuffer;
+		}
 		advancedfx::Message(
-			"  %s pos(%.2f %.2f %.2f) ang(%.2f %.2f %.2f) scale(%.2f %.2f) visible=%d depth=%d depthWrite=%d%s\n",
+			"  %s pos(%.2f %.2f %.2f) ang(%.2f %.2f %.2f) scale(%.2f %.2f) visible=%d depth=%d depthWrite=%d%s%s\n",
 			entry.name.c_str(),
 			entry.position.X, entry.position.Y, entry.position.Z,
 			entry.pitch, entry.yaw, entry.roll,
@@ -185,7 +243,8 @@ void CMirvImageDrawer::ListImages() {
 			entry.visible ? 1 : 0,
 			entry.depthTest ? 1 : 0,
 			entry.depthWrite ? 1 : 0,
-			entry.useAtlas ? " atlas" : ""
+			entry.useAtlas ? " atlas" : "",
+			attachInfo
 		);
 	}
 }
@@ -241,6 +300,40 @@ void CMirvImageDrawer::SetDepthWrite(const char* name, bool value) {
 	entry->depthWrite = value;
 }
 
+void CMirvImageDrawer::SetAttachment(const char* name, int slot, bool useYaw, bool usePitch, bool useRoll, const char* attachmentName) {
+	if (!name) return;
+	std::lock_guard<std::mutex> lock(m_Mutex);
+	ImageEntry* entry = FindImageLocked(name);
+	if (!entry) return;
+	entry->attachSlot = slot;
+	entry->attachUseYaw = useYaw;
+	entry->attachUsePitch = usePitch;
+	entry->attachUseRoll = useRoll;
+	entry->attachAttachmentName = attachmentName ? attachmentName : "";
+	entry->attachValid = false;
+}
+
+void CMirvImageDrawer::UpdateAttachments() {
+	std::lock_guard<std::mutex> lock(m_Mutex);
+	for (auto& entry : m_Images) {
+		if (entry.attachSlot < 0) {
+			entry.attachValid = false;
+			continue;
+		}
+		float eye[3] = {};
+		float ang[3] = {};
+		if (TryGetAttachedTransform(entry.attachSlot, entry.attachAttachmentName, eye, ang)) {
+			entry.attachOrigin = Vector3(eye[0], eye[1], eye[2]);
+			entry.attachPitch = ang[0];
+			entry.attachYaw = ang[1];
+			entry.attachRoll = ang[2];
+			entry.attachValid = true;
+		} else {
+			entry.attachValid = false;
+		}
+	}
+}
+
 void CMirvImageDrawer::GetAtlasSnapshot(std::vector<AtlasSnapshot>& out) {
 	out.clear();
 	std::lock_guard<std::mutex> lock(m_Mutex);
@@ -291,6 +384,11 @@ void CMirvImageDrawer::GetImageSnapshot(std::vector<ImageSnapshot>& out) {
 		snap.useAtlas = entry.useAtlas;
 		snap.atlasName = entry.atlasName;
 		snap.regionId = entry.regionId;
+		snap.attachSlot = entry.attachSlot;
+		snap.attachAttachmentName = entry.attachAttachmentName;
+		snap.attachUseYaw = entry.attachUseYaw;
+		snap.attachUsePitch = entry.attachUsePitch;
+		snap.attachUseRoll = entry.attachUseRoll;
 		out.push_back(std::move(snap));
 	}
 }
@@ -962,6 +1060,10 @@ void CMirvImageDrawer::DrawImages() {
 			ImageEntry* entry = nullptr;
 			double depth = 0.0;
 			size_t order = 0;
+			Vector3 position;
+			double pitch = 0.0;
+			double yaw = 0.0;
+			double roll = 0.0;
 		};
 		std::vector<RenderItem> renderList;
 
@@ -1014,17 +1116,62 @@ void CMirvImageDrawer::DrawImages() {
 			}
 			if (!srv) { ++order; continue; }
 
-			double clipZ = g_WorldToScreenMatrix.m[2][0] * entry.position.X
-				+ g_WorldToScreenMatrix.m[2][1] * entry.position.Y
-				+ g_WorldToScreenMatrix.m[2][2] * entry.position.Z
+			Vector3 renderPos = entry.position;
+			double renderPitch = entry.pitch;
+			double renderYaw = entry.yaw;
+			double renderRoll = entry.roll;
+
+			if (entry.attachSlot >= 0) {
+				if (entry.attachValid) {
+					double forward[3] = {};
+					double right[3] = {};
+					double up[3] = {};
+					Afx::Math::MakeVectors(entry.attachRoll, entry.attachPitch, entry.attachYaw, forward, right, up);
+
+					Vector3 vForward(forward[0], forward[1], forward[2]);
+					Vector3 vRight(right[0], right[1], right[2]);
+					Vector3 vUp(up[0], up[1], up[2]);
+
+					renderPos = entry.attachOrigin
+						+ vForward * entry.position.X
+						+ vRight * entry.position.Y
+						+ vUp * entry.position.Z;
+
+					Afx::Math::QEulerAngles baseAngles(0.0, 0.0, 0.0);
+					if (entry.attachUsePitch) baseAngles.Pitch = -entry.attachPitch;
+					if (entry.attachUseYaw) baseAngles.Yaw = entry.attachYaw + 180.0;
+					if (entry.attachUseRoll) baseAngles.Roll = -entry.attachRoll;
+
+					Afx::Math::QEulerAngles offsetAngles(entry.pitch, entry.yaw, entry.roll);
+					Afx::Math::Quaternion baseQuat = Afx::Math::Quaternion::FromQREulerAngles(
+						Afx::Math::QREulerAngles::FromQEulerAngles(baseAngles)
+					).Normalized();
+					Afx::Math::Quaternion offsetQuat = Afx::Math::Quaternion::FromQREulerAngles(
+						Afx::Math::QREulerAngles::FromQEulerAngles(offsetAngles)
+					).Normalized();
+					Afx::Math::Quaternion finalQuat = (baseQuat * offsetQuat).Normalized();
+					Afx::Math::QEulerAngles finalAngles = finalQuat.ToQREulerAngles().ToQEulerAngles();
+
+					renderPitch = finalAngles.Pitch;
+					renderYaw = finalAngles.Yaw;
+					renderRoll = finalAngles.Roll;
+				} else {
+					++order;
+					continue;
+				}
+			}
+
+			double clipZ = g_WorldToScreenMatrix.m[2][0] * renderPos.X
+				+ g_WorldToScreenMatrix.m[2][1] * renderPos.Y
+				+ g_WorldToScreenMatrix.m[2][2] * renderPos.Z
 				+ g_WorldToScreenMatrix.m[2][3];
-			double clipW = g_WorldToScreenMatrix.m[3][0] * entry.position.X
-				+ g_WorldToScreenMatrix.m[3][1] * entry.position.Y
-				+ g_WorldToScreenMatrix.m[3][2] * entry.position.Z
+			double clipW = g_WorldToScreenMatrix.m[3][0] * renderPos.X
+				+ g_WorldToScreenMatrix.m[3][1] * renderPos.Y
+				+ g_WorldToScreenMatrix.m[3][2] * renderPos.Z
 				+ g_WorldToScreenMatrix.m[3][3];
 			double depth = clipW != 0.0 ? clipZ / clipW : clipZ;
 
-			renderList.push_back({ &entry, depth, order });
+			renderList.push_back({ &entry, depth, order, renderPos, renderPitch, renderYaw, renderRoll });
 			++order;
 		}
 
@@ -1060,7 +1207,7 @@ void CMirvImageDrawer::DrawImages() {
 		double forward[3] = {};
 		double right[3] = {};
 		double up[3] = {};
-		Afx::Math::MakeVectors(entry.roll, entry.pitch, entry.yaw, forward, right, up);
+		Afx::Math::MakeVectors(item.roll, item.pitch, item.yaw, forward, right, up);
 
 		Vector3 vRight(right[0], right[1], right[2]);
 		Vector3 vUp(up[0], up[1], up[2]);
@@ -1068,10 +1215,10 @@ void CMirvImageDrawer::DrawImages() {
 		double halfX = entry.scaleX * 0.5;
 		double halfY = entry.scaleY * 0.5;
 
-		Vector3 p0 = entry.position - vRight * halfX + vUp * halfY;
-		Vector3 p1 = entry.position - vRight * halfX - vUp * halfY;
-		Vector3 p2 = entry.position + vRight * halfX + vUp * halfY;
-		Vector3 p3 = entry.position + vRight * halfX - vUp * halfY;
+		Vector3 p0 = item.position - vRight * halfX + vUp * halfY;
+		Vector3 p1 = item.position - vRight * halfX - vUp * halfY;
+		Vector3 p2 = item.position + vRight * halfX + vUp * halfY;
+		Vector3 p3 = item.position + vRight * halfX - vUp * halfY;
 
 		D3D11_MAPPED_SUBRESOURCE mapped = {};
 		if (FAILED(m_DeviceContext->Map(m_VertexBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) continue;
