@@ -5,6 +5,7 @@
 #include "../shared/AfxConsole.h"
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 // Global spectator key bindings: slots 1-0 map to controller indices
@@ -14,6 +15,63 @@ bool g_LastSpectatorKeyState[10] = {false};
 bool g_UseAltSpectatorBindings = false;
 bool g_PendingSpectatorSwitch = false;
 int g_SpectatorSwitchTimeout = 0; // Safety timeout
+
+static bool StartsWithIgnoreCaseAscii(const char* s, const char* lit)
+{
+    for (; *lit; ++s, ++lit)
+    {
+        if (!*s) return false;
+        char a = *s, b = *lit;
+        if (a >= 'A' && a <= 'Z') a = char(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = char(b - 'A' + 'a');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+// Returns how many bytes the separator consumes, or 0 if none
+static int PipeLikeBytes(const unsigned char* p)
+{
+    if (!p || !*p) return 0;
+
+    // ASCII '|'
+    if (p[0] == 0x7C)
+        return 1;
+
+    // U+00A6 '¦'  (C2 A6)
+    if (p[0] == 0xC2 && p[1] == 0xA6)
+        return 2;
+
+    // U+FF5C '｜' (EF BD 9C)
+    if (p[0] == 0xEF && p[1] == 0xBD && p[2] == 0x9C)
+        return 3;
+
+    // U+2223 '∣' (E2 88 A3)
+    if (p[0] == 0xE2 && p[1] == 0x88 && p[2] == 0xA3)
+        return 3;
+
+    return 0;
+}
+
+static bool IsCoachName(const char* name)
+{
+    if (!name || !*name)
+        return false;
+
+    // Must start with "coach"
+    if (!StartsWithIgnoreCaseAscii(name, "coach"))
+        return false;
+
+    const unsigned char* after = (const unsigned char*)(name + 5);
+
+    // Must be immediately followed by a pipe-like separator
+    int sepLen = PipeLikeBytes(after);
+    if (sepLen == 0)
+        return false;
+
+    // Require at least one character after the separator
+    return after[sepLen] != '\0';
+}
 
 // Refresh spectator bindings for number keys 1-0
 void RefreshSpectatorBindings() {
@@ -37,6 +95,16 @@ void RefreshSpectatorBindings() {
 		// Get team (2 = T, 3 = CT)
 		int team = ent->GetTeam();
 		if (team != 2 && team != 3) continue;
+
+		const char* name = ent->GetSanitizedPlayerName();
+		if (!name || '\0' == name[0]) {
+			name = ent->GetPlayerName();
+		}
+		if(IsCoachName(name)) {
+			advancedfx::Message("Found coachname:");
+			advancedfx::Message(name);
+			continue;
+		}
 
 		// Controller index is the entity index itself
 		int controllerIndex = i;

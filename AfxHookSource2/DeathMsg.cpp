@@ -20,12 +20,14 @@
 #include "SchemaSystem.h"
 #include "MirvColors.h" 
 #include "ObsWebSocketServer.h"
+#include "ObsSpectatorBindings.h"
 
 #include "../deps/release/nlohmann/json.hpp"
 
 #include <set>
 #include <algorithm>
 #include <vector>
+#include <cstring>
 
 // TODO: move panorama stuff out after addresses.cpp is done
 // decompose/change myPanoramaWrapper too
@@ -136,6 +138,63 @@ struct PlayerInfo {
 	int userId;
 	u_char* playerController;
 };
+
+static bool StartsWithIgnoreCaseAscii(const char* s, const char* lit)
+{
+    for (; *lit; ++s, ++lit)
+    {
+        if (!*s) return false;
+        char a = *s, b = *lit;
+        if (a >= 'A' && a <= 'Z') a = char(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = char(b - 'A' + 'a');
+        if (a != b) return false;
+    }
+    return true;
+}
+
+// Returns how many bytes the separator consumes, or 0 if none
+static int PipeLikeBytes(const unsigned char* p)
+{
+    if (!p || !*p) return 0;
+
+    // ASCII '|'
+    if (p[0] == 0x7C)
+        return 1;
+
+    // U+00A6 '¦'  (C2 A6)
+    if (p[0] == 0xC2 && p[1] == 0xA6)
+        return 2;
+
+    // U+FF5C '｜' (EF BD 9C)
+    if (p[0] == 0xEF && p[1] == 0xBD && p[2] == 0x9C)
+        return 3;
+
+    // U+2223 '∣' (E2 88 A3)
+    if (p[0] == 0xE2 && p[1] == 0x88 && p[2] == 0xA3)
+        return 3;
+
+    return 0;
+}
+
+static bool IsCoachName(const char* name)
+{
+    if (!name || !*name)
+        return false;
+
+    // Must start with "coach"
+    if (!StartsWithIgnoreCaseAscii(name, "coach"))
+        return false;
+
+    const unsigned char* after = (const unsigned char*)(name + 5);
+
+    // Must be immediately followed by a pipe-like separator
+    int sepLen = PipeLikeBytes(after);
+    if (sepLen == 0)
+        return false;
+
+    // Require at least one character after the separator
+    return after[sepLen] != '\0';
+}
 
 PlayerInfo getSpectatedPlayer() 
 {
@@ -248,6 +307,10 @@ PlayerInfo getPlayerInfoFromControllerIndex(int entindex)
 
 			auto teamNumber = *(int*)((u_char*)(ent) + g_clientDllOffsets.C_BaseEntity.m_iTeamNum);
 			if (0 == teamNumber || 1 == teamNumber) continue;
+			
+			auto name = (char*)((u_char*)(ent) + g_clientDllOffsets.CBasePlayerController.m_iszPlayerName);
+            if (nullptr == name || 0 == strlen(name)) advancedfx::Warning("Error: could not find name for entity %i\n", i);
+			if(IsCoachName(name)) continue;
 
 			int slot = 0;
 			if (3 == teamNumber) // CT
@@ -267,10 +330,7 @@ PlayerInfo getPlayerInfoFromControllerIndex(int entindex)
 			if(i != entindex) continue;
 
 			auto xuid = *(uint64_t*)((u_char*)(ent) + g_clientDllOffsets.CBasePlayerController.m_steamID);
-			auto name = (char*)((u_char*)(ent) + g_clientDllOffsets.CBasePlayerController.m_iszPlayerName);
-
             if (0 == xuid) advancedfx::Warning("Error: could not find xuid for entity %i\n", i);
-            if (nullptr == name || 0 == strlen(name)) advancedfx::Warning("Error: could not find name for entity %i\n", i);
 
 			result.name = name;
 			result.xuid = xuid;
