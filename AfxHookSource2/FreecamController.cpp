@@ -759,7 +759,7 @@ void CFreecamController::ApplySmoothing(float deltaTime) {
 
 void CFreecamController::UpdatePlayerLock(const InputState& input, float deltaTime) {
     bool vDown = input.IsKeyDown(kVkV);
-    if (vDown && !m_LastKeyVDown) {
+    if (vDown && !m_LastKeyVDown && m_bInputEnabled) {
         if (!m_PlayerLockActive) {
             float eyeX = 0.0f, eyeY = 0.0f, eyeZ = 0.0f;
             int handle = -1;

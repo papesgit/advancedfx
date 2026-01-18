@@ -1360,7 +1360,7 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 					g_pEngineToClient->ExecuteClientCmd(0, specCmd.c_str(), true);
 					
 					g_PendingSpectatorSwitch = true;
-					g_SpectatorSwitchTimeout = 3; // Max 3 frames timeout
+					g_SpectatorSwitchTimeout = 15; // Max 15 frames timeout
 				}
 			}
 			g_LastSpectatorKeyState[i] = currentNumberKeys[i];
@@ -1368,20 +1368,26 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	}
 
 	// Handle deferred freecam disable
-	if (g_PendingSpectatorSwitch && g_ClientDll_GetSplitScreenPlayer) {
+	if (g_PendingSpectatorSwitch && g_ClientDll_GetSplitScreenPlayer && g_pEntityList && g_GetEntityFromIndex) {
 		CEntityInstance* localPlayer = g_ClientDll_GetSplitScreenPlayer(0);
-		if (localPlayer) {
-			uint8_t currentMode = localPlayer->GetObserverMode();
-			
-			// Check if spectator switch completed
-			bool switchComplete = (currentMode == 2);
-			
-			if (switchComplete || --g_SpectatorSwitchTimeout <= 0) {
-				g_AttachmentCamera.active = false;
-				g_AttachmentCameraHadError = false;
-				if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
-				if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(0);
-				g_PendingSpectatorSwitch = false;
+		if (localPlayer && localPlayer->IsPlayerController()) {
+			auto pawnHandle = localPlayer->GetPlayerPawnHandle();
+			if (pawnHandle.IsValid()) {
+				int pawnIndex = pawnHandle.GetEntryIndex();
+				if (pawnIndex >= 0) {
+					CEntityInstance* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIndex);
+					if (pawn) {
+						uint8_t currentMode = pawn->GetObserverMode();
+						bool switchComplete = (currentMode == 1 || currentMode == 2);
+						if (switchComplete || --g_SpectatorSwitchTimeout <= 0) {
+							g_AttachmentCamera.active = false;
+							g_AttachmentCameraHadError = false;
+							if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
+							if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(0);
+							g_PendingSpectatorSwitch = false;
+						}
+					}
+				}
 			}
 		}
 	}
