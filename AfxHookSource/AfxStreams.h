@@ -2,23 +2,25 @@
 
 #define AFXSTREAMS_REFTRACKER 0
 
-#include "SourceInterfaces.h"
-#include "AfxInterfaces.h"
-#include "AfxClasses.h"
+#include <SourceInterfaces.h>
 #include "WrpConsole.h"
 #include "AfxShaders.h"
-#include "csgo_Stdshader_dx9_Hooks.h"
-#include "csgo_Stdshader_dx9_Hooks.h"
 #include "../shared/CamIO.h"
 #include "MaterialSystemHooks.h"
-#include "MatRenderContextHook.h"
-#include "AfxWriteFileLimiter.h"
-#include "MirvCalcs.h"
 #include "d3d9Hooks.h"
 #include "D3D9ImageBuffer.h"
 
-#define AFX_SHADERS_CSGO 0
 
+#ifndef _WIN64
+
+#include "csgo/AfxInterfaces.h"
+#include "csgo/AfxMaterials.h"
+#include "csgo_Stdshader_dx9_Hooks.h"
+#include "csgo_Stdshader_dx9_Hooks.h"
+#include "MatRenderContextHook.h"
+#include "MirvCalcs.h"
+
+#define AFX_SHADERS_CSGO 0
 #if AFX_SHADERS_CSGO
 #include <shaders/build/afxHook_splinerope_ps20.h>
 #include <shaders/build/afxHook_splinerope_ps20b.h>
@@ -31,14 +33,15 @@
 #include <shaders/build/afxHook_vertexlit_and_unlit_generic_ps30.h>
 #endif
 
-#include <shared/AfxRefCounted.h>
-#include <shared/RefCountedThreadSafe.h>
-#include <shared/AfxImageBuffer.h>
-#include <shared/ImageBufferPoolThreadSafe.h>
+#include <shared/AfxColorLut.h>
+#endif
+
 #include <shared/AfxOutStreams.h>
 #include <shared/bvhexport.h>
-#include <shared/AfxColorLut.h>
-#include "../shared/Captures.h"
+#include "../shared/RefCounted.h"
+#include "../shared/RefCountedThreadSafe.h"
+#include "../shared/GrowingBufferPoolThreadSafe.h"
+#include "../shared/ImageBufferThreadSafe.h"
 #include "../shared/OutVideoStreamCreators.h"
 #include "../shared/RecordingSettings.h"
 
@@ -111,7 +114,7 @@ public:
 	/**
 	 * Called from drawing thread.
 	 */
-	virtual void OnCapture(class advancedfx::ICapture * capture) = 0;
+	virtual void OnCapture(IAfxD3D9CaptureBuffer * capture) = 0;
 };
 
 class CCaptureNode
@@ -127,10 +130,6 @@ public:
 		s_GpuReleaseQueue.Shutdown();
 	}
 
-	static void GpuExecuteLockQueue() {
-		s_GpuLockQueue.Execute();
-	}
-
 	static void GpuExecuteReleaseQueue() {
 		s_GpuReleaseQueue.Execute();
 	}
@@ -144,17 +143,20 @@ public:
 	}
 
     void GpuCapture() {
-		GpuUnlock();
-
 		if(nullptr == m_D3d9Capture) {
 			m_D3d9Capture = m_Input->GpuCreateCapture();
 			if(m_D3d9Capture)
 				AfxD3D9OnReleaseAdd(this);
 		}
 		
-		m_CaptureOK = nullptr != m_D3d9Capture && m_D3d9Capture->Capture();
-
-		s_GpuLockQueue.Add(this);
+		if(nullptr != m_D3d9Capture){
+			if(auto captureBuffer = m_D3d9Capture->Capture()) {
+				m_Output->OnCapture(captureBuffer);
+				captureBuffer->Release();
+			} else {
+				m_Output->OnCapture(nullptr);
+			}
+		}
 	}
 
 	void CpuQueueGpuRelease() {
@@ -162,7 +164,7 @@ public:
 	}
 
 	/**
-	 * @remarks use only if wanting to release directl vom GPU thread, otherwise use CpuQueueGpuRelease
+	 * @remarks use only if wanting to release directly vom GPU thread, otherwise use CpuQueueGpuRelease
 	 */
 	void GpuRelease() {
 		this->ReleaseD3d9Capture();
@@ -170,46 +172,13 @@ public:
 
 protected:
 	virtual ~CCaptureNode() {
-		Assert(m_ProcessBuffer == false);
 		Assert(m_D3d9Capture == nullptr);
-		Assert(m_Buffer == nullptr);
 
 		m_Output->Release();
 		m_Input->Release();
 	}
 
 private:
-	static class CGpuLockQueue {
-	public:
-		~CGpuLockQueue() {
-			Clear();
-		}
-
-		void Add(CCaptureNode* capture) {
-			capture->AddRef();
-			m_Queue.emplace(capture);
-		}
-
-		void Execute() {
-			while (!m_Queue.empty()) {
-				CCaptureNode* item = m_Queue.front();
-				item->GpuLock();
-				item->Release();
-				m_Queue.pop();
-			}
-		}
-
-		void Clear() {
-			while (!m_Queue.empty()) {
-				m_Queue.front()->Release();
-				m_Queue.pop();
-			}
-		}
-
-	private:
-		std::queue<CCaptureNode*> m_Queue;
-	} s_GpuLockQueue;
-
 	static class CGpuReleaseQueue {
 	public:
 		void Init() {
@@ -252,49 +221,9 @@ private:
 	
 	} s_GpuReleaseQueue;
 
-	class CCapture
-		: public advancedfx::CRefCountedThreadSafe
-		, public advancedfx::ICapture {
-	public:
-		CCapture(CCaptureNode* captureNode)
-			: advancedfx::CRefCountedThreadSafe()
-			, m_CaptureNode(captureNode)
-		{
-
-		}
-		virtual void AddRef() override {
-			advancedfx::CRefCountedThreadSafe::AddRef();
-		}
-
-		virtual void Release() override {
-			advancedfx::CRefCountedThreadSafe::Release();
-		}
-
-		virtual const advancedfx::IImageBuffer* GetBuffer() const {
-			return m_CaptureNode->m_Buffer;
-		}
-
-	protected:
-		virtual ~CCapture() {
-			std::unique_lock<std::mutex> lock(m_CaptureNode->m_BufferMutex);
-			m_CaptureNode->m_ProcessBuffer = false;
-			m_CaptureNode->m_ProcessedCondition.notify_one();
-		}
-
-	private:
-		CCaptureNode* m_CaptureNode;
-
-	};
-
 	ICaptureInput * m_Input;
 	ICaptureOutput * m_Output;
 	IAfxD3D9Capture * m_D3d9Capture = nullptr;
-	bool m_CaptureOK = false;
-	bool m_ProcessBuffer = false;
-	std::condition_variable m_ProcessCondition;
-	std::condition_variable m_ProcessedCondition;
-	std::mutex m_BufferMutex;
-	const advancedfx::IImageBuffer * m_Buffer = nullptr;
 	bool m_GpuReleased = false;
 	bool m_CpuReleased = false;
 
@@ -303,46 +232,22 @@ private:
 	}
 
 	void ReleaseD3d9Capture() {
-		GpuUnlock();
 		if(m_D3d9Capture) {
 			AfxD3D9OnReleaseRemove(this);
 			m_D3d9Capture->Release();
 			m_D3d9Capture = nullptr;
 		}
 	}
-
-	void GpuLock() {
-		m_ProcessBuffer = true;
-		if(m_CaptureOK) {
-			m_Buffer = m_D3d9Capture->LockCpu();
-		}
-		CCapture* capture = new CCapture(this);
-		capture->AddRef();
-		m_Output->OnCapture(capture);
-		capture->Release();
-	}
-
-	void GpuUnlock() {
-		std::unique_lock<std::mutex> lock(m_BufferMutex);
-		if (m_ProcessBuffer) {
-			m_ProcessedCondition.wait(lock, [this] {
-				return m_ProcessBuffer == false;
-			});
-		}
-		if (m_Buffer) {
-			m_D3d9Capture->UnlockCpu();
-			m_Buffer = nullptr;
-		}
-	}
 };
 
+class CAfxStreams;
+extern CAfxStreams g_AfxStreams;
+
+
+#ifndef _WIN64
 
 //typedef void(__fastcall * CCSViewRender_Render_t)(void * This, void* Edx, const SOURCESDK::vrect_t_csgo * rect);
 typedef void(__fastcall* CCSViewRender_RenderView_t)(void * This, void* Edx, const SOURCESDK::CViewSetup_csgo &view, const SOURCESDK::CViewSetup_csgo &hudViewSetup, int nClearFlags, int whatToDraw);
-
-class CAfxStreams;
-
-extern CAfxStreams g_AfxStreams;
 
 class IAfxBasefxStreamModifier;
 
@@ -515,6 +420,8 @@ public:
 #endif
 };
 
+#endif //#ifndef _WIN64
+
 #if AFXSTREAMS_REFTRACKER
 void AfxStreams_RefTracker_Inc(void);
 void AfxStreams_RefTracker_Dec(void);
@@ -601,9 +508,11 @@ public:
 	//
 	// Hooks:
 
+#ifndef _WIN64
 	virtual void LevelShutdown(void)
 	{
 	}
+#endif
 
 protected:
 	virtual ~CAfxStream()
@@ -669,6 +578,7 @@ private:
 
 };
 
+#ifndef _WIN64
 class CAfxFunctor abstract
 	: public SOURCESDK::CSGO::CFunctor
 {
@@ -764,6 +674,8 @@ private:
 	bool m_Block;
 };
 
+#endif //#ifndef _WIN64
+
 
 template<typename T> class CAfxOverrideable
 {
@@ -826,6 +738,9 @@ private:
 
 typedef CAfxOverrideable<bool> CAfxBoolOverrideable;
 
+
+#ifndef _WIN64
+
 class CAfxBaseFxStream;
 
 struct AfxViewportData_t
@@ -852,7 +767,7 @@ public:
 		advancedfx::CRefCountedThreadSafe::Release();
 	}
 
-	virtual void OnCapture(class advancedfx::ICapture* capture);
+	virtual void OnCapture(IAfxD3D9CaptureBuffer* capture);
 
 protected:
 	~CAfxStreamsCaptureOutput();
@@ -1048,13 +963,13 @@ public:
 	void DoCaptureStart(IAfxMatRenderContextOrg* ctx, const AfxViewportData_t& viewport);
 
 	/// <remarks>This is not guaranteed to be called, i.e. not called upon buffer re-allocation error.</remarks>
-	void OnImageBufferCaptured(size_t index, class advancedfx::ICapture* buffer);
+	void OnCapture(size_t index, IAfxD3D9CaptureBuffer * capture);
 
 	bool GetStreamFolder(std::wstring& outFolder) const;
 
 	virtual advancedfx::StreamCaptureType GetCaptureType() const = 0;
 
-	virtual advancedfx::IImageBufferPool * GetImageBufferPool() const;
+	virtual advancedfx::CGrowingBufferPoolThreadSafe * GetImageBufferPool() const;
 
 	virtual bool GetFormatBmpNotTga() const;
 
@@ -1094,29 +1009,29 @@ public:
 	}
 
 protected:
-	class CBuffers {
+	class CCaptures {
 	public:
-		CBuffers(size_t size) : m_Buffers(size) {
+		CCaptures(size_t size) : m_Buffers(size) {
 		}
 
 		size_t GetSize() const {
 			return m_Buffers.size();
 		}
 
-		class advancedfx::ICapture * GetAt(size_t index) const {
+		IAfxD3D9CaptureBuffer * GetAt(size_t index) const {
 			return m_Buffers[index];
 		}
 
-		void SetAt(size_t index, class advancedfx::ICapture * value) {
+		void SetAt(size_t index, IAfxD3D9CaptureBuffer * value) {
 			m_Buffers[index] = value;
 		}
 
 	private:
-		std::vector<class advancedfx::ICapture *> m_Buffers;
+		std::vector<IAfxD3D9CaptureBuffer *> m_Buffers;
 	};
 
 	std::vector<CAfxRenderViewStream *> m_Streams;
-	class CBuffers* m_Task = nullptr;
+	class CCaptures* m_Task = nullptr;
 	std::vector<class CCaptureNode*> m_CaptureNodes;
 
 	void SetCaptureNode(size_t index, class CCaptureNode* node) {
@@ -1133,7 +1048,7 @@ protected:
 	}
 
 	advancedfx::CRecordingSettings * m_Settings;
-	advancedfx::COutVideoStream * m_OutVideoStream;
+	advancedfx::TIOutVideoStream<true> * m_OutVideoStream;
 
 	virtual ~CAfxRecordStream() override;
 
@@ -1142,6 +1057,16 @@ protected:
 	}
 
 	virtual void CaptureEnd();
+
+	advancedfx::IImageBufferThreadSafe * CaptureToBuffer(IAfxD3D9CaptureBuffer * capture) {
+		if(capture) {
+			auto result = capture->LockCpu();
+			capture->Release();
+			return result;
+		}
+
+		return nullptr;
+	}
 
 private:
 	class CCaptureFunctor :
@@ -1168,15 +1093,15 @@ private:
 	bool m_Recording = false;
 	bool m_FirstCapture = false;
 
-	std::list<class CBuffers*> m_In;
+	std::list<class CCaptures*> m_In;
 
 	void ProcessingThreadFunc() {
 		std::unique_lock<std::mutex> lock(m_ProcessingThreadMutex);
 		while (m_Recording || 0 < m_CapturesLeft || !m_In.empty()) {
 			if (!m_In.empty()) {
-				class CBuffers* buffers = m_In.front();
-				if(buffers->GetSize() >= m_Streams.size()) {
-					m_Task = buffers;
+				class CCaptures* captures = m_In.front();
+				if(captures->GetSize() >= m_Streams.size()) {
+					m_Task = captures;
 					m_In.pop_front();
 					lock.unlock();
 					CaptureEnd();
@@ -3361,11 +3286,16 @@ public:
 	}
 };
 
-extern advancedfx::CImageBufferPoolThreadSafe g_ImageBufferPoolThreadSafe;
+#endif //#ifndef _WIN64
+
+
+extern advancedfx::CGrowingBufferPoolThreadSafe g_ImageBufferPoolThreadSafe;
 
 class CAfxStreams
-: public IAfxBaseClientDllView_Render
-, public IRecordStreamSettings
+: public IRecordStreamSettings
+#ifndef _WIN64
+, public IAfxBaseClientDllView_Render
+#endif //#ifndef _WIN64
 {
 public:
 	typedef SOURCESDK::IMatRenderContext_csgo CMatQueuedRenderContext_csgo;
@@ -3374,7 +3304,6 @@ public:
 
 	CAfxStreams();
 	~CAfxStreams();
-
 	void ShutDown(void);
 	void ShutDown2(void);
 
@@ -3383,11 +3312,18 @@ public:
 
 	static void MainThreadInitialize(void)
 	{
+#ifndef _WIN64
 		CAfxBaseFxStream::MainThreadInitialize();
+#endif //#ifndef _WIN64
 	}
 
-	void OnMaterialSystem(SOURCESDK::IMaterialSystem_csgo * value);
+
+#ifndef _WIN64
+
 	void OnAfxBaseClientDll(IAfxBaseClientDll * value);
+
+	void OnMaterialSystem(SOURCESDK::IMaterialSystem_csgo * value);
+
 	void OnShaderShadow(SOURCESDK::IShaderShadow_csgo * value);
 
 #if AFX_SHADERS_CSGO
@@ -3413,6 +3349,9 @@ public:
 
 	void OnDrawingSkyBoxViewEnd(void);
 
+#endif //#ifndef _WIN64
+
+
 	void Console_RecordName_set(const char * value);
 	const char * Console_RecordName_get();
 
@@ -3425,6 +3364,8 @@ public:
 	void Console_RecordVoices_set(bool value);
 	bool Console_RecordVoices_get();
 
+
+#ifndef _WIN64
 	void Console_MatPostprocessEnable_set(int value);
 	int Console_MatPostprocessEnable_get();
 
@@ -3436,10 +3377,14 @@ public:
 
 	void Console_MatForceTonemapScale_set(float value);
 	float Console_MatForceTonemapScale_get();
+#endif //#ifndef _WIN64
+
 
 	void Console_RecordFormat_set(const char * value);
 	const char * Console_RecordFormat_get();
 
+
+#ifndef _WIN64
 	void Console_PreviewSuspend_set(bool value);
 	bool Console_PreviewSuspend_get();
 
@@ -3449,11 +3394,16 @@ public:
 	bool Console_ShowRenderViewCountGet() {
 		return m_ShowRenderViewCount;
 	}
+#endif //#ifndef _WIN64
+
 
 	void Console_Record_Start();
 	void Console_Record_Start2();
 	void Console_Record_End();
 	void Console_Record_End2();
+
+
+#ifndef _WIN64
 	void Console_AddStream(const char * streamName);
 	void Console_AddBaseFxStream(const char * streamName);
 	void Console_AddDepthStream(const char * streamName, bool tryZDepth);
@@ -3476,10 +3426,12 @@ public:
 	void Console_EditStream(CAfxStream * stream, IWrpCommandArgs * args);
 	bool Console_EditStream(CAfxRenderViewStream * stream, IWrpCommandArgs * args);
 	void Console_ListActions(void);
-	void Console_Bvh(IWrpCommandArgs * args);
 	bool Console_ToStreamCombineType(char const * value, CAfxTwinStream::StreamCombineType & streamCombineType);
 	char const * Console_FromStreamCombineType(CAfxTwinStream::StreamCombineType streamCombineType);
+#endif //#ifndef _WIN64
 
+
+	void Console_Bvh(IWrpCommandArgs * args);
 	void Console_RecordScreen(IWrpCommandArgs* args);
 
 	bool GetCampathAutoSave() { return m_CampathAutoSave; }
@@ -3490,6 +3442,8 @@ public:
 
 	void Console_GameRecording(IWrpCommandArgs * args);
 
+
+#ifndef _WIN64
 	/// <param name="streamName">stream name to preview or empty string if to preview nothing.</param>
 	/// <param name="slot">-1 means all slots if streamName is emtpy.</param>
 	void Console_PreviewStream(const char * streamName, int slot);
@@ -3499,43 +3453,56 @@ public:
 
 	virtual SOURCESDK::IMaterialSystem_csgo * GetMaterialSystem(void);
 	virtual SOURCESDK::IShaderShadow_csgo * GetShaderShadow(void);
+#endif //#ifndef _WIN64
+
 
 	const std::wstring & GetTakeDir(void) const;
 
-	void LevelInitPostEntity(void);
+#ifndef _WIN64
 	void LevelShutdown(void);
 
 	virtual void View_Render(IAfxBaseClientDll * cl, SOURCESDK::vrect_t_csgo *rect);
+#endif //#ifndef _WIN64
+
 
 	float GetStartHostFrameRate()
 	{
 		return m_StartHostFrameRateValue;
 	}
 
+
+#ifndef _WIN64
 	void Console_MainStream(IWrpCommandArgs * args);
+
 
 	bool DrawPhiGrid = false;
 	bool DrawRuleOfThirds = false;
 
-	void BeforeFrameStart()
-	{
-	}
-
 	void OnClientEntityCreated(SOURCESDK::C_BaseEntity_csgo* ent);
 
 	void OnClientEntityDeleted(SOURCESDK::C_BaseEntity_csgo* ent);
+#endif //#ifndef _WIN64
+
 
 	bool IsRecording() {
 		return m_Recording;
 	}
 
+
+#ifndef _WIN64
 	bool IsQueuedThreaded();
 
 	bool IsSingleThreaded();
+#endif //#ifndef _WIN64
+
 
 	bool OnEngineThread();
 
+
+#ifndef _WIN64
 	IAfxStreamContext * FindStreamContext(IAfxMatRenderContext * ctx);
+#endif //#ifndef _WIN64
+
 
 	void DrawingThread_DeviceLost();
 
@@ -3572,7 +3539,7 @@ public:
 		return advancedfx::StreamCaptureType::Normal;
 	}
 
-	virtual advancedfx::IImageBufferPool * GetImageBufferPool() const {
+	virtual advancedfx::CGrowingBufferPoolThreadSafe * GetImageBufferPool() const {
 		return &g_ImageBufferPoolThreadSafe;
 	}
 
@@ -3610,6 +3577,8 @@ private:
 	int m_SetRenderTargetNoMsaa = 0;
 	int m_SetIntZTextureSurface = 0;
 
+
+#ifndef _WIN64
 	enum MainStreamMode_e
 	{
 		MainStreamMode_None,
@@ -3620,6 +3589,7 @@ private:
 	CAfxRecordStream * m_MainStream = nullptr;
 
 	bool m_ForceCacheFullSceneState = false;
+
 
 	class CEntityBvhCapture
 	{
@@ -3671,8 +3641,12 @@ private:
 	private:
 		DWORD m_Sleep;
 	};
+#endif //#ifndef _WIN64
 
 	std::string m_RecordName;
+
+
+#ifndef _WIN64
 	bool m_FirstRenderAfterLevelInit = true;
 	bool m_FirstStreamToBeRendered;
 	int m_DoRenderViewCount = 0;
@@ -3680,22 +3654,35 @@ private:
 	bool m_PresentLastStream;
 	bool m_SuspendPreview = false;
 	bool m_PresentRecordOnScreen;
+#endif //#ifndef _WIN64
+
+
 	bool m_StartMovieWav;
 	bool m_StartMovieWavUsed;
 
+
+#ifndef _WIN64
 	bool m_RecordVoices;
 	bool m_RecordVoicesUsed;
 
 	const SOURCESDK::CViewSetup_csgo * m_CurrentView;
 
 	SOURCESDK::IMaterialSystem_csgo * m_MaterialSystem;
+	
 	IAfxBaseClientDll * m_AfxBaseClientDll;
+
 	SOURCESDK::IShaderShadow_csgo * m_ShaderShadow;
 	std::list<CAfxRecordStream *> m_Streams;
 	CAfxRecordStream * m_PreviewStreams[16] = { };
+#endif //#ifndef _WIN64
+
 	bool m_Recording;
 	bool m_CamBvh;
+
+#ifndef _WIN64
 	std::list<CEntityBvhCapture *> m_EntityBvhCaptures;
+#endif //#ifndef _WIN64
+
 	bool m_CampathAutoSave = false;
 	bool m_CamExport = false;
 	bool m_CamExportSet = false;
@@ -3704,6 +3691,7 @@ private:
 	WrpConVarRef * m_HostFrameRate = nullptr;
 	float m_StartHostFrameRateValue = 0.0f;
 
+#ifndef _WIN64
 	WrpConVarRef * m_MatPostProcessEnableRef = nullptr;
 	int m_OldMatPostProcessEnable;
 	int m_NewMatPostProcessEnable = -1;
@@ -3719,15 +3707,19 @@ private:
 	WrpConVarRef * m_MatForceTonemapScale = nullptr;
 	float m_OldMatForceTonemapScale;
 	float m_NewMatForceTonemapScale = -1;
+#endif //#ifndef _WIN64
 
 	WrpConVarRef * m_SndMuteLosefocus = nullptr;
 	int m_OldSndMuteLosefocus;
 
+#ifndef _WIN64
 	WrpConVarRef * m_BuildingCubemaps = nullptr;
 	int m_OldBuildingCubemaps;
 
 	WrpConVarRef * m_PanoramaDisableLayerCache = nullptr;
 	int m_OldPanoramaDisableLayerCache;
+#endif //#ifndef _WIN64
+
 
 	//WrpConVarRef * m_cl_modelfastpath = nullptr;
 	//int m_Old_cl_modelfastpath;
@@ -3736,7 +3728,7 @@ private:
 	//int m_Old_cl_tlucfastpath;
 
 	//WrpConVarRef * m_cl_brushfastpath = nullptr;
-	int m_Old_cl_brushfastpath;
+	//int m_Old_cl_brushfastpath;
 
 	//WrpConVarRef * m_r_drawstaticprops = nullptr;
 	//int m_Old_r_drawstaticprops;
@@ -3746,10 +3738,12 @@ private:
 	//SOURCESDK::ITexture_csgo * m_RenderTargetDepthF;
 	//CAfxMaterial * m_ShowzMaterial;
 	DWORD m_View_Render_ThreadId;
-	bool m_PresentBlocked = false;
-	bool m_ShutDown = false;
 
-	bool m_HudDrawn = false;
+#ifndef _WIN64
+	bool m_PresentBlocked = false;
+#endif //#ifndef _WIN64
+
+	bool m_ShutDown = false;
 
 	class CRecordScreen {
 	public:
@@ -3799,7 +3793,7 @@ private:
 			advancedfx::CRefCountedThreadSafe::Release();
 		}
 
-		virtual void OnCapture(class advancedfx::ICapture* capture) {
+		virtual void OnCapture(IAfxD3D9CaptureBuffer * capture) {
 			std::unique_lock<std::mutex> lock(m_ProcessingThreadMutex);
 			if (capture) capture->AddRef();
 			m_Captures.push_back(capture);
@@ -3821,10 +3815,10 @@ private:
 		std::mutex m_ProcessingThreadMutex;
 		std::condition_variable m_ProcessingThreadCv;
 		std::thread m_ProcessingThread;
-		std::list<class advancedfx::ICapture*> m_Captures;
+		std::list<IAfxD3D9CaptureBuffer*> m_Captures;
 		bool m_Shutdown = false;
 		advancedfx::COutVideoStreamCreator* m_OutVideoStreamCreator;
-		advancedfx::COutVideoStream* m_OutVideoStream = nullptr;
+		advancedfx::TIOutVideoStream<true>* m_OutVideoStream = nullptr;
 
 		void ProcessingThreadFunc();
 
@@ -3888,8 +3882,9 @@ private:
 
 	DWORD Get_View_Render_ThreadId();
 
-	void OnAfxBaseClientDll_Free(void);
+//	void OnAfxBaseClientDll_Free(void);
 
+#ifndef _WIN64
 	bool Console_CheckStreamName(char const * value);
 
 	bool Console_ToStreamCaptureType(char const * value, advancedfx::StreamCaptureType & StreamCaptureType);
@@ -3899,6 +3894,7 @@ private:
 
 	void BackUpMatVars();
 	void SetMatVarsForStreams();
+
 	void RestoreMatVars();
 	void EnsureMatVars();
 
@@ -3923,6 +3919,8 @@ private:
 	void UpdateStreamDeps();
 
 	IAfxMatRenderContextOrg* CommitDrawingContext(IAfxMatRenderContextOrg* context, bool blockPresent);
+#endif //#ifndef _WIN64
+
 
 	void AfxStreamsInitGlobal();
 

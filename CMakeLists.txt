@@ -7,8 +7,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED On)
 set(CMAKE_CXX_EXTENSIONS Off)
 
-string(TOLOWER ${CMAKE_BUILD_TYPE} CMAKE_BUILD_TYPE_LOWER)
-if(${CMAKE_BUILD_TYPE_LOWER} STREQUAL "debug")
+string(TOLOWER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_LOWER)
+if(CMAKE_BUILD_TYPE_LOWER STREQUAL "debug")
 	set(CMAKE_BUILD_TYPE_DEBUG 1)
 endif()
 
@@ -137,6 +137,8 @@ endif()
 include(FetchContent)
 include(ExternalProject)
 
+if(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
+
 #
 # Setup "corrosion" for including Rust code in our projects:
 #
@@ -147,6 +149,8 @@ FetchContent_Declare(
     GIT_TAG b1fab721655c5c4b1b08a083d3cd29f163af75d0 # v0.5.1
 )
 FetchContent_MakeAvailable(Corrosion)
+
+endif()
 
 #
 # Project setup
@@ -167,12 +171,21 @@ if(CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
 	    DEPENDS hlae
     )
 elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
+
+    FetchContent_Declare(
+	    nasm
+	    URL https://github.com/advancedfx/nasm/releases/download/nasm-2.15.05/nasm-2.15.05-win64.zip https://www.nasm.us/pub/nasm/releasebuilds/2.15.05/win64/nasm-2.15.05-win64.zip
+	    URL_HASH SHA512=0d0469f3d475f3d192b9b5b7ee74662cbcb9e02efa0d51839c12cbf6f5de5cd58b32e1d12c9ee4381a63e99a4956e03df7decaf1369e598e0edff19a12629073
+    )
+    FetchContent_MakeAvailable(nasm)
+
     add_subdirectory("deps/release/openexr")
     add_subdirectory("deps/release/nvcodec")
     # Disable zlib in ixwebsocket (we don't need HTTP/per-message compression)
     set(USE_ZLIB OFF CACHE BOOL "Disable zlib for ixwebsocket" FORCE)
     add_subdirectory("deps/release/ixwebsocket")
     add_subdirectory("ShaderBuilder")
+    add_subdirectory("AfxHookSource")
     add_subdirectory("AfxHookSource2")
     add_subdirectory("misc/mirv-script/src/snippets")
 
@@ -249,6 +262,7 @@ elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
         PROGRAMS
             ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
 
+            "$<TARGET_FILE:AfxHookSource>"
             "$<TARGET_FILE:AfxHookSource2>"
 
             ${AFX_OPENEXR_INSTALL_BINARIES}           
@@ -257,6 +271,7 @@ elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
 
     install(
         FILES
+            "$<TARGET_PDB_FILE:AfxHookSource>"
             "$<TARGET_PDB_FILE:AfxHookSource2>"
         DESTINATION "pdb/x64"
     )
@@ -267,4 +282,3 @@ elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
         DESTINATION "bin/resources/AfxHookSource2/snippets"
     )
 endif()
-
