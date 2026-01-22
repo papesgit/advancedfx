@@ -986,14 +986,34 @@ static bool ComputeAttachmentCameraTransform(
 	auto pawn = GetPawnFromControllerIndex(controllerIndex);
 	if (!pawn) return false;
 
-	uint8_t attachmentIdx = state.attachmentIndex;
-	if (!state.useAttachmentIndex) {
-		attachmentIdx = pawn->LookupAttachment(state.attachmentName.c_str());
-	}
-
 	SOURCESDK::Vector attachmentOrigin;
 	SOURCESDK::Quaternion attachmentAngles;
-	if (!pawn->GetAttachment(attachmentIdx, attachmentOrigin, attachmentAngles)) return false;
+
+	const bool isPov = !state.useAttachmentIndex && state.attachmentName == "POV";
+	if (isPov) {
+		float eyeOrigin[3];
+		float eyeAngles[3];
+		pawn->GetRenderEyeOrigin(eyeOrigin);
+		pawn->GetRenderEyeAngles(eyeAngles);
+		attachmentOrigin.x = eyeOrigin[0];
+		attachmentOrigin.y = eyeOrigin[1];
+		attachmentOrigin.z = eyeOrigin[2];
+		// Convert Euler angles (pitch, yaw, roll) to quaternion
+		Afx::Math::QEulerAngles euler(eyeAngles[0], eyeAngles[1], eyeAngles[2]);
+		Afx::Math::Quaternion q = Afx::Math::Quaternion::FromQREulerAngles(
+			Afx::Math::QREulerAngles::FromQEulerAngles(euler)
+		).Normalized();
+		attachmentAngles.x = q.X;
+		attachmentAngles.y = q.Y;
+		attachmentAngles.z = q.Z;
+		attachmentAngles.w = q.W;
+	} else {
+		uint8_t attachmentIdx = state.attachmentIndex;
+		if (!state.useAttachmentIndex) {
+			attachmentIdx = pawn->LookupAttachment(state.attachmentName.c_str());
+		}
+		if (!pawn->GetAttachment(attachmentIdx, attachmentOrigin, attachmentAngles)) return false;
+	}
 
 	Afx::Math::Quaternion baseQuat = SourceQuatToAfx(attachmentAngles).Normalized();
 	Afx::Math::Quaternion baseQuatForRotation = baseQuat;
@@ -1099,7 +1119,7 @@ static bool ComputeAttachmentCameraTransform(
 		state.offsetPos.z + deltaPos.z
 	);
 	const Afx::Math::Quaternion positionQuat = state.rotationReference == AttachmentCameraRotationReference::OffsetLocal
-		? baseQuat
+		? baseQuatForRotation
 		: combinedQuat;
 	combinedOrigin += RotateVectorByQuat(positionQuat, offsetVec);
 
