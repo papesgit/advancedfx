@@ -304,6 +304,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     FreecamController.cpp
     FreecamController.h
 
+    NadeCam.cpp
+    NadeCam.h
+
     WrpConsole.cpp
     WrpConsole.h
 

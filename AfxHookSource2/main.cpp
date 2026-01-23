@@ -28,6 +28,7 @@
 #include "ObsSpectatorBindings.h"
 #include "ObsWebSocketActions.h"
 #include "FreecamController.h"
+#include "NadeCam.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/AfxHookSource/SourceInterfaces.h"
@@ -127,6 +128,7 @@ void * g_pGameResourceService = nullptr;
 CObsWebSocketServer* g_pObsWebSocket = nullptr;
 CObsInputReceiver* g_pObsInput = nullptr;
 CFreecamController* g_pFreecam = nullptr;
+CNadeCam* g_pNadeCam = nullptr;
 
 static bool IsLoopback(const in_addr& addr) {
 	const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&addr.S_un.S_addr);
@@ -1429,6 +1431,7 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 							g_AttachmentCameraHadError = false;
 							if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
 							if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(0);
+							if (g_pNadeCam && g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(false);
 							g_PendingSpectatorSwitch = false;
 						}
 					}
@@ -1452,6 +1455,40 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 		Rz = cam.roll;
 		Fov = cam.fov;
 		originOrAnglesOverriden = true;
+	}
+
+	// Nadecam
+	{
+		bool altDown = input.IsKeyDown(0x12);  // VK_MENU (Alt)
+
+		// Toggle on Alt key hold
+		if (altDown && g_pNadeCam && g_pFreecam && !g_pFreecam->IsEnabled()) {
+			if (!g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(true);
+		} else if (g_pNadeCam && g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(false);
+
+		// Update NadeCam and apply transform if active
+		if (g_pNadeCam && g_pNadeCam->IsEnabled()) {
+			float deltaTime = (float)g_MirvInputEx.LastFrameTime;
+			CameraTransform currentCam;
+			currentCam.x = Tx;
+			currentCam.y = Ty;
+			currentCam.z = Tz;
+			currentCam.pitch = Rx;
+			currentCam.yaw = Ry;
+			currentCam.roll = Rz;
+			currentCam.fov = Fov;
+			CameraTransform nadeCamTransform;
+			if (g_pNadeCam->Update(deltaTime, curTime, currentCam, nadeCamTransform)) {
+				Tx = nadeCamTransform.x;
+				Ty = nadeCamTransform.y;
+				Tz = nadeCamTransform.z;
+				Rx = nadeCamTransform.pitch;
+				Ry = nadeCamTransform.yaw;
+				Rz = nadeCamTransform.roll;
+				Fov = nadeCamTransform.fov;
+				originOrAnglesOverriden = true;
+			}
+		}
 	}
 
 	// Camera attachment override
@@ -2454,6 +2491,9 @@ int new_CCS2_Client_Init(void* This) {
 	g_pFreecam = new CFreecamController();
 	advancedfx::Message("Freecam controller initialized\n");
 
+	g_pNadeCam = new CNadeCam();
+	advancedfx::Message("Grenade camera initialized\n");
+
 	PrintInfo();
 
 	HookSchemaSystem(g_H_SchemaSystem);
@@ -3411,6 +3451,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 			g_S2CamIO.ShutDown();
 
 			// Cleanup observer tools
+			if (g_pNadeCam) {
+				delete g_pNadeCam;
+				g_pNadeCam = nullptr;
+			}
+
 			if (g_pFreecam) {
 				delete g_pFreecam;
 				g_pFreecam = nullptr;
