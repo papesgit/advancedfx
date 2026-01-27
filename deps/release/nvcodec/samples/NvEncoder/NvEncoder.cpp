@@ -27,6 +27,14 @@
 
 #include "NvEncoder.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <mutex>
+#endif
+
 #ifndef _WIN32
 #include <cstring>
 static inline bool operator==(const GUID &guid1, const GUID &guid2) {
@@ -73,10 +81,47 @@ NvEncoder::NvEncoder(NV_ENC_DEVICE_TYPE eDeviceType, void *pDevice, uint32_t nWi
 
 void NvEncoder::LoadNvEncApi()
 {
+#ifdef _WIN32
+    typedef NVENCSTATUS(NVENCAPI *PFNNvEncodeAPICreateInstance)(NV_ENCODE_API_FUNCTION_LIST*);
+    typedef NVENCSTATUS(NVENCAPI *PFNNvEncodeAPIGetMaxSupportedVersion)(uint32_t*);
+
+    static HMODULE s_nvencModule = nullptr;
+    static PFNNvEncodeAPICreateInstance s_nvEncodeAPICreateInstance = nullptr;
+    static PFNNvEncodeAPIGetMaxSupportedVersion s_nvEncodeAPIGetMaxSupportedVersion = nullptr;
+    static std::once_flag s_nvencLoadOnce;
+
+    std::call_once(s_nvencLoadOnce, []() {
+        s_nvencModule = LoadLibraryA("nvEncodeAPI64.dll");
+        if (!s_nvencModule) {
+            s_nvencModule = LoadLibraryA("nvEncodeAPI.dll");
+        }
+        if (!s_nvencModule) {
+            NVENC_THROW_ERROR("NVENC runtime not found (nvEncodeAPI64.dll missing). Only available on NVIDIA NVENC-capable GPUs.",
+                NV_ENC_ERR_NO_ENCODE_DEVICE);
+        }
+
+        s_nvEncodeAPICreateInstance = reinterpret_cast<PFNNvEncodeAPICreateInstance>(
+            GetProcAddress(s_nvencModule, "NvEncodeAPICreateInstance"));
+        s_nvEncodeAPIGetMaxSupportedVersion = reinterpret_cast<PFNNvEncodeAPIGetMaxSupportedVersion>(
+            GetProcAddress(s_nvencModule, "NvEncodeAPIGetMaxSupportedVersion"));
+
+        if (!s_nvEncodeAPICreateInstance || !s_nvEncodeAPIGetMaxSupportedVersion) {
+            NVENC_THROW_ERROR("Failed to load NVENC API entry points.", NV_ENC_ERR_NO_ENCODE_DEVICE);
+        }
+    });
+
+    if (!s_nvEncodeAPICreateInstance || !s_nvEncodeAPIGetMaxSupportedVersion) {
+        NVENC_THROW_ERROR("NVENC API not available.", NV_ENC_ERR_NO_ENCODE_DEVICE);
+    }
+#endif
 
     uint32_t version = 0;
     uint32_t currentVersion = (NVENCAPI_MAJOR_VERSION << 4) | NVENCAPI_MINOR_VERSION;
+#ifdef _WIN32
+    NVENC_API_CALL(s_nvEncodeAPIGetMaxSupportedVersion(&version));
+#else
     NVENC_API_CALL(NvEncodeAPIGetMaxSupportedVersion(&version));
+#endif
     if (currentVersion > version)
     {
         NVENC_THROW_ERROR("Current Driver Version does not support this NvEncodeAPI version, please upgrade driver", NV_ENC_ERR_INVALID_VERSION);
@@ -84,7 +129,11 @@ void NvEncoder::LoadNvEncApi()
 
 
     m_nvenc = { NV_ENCODE_API_FUNCTION_LIST_VER };
+#ifdef _WIN32
+    NVENC_API_CALL(s_nvEncodeAPICreateInstance(&m_nvenc));
+#else
     NVENC_API_CALL(NvEncodeAPICreateInstance(&m_nvenc));
+#endif
 }
 
 NvEncoder::~NvEncoder()

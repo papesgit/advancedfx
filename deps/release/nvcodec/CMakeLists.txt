@@ -26,10 +26,7 @@ elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
 endif()
 
 # Link libraries
-target_link_libraries(nvcodec INTERFACE
-    ${NVCODEC_LIB_DIR}/nvencodeapi.lib
-    ${NVCODEC_LIB_DIR}/nvcuvid.lib
-)
+# NOTE: NVENC is loaded dynamically at runtime to avoid hard DLL dependencies.
 
 # Sample source files
 set(NVCODEC_SAMPLE_SOURCES
@@ -49,9 +46,5 @@ set(AFX_NVCODEC_INCLUDE_DIRECTORIES
     PARENT_SCOPE
 )
 set(AFX_NVCODEC_LIB_DIR ${NVCODEC_LIB_DIR} PARENT_SCOPE)
-set(AFX_NVCODEC_LINK_LIBRARIES
-    ${NVCODEC_LIB_DIR}/nvencodeapi.lib
-    ${NVCODEC_LIB_DIR}/nvcuvid.lib
-    PARENT_SCOPE
-)
+set(AFX_NVCODEC_LINK_LIBRARIES PARENT_SCOPE)
 set(AFX_NVCODEC_SAMPLE_SOURCES ${NVCODEC_SAMPLE_SOURCES} PARENT_SCOPE)
