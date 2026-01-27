@@ -4619,7 +4619,7 @@ public:
 				{
 					if (m_Original_VertexShader) m_Original_VertexShader->Release();
 					m_Original_VertexShader = pShader;
-					if (m_Original_VertexShader) m_Original_VertexShader->AddRef();
+					// pShader alredy has AddRef from GetVertexShader.
 
 					g_OldDirect3DDevice9->SetVertexShader(curOverride.m_OverrideValue_VertexShader);
 				}
@@ -4628,7 +4628,7 @@ public:
 			{
 				if (m_Original_VertexShader) m_Original_VertexShader->Release();
 				m_Original_VertexShader = pShader;
-				if (m_Original_VertexShader) m_Original_VertexShader->AddRef();
+				// pShader alredy has AddRef from GetVertexShader.
 			}
 		}
 
@@ -4643,7 +4643,7 @@ public:
 				{
 					if (m_Original_PixelShader) m_Original_PixelShader->Release();
 					m_Original_PixelShader = pShader;
-					if (m_Original_PixelShader) m_Original_PixelShader->AddRef();
+					// pShader alredy has AddRef from GetPixelShader.
 
 					g_OldDirect3DDevice9->SetPixelShader(curOverride.m_OverrideValue_PixelShader);
 				}
@@ -4652,7 +4652,7 @@ public:
 			{
 				if (m_Original_PixelShader) m_Original_PixelShader->Release();
 				m_Original_PixelShader = pShader;
-				if (m_Original_PixelShader) m_Original_PixelShader->AddRef();
+				// pShader alredy has AddRef from GetPixelShader.
 			}
 		}
 
@@ -4709,21 +4709,9 @@ public:
 
 		if(0 == g_NewDirect3DDevice9_RefCount)
 		{
-			TriggerAfxD3D9OnRelease();
+			Afx_Reset_Before(nullptr, nullptr);
 
 			Shared_Direct3DDevice9_Shutdown();
-
-			if (NULL != m_CurrentState)
-			{
-				m_CurrentState->Release();
-				m_CurrentState = NULL;
-			}
-
-			if (NULL != m_InitialState)
-			{
-				m_InitialState->Release();
-				m_InitialState = NULL;
-			}
 
 			if(m_Original_VertexShader)
 			{
