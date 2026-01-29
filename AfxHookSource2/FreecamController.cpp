@@ -520,10 +520,10 @@ void CFreecamController::UpdateRoll(const InputState& input, float deltaTime) {
     // Manual roll (Q/E) only when smoothing disabled
     if (!m_Config.smoothEnabled) {
         if (input.IsKeyDown('Q')) {
-            m_TargetRoll += m_Config.rollSpeed * deltaTime;
+            m_TargetRoll -= m_Config.rollSpeed * deltaTime;
         }
         if (input.IsKeyDown('E')) {
-            m_TargetRoll -= m_Config.rollSpeed * deltaTime;
+            m_TargetRoll += m_Config.rollSpeed * deltaTime;
         }
     } else {
         m_TargetRoll = 0;
