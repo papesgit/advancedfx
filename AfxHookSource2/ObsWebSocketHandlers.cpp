@@ -3,6 +3,7 @@
 #include "ObsSpectatorBindings.h"
 #include "ObsWebSocketActions.h"
 #include "RenderSystemDX11Hooks.h"
+#include "MirvTime.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
@@ -642,6 +643,24 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 	g_ObsWebSocketProtocol.RegisterCommandHandler("refresh_binds", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
 		ObsWebSocket_QueueRefreshBinds();
 		respond(MakeCommandResult("refresh_binds", true, "Spectator bindings refreshed"));
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("curtime_get", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!g_pEngineToClient) {
+			respond(json{
+				{"type", "curtime"},
+				{"ok", false},
+				{"error", "Engine not ready"}
+			});
+			return;
+		}
+
+		const double curTime = g_MirvTime.curtime_get();
+		respond(json{
+			{"type", "curtime"},
+			{"ok", true},
+			{"value", curTime}
+		});
 	});
 
 	g_ObsWebSocketProtocol.RegisterCommandHandler("spectator_bindings_mode", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
