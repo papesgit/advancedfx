@@ -88,7 +88,7 @@ CNadeCam::CNadeCam()
 CNadeCam::~CNadeCam() {
 }
 
-void CNadeCam::SetEnabled(bool enabled) {
+void CNadeCam::SetEnabled(bool enabled, bool restoreSpectator) {
     if (m_bEnabled == enabled) {
         return;
     }
@@ -101,7 +101,7 @@ void CNadeCam::SetEnabled(bool enabled) {
         // Note: spec_mode 4 will be called when grenade is acquired
     } else {
         // Return to normal spectator mode
-        if (g_pEngineToClient && m_LastObserverIndex != -1) {
+        if (restoreSpectator && g_pEngineToClient && m_LastObserverIndex != -1) {
             g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 2", true);
             char cmd[64];
             snprintf(cmd, sizeof(cmd), "spec_player %d", m_LastObserverIndex);

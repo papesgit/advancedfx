@@ -129,6 +129,8 @@ CObsWebSocketServer* g_pObsWebSocket = nullptr;
 CObsInputReceiver* g_pObsInput = nullptr;
 CFreecamController* g_pFreecam = nullptr;
 CNadeCam* g_pNadeCam = nullptr;
+static bool g_NadeCamSuppressUntilAltRelease = false;
+static bool g_LastFreecamEnabled = false;
 
 static bool IsLoopback(const in_addr& addr) {
 	const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&addr.S_un.S_addr);
@@ -1385,6 +1387,7 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	if (g_pObsInput) {
 		g_pObsInput->GetInputState(input);
 	}
+	bool altDown = input.IsKeyDown(0x12);  // VK_MENU (Alt)
 
 	// Handle spectator key presses (1-5 and 6-0 or Q/E/R/T/Z)
 	if (g_pEngineToClient) {
@@ -1431,7 +1434,8 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 							g_AttachmentCameraHadError = false;
 							if(g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
 							if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(0);
-							if (g_pNadeCam && g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(false);
+							if (g_pNadeCam && g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(false, false);
+							if (altDown) g_NadeCamSuppressUntilAltRelease = true;
 							g_PendingSpectatorSwitch = false;
 						}
 					}
@@ -1440,8 +1444,16 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 		}
 	}
 
+	bool freecamEnabled = g_pFreecam && g_pFreecam->IsEnabled();
+	if (!altDown) g_NadeCamSuppressUntilAltRelease = false;
+	if (freecamEnabled && !g_LastFreecamEnabled) {
+		if (g_pNadeCam && g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(false, false);
+		if (altDown) g_NadeCamSuppressUntilAltRelease = true;
+	}
+	g_LastFreecamEnabled = freecamEnabled;
+
 	// Freecam controller for remote observing
-	if (g_pFreecam && g_pFreecam->IsEnabled()) {
+	if (freecamEnabled) {
 		// Update freecam every frame for smooth movement
 		float deltaTime = (float)g_MirvInputEx.LastFrameTime;
 		g_pFreecam->Update(input, deltaTime);
@@ -1459,12 +1471,10 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 
 	// Nadecam
 	{
-		bool altDown = input.IsKeyDown(0x12);  // VK_MENU (Alt)
-
 		// Toggle on Alt key hold
-		if (altDown && g_pNadeCam && g_pFreecam && !g_pFreecam->IsEnabled()) {
+		if (altDown && !g_NadeCamSuppressUntilAltRelease && g_pNadeCam && g_pFreecam && !g_pFreecam->IsEnabled()) {
 			if (!g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(true);
-		} else if (g_pNadeCam && g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(false);
+		} else if (g_pNadeCam && g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(false, !altDown);
 
 		// Update NadeCam and apply transform if active
 		if (g_pNadeCam && g_pNadeCam->IsEnabled()) {

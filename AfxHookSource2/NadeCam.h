@@ -39,7 +39,8 @@ public:
     ~CNadeCam();
 
     /// Enable/disable nade cam
-    void SetEnabled(bool enabled);
+    /// @param restoreSpectator When disabling, restore previous spectated player if true.
+    void SetEnabled(bool enabled, bool restoreSpectator = true);
     bool IsEnabled() const { return m_bEnabled; }
 
     /// Get configuration (mutable for settings)
