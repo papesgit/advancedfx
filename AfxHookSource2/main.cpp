@@ -1236,7 +1236,35 @@ static bool TryComputeAttachmentCamera(const AttachmentCameraState& state, Afx::
 	return true;
 }
 
-CON_COMMAND(mirv_attach, "Attach camera to a player attachment (testing)") {
+static bool GetCurrentSpectatedControllerIndex(int & outControllerIndex) {
+    if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex || !g_ClientDll_GetSplitScreenPlayer)
+        return false;
+
+    CEntityInstance* localController = g_ClientDll_GetSplitScreenPlayer(0);
+    if (!localController) return false;
+
+    auto pawnHandle = localController->GetPlayerPawnHandle();
+    if (!pawnHandle.IsValid()) return false;
+
+    CEntityInstance* localPawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnHandle.GetEntryIndex());
+    if (!localPawn) return false;
+
+    CEntityInstance* targetPawn = localPawn;
+
+    auto observerHandle = localPawn->GetObserverTarget();
+    if (observerHandle.IsValid()) {
+        CEntityInstance* observedPawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, observerHandle.GetEntryIndex());
+        if (observedPawn) targetPawn = observedPawn;
+    }
+
+    auto controllerHandle = targetPawn->GetPlayerControllerHandle();
+    if (!controllerHandle.IsValid()) return false;
+
+    outControllerIndex = controllerHandle.GetEntryIndex();
+    return true;
+}
+
+CON_COMMAND(mirv_attach, "Attach camera to a player attachment") {
 	if (2 <= args->ArgC() && 0 == _stricmp("stop", args->ArgV(1))) {
 		g_AttachmentCamera.active = false;
 		g_AttachmentCameraHadError = false;
@@ -1246,7 +1274,7 @@ CON_COMMAND(mirv_attach, "Attach camera to a player attachment (testing)") {
 
 	if (args->ArgC() < 10 || 0 != _stricmp("start", args->ArgV(1))) {
 		advancedfx::Message(
-			"mirv_attach start <playerControllerIndex> <attachmentIndex|attachmentName> <offX> <offY> <offZ> <pitch> <yaw> <roll> [fov]\n"
+			"mirv_attach start <playerControllerIndex|current> <attachmentIndex|attachmentName> <offX> <offY> <offZ> <pitch> <yaw> <roll> [fov]\n"
 			"mirv_attach stop\n"
 		);
 		return;
@@ -1254,7 +1282,26 @@ CON_COMMAND(mirv_attach, "Attach camera to a player attachment (testing)") {
 
 	AttachmentCameraState newState;
 	newState.active = true;
-	newState.controllerIndex = atoi(args->ArgV(2));
+	const char* controllerArg = args->ArgV(2);
+
+	if (0 == _stricmp("current", controllerArg)) {
+		int idx = -1;
+		if (!GetCurrentSpectatedControllerIndex(idx)) {
+			advancedfx::Warning("mirv_attach: could not resolve 'current' (no spectated/local controller).\n");
+			return;
+		}
+		newState.controllerIndex = idx;
+	} else {
+		char* endPtr = nullptr;
+		long controllerVal = strtol(controllerArg, &endPtr, 10);
+
+		if (!(endPtr && *endPtr == '\0')) {
+			advancedfx::Warning("mirv_attach: controller index must be a number or 'current'.\n");
+			return;
+		}
+
+		newState.controllerIndex = (int)controllerVal;
+	}
 
 	const char* attachmentArg = args->ArgV(3);
 	char* endPtr = nullptr;
