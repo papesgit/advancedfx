@@ -18,7 +18,7 @@ struct NadeCamConfig {
     float worldScanIntervalSec; // Interval between world scans for grenades
 
     NadeCamConfig()
-        : detectionRadius(200.0f)
+        : detectionRadius(50.0f)
         , followDistance(96.0f)
         , followHeightOffset(12.0f)
         , minAboveGrenade(20.0f)
@@ -27,7 +27,7 @@ struct NadeCamConfig {
         , angHalftimeSec(0.05f)
         , flattenStartSpeed(100.0f)
         , flattenFullSpeed(40.0f)
-        , worldScanIntervalSec(0.2f)
+        , worldScanIntervalSec(0.0f)
     {}
 };
 

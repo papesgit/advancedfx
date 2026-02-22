@@ -695,7 +695,18 @@ CON_COMMAND(mirv_nadecam, "Grenade following camera.")
                 advancedfx::Message("[NadeCam] Detection radius = %.1f\n", v);
             } else {
                 advancedfx::Message("%s radius <float> - Set detection radius (units). Current: %.1f\n",
-                    arg0, g_pNadeCam ? g_pNadeCam->GetConfig().detectionRadius : 100.0f);
+                    arg0, g_pNadeCam ? g_pNadeCam->GetConfig().detectionRadius : 50.0f);
+            }
+            return;
+        }
+        if (0 == _stricmp(action, "scaninterval") && argC >= 3) {
+            float v = (float)atof(args->ArgV(2));
+            if (v > 0 && g_pNadeCam) {
+                g_pNadeCam->GetConfig().worldScanIntervalSec = v;
+                advancedfx::Message("[NadeCam] Scan interval = %.1f\n", v);
+            } else {
+                advancedfx::Message("%s scaninterval <float> - Set scan interval (seconds). Current: %.1f\n",
+                    arg0, g_pNadeCam ? g_pNadeCam->GetConfig().worldScanIntervalSec : 0.0f);
             }
             return;
         }
@@ -704,8 +715,10 @@ CON_COMMAND(mirv_nadecam, "Grenade following camera.")
     advancedfx::Message(
         "%s start - Start grenade camera\n"
         "%s stop - Stop grenade camera\n"
-        "%s radius <units> - Set detection radius (current: %.1f)\n",
+        "%s radius <units> - Set detection radius (current: %.1f)\n"
+        "%s scaninterval <seconds> - Set scan interval (current: %.1f)\n",
         arg0, arg0, arg0,
-        g_pNadeCam ? g_pNadeCam->GetConfig().detectionRadius : 100.0f
+        g_pNadeCam ? g_pNadeCam->GetConfig().detectionRadius : 50.0f,
+        arg0, g_pNadeCam ? g_pNadeCam->GetConfig().worldScanIntervalSec : 0.0f
     );
 }
