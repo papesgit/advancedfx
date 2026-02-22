@@ -246,13 +246,30 @@ void RegisterObsWebSocketHandlers() {
 	if (initialized) return;
 	initialized = true;
 
-	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_enable", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
+	g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_enable", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
 		if (!g_pFreecam) {
 			respond(MakeCommandResult("freecam_enable", false, "Freecam controller not ready"));
 			return;
 		}
 
-		ObsWebSocket_QueueFreecamEnable();
+		FreecamInitMode initMode = FreecamInitMode::InheritMotion;
+		if (args.contains("initMode")) {
+			if (!args["initMode"].is_string()) {
+				respond(MakeCommandResult("freecam_enable", false, "initMode must be 'inherit_motion' or 'static'"));
+				return;
+			}
+			const auto mode = args["initMode"].get<std::string>();
+			if (mode == "inherit_motion") {
+				initMode = FreecamInitMode::InheritMotion;
+			} else if (mode == "static") {
+				initMode = FreecamInitMode::Static;
+			} else {
+				respond(MakeCommandResult("freecam_enable", false, "initMode must be 'inherit_motion' or 'static'"));
+				return;
+			}
+		}
+
+		ObsWebSocket_QueueFreecamEnable(initMode);
 		respond(MakeCommandResult("freecam_enable", true, "Freecam enabled"));
 	});
 

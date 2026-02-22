@@ -538,6 +538,12 @@ float GetLastCameraFov() {
 	return (float)g_MirvInputEx.LastCameraFov;
 }
 
+static CameraTransform g_ObsCurrentCameraTransform;
+static CameraTransform g_ObsPreviousCameraTransform;
+static float g_ObsCurrentCameraDeltaTime = 0.0f;
+static bool g_ObsHasCurrentCameraTransform = false;
+static bool g_ObsHasPreviousCameraTransform = false;
+
 CameraTransform Obs_GetLastCameraTransform() {
 	CameraTransform transform;
 	transform.x = (float)g_MirvInputEx.LastCameraOrigin[0];
@@ -548,6 +554,22 @@ CameraTransform Obs_GetLastCameraTransform() {
 	transform.roll = (float)g_MirvInputEx.LastCameraAngles[2];
 	transform.fov = (float)g_MirvInputEx.LastCameraFov;
 	return transform;
+}
+
+CameraTransformSamples Obs_GetRecentCameraTransforms() {
+	CameraTransformSamples samples;
+	samples.current = Obs_GetLastCameraTransform();
+
+	if (g_ObsHasCurrentCameraTransform) {
+		samples.current = g_ObsCurrentCameraTransform;
+		samples.deltaTime = g_ObsCurrentCameraDeltaTime;
+		if (g_ObsHasPreviousCameraTransform) {
+			samples.previous = g_ObsPreviousCameraTransform;
+			samples.hasPrevious = true;
+		}
+	}
+
+	return samples;
 }
 
 CON_COMMAND(mirv_input, "Input mode configuration.")
@@ -1610,6 +1632,20 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 
 	g_iWidth = width;
 	g_iHeight = height;
+
+	if (g_ObsHasCurrentCameraTransform) {
+		g_ObsPreviousCameraTransform = g_ObsCurrentCameraTransform;
+		g_ObsHasPreviousCameraTransform = true;
+	}
+	g_ObsCurrentCameraTransform.x = Tx;
+	g_ObsCurrentCameraTransform.y = Ty;
+	g_ObsCurrentCameraTransform.z = Tz;
+	g_ObsCurrentCameraTransform.pitch = Rx;
+	g_ObsCurrentCameraTransform.yaw = Ry;
+	g_ObsCurrentCameraTransform.roll = Rz;
+	g_ObsCurrentCameraTransform.fov = Fov;
+	g_ObsCurrentCameraDeltaTime = absTime;
+	g_ObsHasCurrentCameraTransform = true;
 
 	g_MirvInputEx.LastCameraOrigin[0] = Tx;
 	g_MirvInputEx.LastCameraOrigin[1] = Ty;

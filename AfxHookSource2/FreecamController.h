@@ -137,6 +137,7 @@ public:
 
     /// Reset camera to specified position/rotation
     void Reset(const CameraTransform& transform);
+    void ResetWithInheritedMotion(const CameraTransform& previous, const CameraTransform& current, float deltaTime);
 
     /// Override smoothed transform (for seamless handoff)
     void SetSmoothedTransform(const CameraTransform& transform);

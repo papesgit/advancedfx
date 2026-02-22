@@ -9,6 +9,7 @@
 #include "../shared/AfxConsole.h"
 #include "../shared/StringTools.h"
 
+#include <cmath>
 #include <deque>
 #include <mutex>
 
@@ -35,6 +36,7 @@ namespace {
 
 	struct PendingAction {
 		ActionType type;
+		FreecamInitMode freecamInitMode = FreecamInitMode::InheritMotion;
 		FreecamConfigDelta configDelta;
 		FreecamHandoffPayload handoff;
 		AttachmentCameraState attachment;
@@ -48,6 +50,29 @@ namespace {
 
 	std::mutex g_ActionMutex;
 	std::deque<PendingAction> g_ActionQueue;
+	constexpr float kInheritInitMaxTargetDelta = 5000.0f;
+
+	bool TryComputeInheritInitTargetDelta(const FreecamConfig& config, const CameraTransformSamples& samples, float& outTargetDelta) {
+		outTargetDelta = 0.0f;
+		if (!samples.hasPrevious) return false;
+		if (!(samples.deltaTime > 0.0f) || !std::isfinite(samples.deltaTime)) return false;
+
+		const float halfVec = config.halfVec;
+		const float blend = halfVec > 0.0f
+			? 1.0f - expf((-logf(2.0f) * samples.deltaTime) / halfVec)
+			: 1.0f;
+		if (!(blend > 1.0e-3f) || !std::isfinite(blend)) return false;
+
+		const float targetDeltaX = (samples.current.x - samples.previous.x) / blend;
+		const float targetDeltaY = (samples.current.y - samples.previous.y) / blend;
+		const float targetDeltaZ = (samples.current.z - samples.previous.z) / blend;
+
+		outTargetDelta = sqrtf(
+			targetDeltaX * targetDeltaX +
+			targetDeltaY * targetDeltaY +
+			targetDeltaZ * targetDeltaZ);
+		return std::isfinite(outTargetDelta);
+	}
 
 	void ApplyFreecamConfigDelta(FreecamConfig& config, const FreecamConfigDelta& delta) {
 		if (delta.hasMouseSensitivity) config.mouseSensitivity = delta.mouseSensitivity;
@@ -80,9 +105,12 @@ namespace {
 	}
 }
 
-void ObsWebSocket_QueueFreecamEnable() {
+void ObsWebSocket_QueueFreecamEnable(FreecamInitMode initMode) {
+	PendingAction action;
+	action.type = ActionType::FreecamEnable;
+	action.freecamInitMode = initMode;
 	std::lock_guard<std::mutex> lock(g_ActionMutex);
-	g_ActionQueue.push_back({ActionType::FreecamEnable});
+	g_ActionQueue.push_back(std::move(action));
 }
 
 void ObsWebSocket_QueueFreecamDisable() {
@@ -166,11 +194,28 @@ void ObsWebSocket_ProcessActions() {
 		case ActionType::FreecamEnable:
 			if (!g_pFreecam) break;
 			if (!g_pFreecam->IsEnabled()) {
-				CameraTransform initTransform = Obs_GetLastCameraTransform();
-				g_pFreecam->Reset(initTransform);
+				CameraTransformSamples samples = Obs_GetRecentCameraTransforms();
+				if (action.freecamInitMode == FreecamInitMode::InheritMotion) {
+					float targetDelta = 0.0f;
+					const bool canCompute = TryComputeInheritInitTargetDelta(g_pFreecam->GetConfig(), samples, targetDelta);
+					if (!canCompute || targetDelta > kInheritInitMaxTargetDelta) {
+						// TODO: Wire websocket error result
+						advancedfx::Warning(
+							"Freecam enable rejected: unstable inherit-motion sample (targetDelta=%.3f, threshold=%.1f)\n",
+							targetDelta,
+							kInheritInitMaxTargetDelta
+						);
+						break;
+					}
+				}
+
+				g_pFreecam->SetEnabled(true);
+				if (action.freecamInitMode == FreecamInitMode::InheritMotion && samples.hasPrevious)
+					g_pFreecam->ResetWithInheritedMotion(samples.previous, samples.current, samples.deltaTime);
+				else
+					g_pFreecam->Reset(samples.current);
 			}
 			g_pFreecam->SetInputEnabled(true);
-			g_pFreecam->SetEnabled(true);
 			if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
 			if (g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
 			g_AttachmentCamera.active = false;

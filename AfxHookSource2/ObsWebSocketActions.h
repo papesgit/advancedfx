@@ -82,12 +82,24 @@ struct FreecamHandoffPayload {
 	std::string message;
 };
 
+struct CameraTransformSamples {
+	CameraTransform previous;
+	CameraTransform current;
+	float deltaTime = 0.0f;
+	bool hasPrevious = false;
+};
+
+enum class FreecamInitMode {
+	InheritMotion,
+	Static
+};
+
 enum class FreecamHoldMode {
 	Camera,
 	World
 };
 
-void ObsWebSocket_QueueFreecamEnable();
+void ObsWebSocket_QueueFreecamEnable(FreecamInitMode initMode = FreecamInitMode::InheritMotion);
 void ObsWebSocket_QueueFreecamDisable();
 void ObsWebSocket_QueueFreecamHold(bool hasMode, FreecamHoldMode mode);
 void ObsWebSocket_QueueFreecamConfig(const FreecamConfigDelta& delta, const std::string& message);
@@ -100,3 +112,4 @@ void ObsWebSocket_QueueCampathPlay(const std::string& cmd, double offset);
 void ObsWebSocket_ProcessActions();
 
 CameraTransform Obs_GetLastCameraTransform();
+CameraTransformSamples Obs_GetRecentCameraTransforms();

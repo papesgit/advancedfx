@@ -46,6 +46,15 @@ double CalcDeltaExpSmooth(double deltaT, double deltaVal) {
     double x = 1.0 / exp(deltaT * halfTime);
     return (1.0 - x) * deltaVal;
 }
+
+float ComputeExpSmoothingBlend(float deltaTime, float halfTime) {
+    if (halfTime <= 0.0f) return 1.0f;
+    return 1.0f - expf((-logf(2.0f) * deltaTime) / halfTime);
+}
+
+Afx::Math::Quaternion NegateQuat(const Afx::Math::Quaternion& q) {
+    return Afx::Math::Quaternion(-q.W, -q.X, -q.Y, -q.Z);
+}
 }
 
 CFreecamController::CFreecamController()
@@ -218,6 +227,66 @@ void CFreecamController::Reset(const CameraTransform& transform) {
     m_HalfRotTransitionElapsed = 0.0f;
     ResetSpeed();
     m_bInitialized = true;
+}
+
+void CFreecamController::ResetWithInheritedMotion(const CameraTransform& previous, const CameraTransform& current, float deltaTime) {
+    Reset(current);
+
+    if (!m_Config.smoothEnabled) {
+        return;
+    }
+    if (!(deltaTime > 0.0f) || !std::isfinite(deltaTime)) {
+        return;
+    }
+
+    const float kMinBlend = 1.0e-3f;
+
+    const float posBlend = ComputeExpSmoothingBlend(deltaTime, m_Config.halfVec);
+    const float fovBlend = ComputeExpSmoothingBlend(deltaTime, m_Config.halfFov);
+    const float rotBlend = ComputeExpSmoothingBlend(deltaTime, m_CurrentHalfRot);
+
+    if (posBlend > kMinBlend && std::isfinite(posBlend)) {
+        m_Transform.x = current.x + (current.x - previous.x) / posBlend;
+        m_Transform.y = current.y + (current.y - previous.y) / posBlend;
+        m_Transform.z = current.z + (current.z - previous.z) / posBlend;
+    }
+
+    if (fovBlend > kMinBlend && std::isfinite(fovBlend)) {
+        m_Transform.fov = current.fov + (current.fov - previous.fov) / fovBlend;
+    }
+
+    if (rotBlend > kMinBlend && std::isfinite(rotBlend) && m_CurrentHalfRot > 0.0f) {
+        Afx::Math::Quaternion prevQuat = BuildQuat(previous);
+        Afx::Math::Quaternion currQuat = BuildQuat(current);
+
+        if (Afx::Math::DotProduct(prevQuat, currQuat) < 0.0) {
+            currQuat = NegateQuat(currQuat);
+        }
+
+        Afx::Math::Quaternion deltaQuat = (currQuat * prevQuat.Conjugate()).Normalized();
+        double w = (std::max)(-1.0, (std::min)(1.0, deltaQuat.W));
+        double angle = 2.0 * acos(w);
+        double sinHalf = sqrt((std::max)(0.0, 1.0 - w * w));
+        if (sinHalf > 1e-6) {
+            const double scale = 1.0 / rotBlend;
+            const double targetHalfAngle = 0.5 * angle * scale;
+            Afx::Math::Vector3 axis(deltaQuat.X / sinHalf, deltaQuat.Y / sinHalf, deltaQuat.Z / sinHalf);
+            Afx::Math::Quaternion extrapolatedDelta(
+                cos(targetHalfAngle),
+                axis.X * sin(targetHalfAngle),
+                axis.Y * sin(targetHalfAngle),
+                axis.Z * sin(targetHalfAngle));
+            Afx::Math::Quaternion targetQuat = (extrapolatedDelta * prevQuat).Normalized();
+
+            m_SmoothedQuat = currQuat;
+            m_RawQuat = targetQuat;
+            UpdateAnglesFromQuat(m_RawQuat, m_Transform, current);
+            UpdateAnglesFromQuat(m_SmoothedQuat, m_SmoothedTransform, current);
+        } else {
+            m_RawQuat = currQuat;
+            m_SmoothedQuat = currQuat;
+        }
+    }
 }
 
 void CFreecamController::SetSmoothedTransform(const CameraTransform& transform) {
