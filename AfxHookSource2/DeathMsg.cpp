@@ -20,6 +20,8 @@
 #include "SchemaSystem.h"
 #include "MirvColors.h" 
 
+#include "addresses.h"
+
 #include <set>
 #include <algorithm>
 #include <vector>
@@ -690,8 +692,9 @@ CON_COMMAND(__mirv_panorama_print_children, "") {
 	}
 }
 
-typedef u_char* (__fastcall *g_Original_hashString_t)(uint32_t* pResult, const char* string);
+typedef uint32_t* (__fastcall *g_Original_hashString_t)(uint32_t* pResult, const char* string);
 g_Original_hashString_t g_Original_hashString = nullptr;
+
 
 class MyDeathMsgGameEventWrapper : public SOURCESDK::CS2::IGameEvent, public MyDeathMsgGameEventWrapperBase
 {
@@ -699,10 +702,19 @@ public:
 	MyDeathMsgGameEventWrapper(SOURCESDK::CS2::IGameEvent * event)
 	: m_Event(event) { }
 
-	uint32_t hashString(const char * string) {
-		uint32_t result;
-		g_Original_hashString(&result, string);
-		return result;
+	SOURCESDK::CS2::CKV3MemberName hashString(const char * string) {
+		uint32_t hash;
+		g_Original_hashString(&hash, string);
+		return SOURCESDK::CS2::CKV3MemberName(hash, -1, string);
+	}
+
+	bool IsHashStringEqual(const char * a, const SOURCESDK::CS2::CKV3MemberName & b) {
+		return IsHashEqual(hashString(a),b);
+	}
+
+private:
+	bool IsHashEqual(const SOURCESDK::CS2::CKV3MemberName & a, const SOURCESDK::CS2::CKV3MemberName & b) {
+		return a.GetHashCode() == b.GetHashCode();
 	}
 
 public:
@@ -719,103 +731,103 @@ public:
 	virtual bool IsLocal() const {
 		return m_Event->IsLocal();
 	}
-	virtual bool IsEmpty( const u_int &keySymbol ) {
+	virtual bool IsEmpty( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol ) {
 		return m_Event->IsEmpty(keySymbol);
 	}
-	virtual bool GetBool( const u_int &keySymbol) {
+	virtual bool GetBool( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol) {
 		return m_Event->GetBool(keySymbol);
 	}
-	virtual int GetInt( const u_int &keySymbol) {
+	virtual int GetInt( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol) {
 
-		if (assistedflash.use && hashString("assistedflash") == keySymbol) return assistedflash.value;
-		if (headshot.use && hashString("headshot") == keySymbol) return headshot.value;
-		if (penetrated.use && hashString("penetrated") == keySymbol) return penetrated.value;
-		if (dominated.use && hashString("dominated") == keySymbol) return dominated.value;
-		if (revenge.use && hashString("revenge") == keySymbol) return revenge.value;
-		if (wipe.use && hashString("wipe") == keySymbol) return wipe.value;
-		if (noscope.use && hashString("noscope") == keySymbol) return noscope.value;
-		if (thrusmoke.use && hashString("thrusmoke") == keySymbol) return thrusmoke.value;
-		if (attackerblind.use && hashString("attackerblind") == keySymbol) return attackerblind.value;
-		if (attackerinair.use && hashString("attackerinair") == keySymbol) return attackerinair.value;
+		if (assistedflash.use && IsHashStringEqual("assistedflash", keySymbol)) return assistedflash.value;
+		if (headshot.use && IsHashStringEqual("headshot", keySymbol)) return headshot.value;
+		if (penetrated.use && IsHashStringEqual("penetrated", keySymbol)) return penetrated.value;
+		if (dominated.use && IsHashStringEqual("dominated", keySymbol)) return dominated.value;
+		if (revenge.use && IsHashStringEqual("revenge", keySymbol)) return revenge.value;
+		if (wipe.use && IsHashStringEqual("wipe", keySymbol)) return wipe.value;
+		if (noscope.use && IsHashStringEqual("noscope", keySymbol)) return noscope.value;
+		if (thrusmoke.use && IsHashStringEqual("thrusmoke", keySymbol)) return thrusmoke.value;
+		if (attackerblind.use && IsHashStringEqual("attackerblind", keySymbol)) return attackerblind.value;
+		if (attackerinair.use && IsHashStringEqual("attackerinair", keySymbol)) return attackerinair.value;
 		
 		return m_Event->GetInt(keySymbol);
 	}
-	virtual uint64_t GetUint64( const u_int &keySymbol) {
+	virtual uint64_t GetUint64( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol) {
 		return m_Event->GetUint64(keySymbol);
 	}
-	virtual float GetFloat( const u_int &keySymbol) {
+	virtual float GetFloat( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol) {
 		return m_Event->GetFloat(keySymbol);
 	}
-	virtual const char *GetString( const u_int &keySymbol) {
-		if (weapon.use && hashString("weapon") == keySymbol) return weapon.value;
+	virtual const char *GetString( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol) {
+		if (weapon.use && IsHashStringEqual("weapon", keySymbol)) return weapon.value;
 		return m_Event->GetString(keySymbol);
 	}
-	virtual void *GetPtr( const u_int &keySymbol ) {
+	virtual void *GetPtr( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol ) {
 		return m_Event->GetPtr(keySymbol);
 	}
-	virtual SOURCESDK::CS2::CEntityHandle GetEHandle( const u_int &keySymbol ) {
+	virtual SOURCESDK::CS2::CEntityHandle GetEHandle( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol ) {
 		return m_Event->GetEHandle(keySymbol);
 	}
-	virtual SOURCESDK::CS2::CEntityInstance *GetEntity( const u_int &keySymbol) {
+	virtual SOURCESDK::CS2::CEntityInstance *GetEntity( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol) {
 		return m_Event->GetEntity(keySymbol);
 	}
-	virtual void* GetEntityIndex( const u_int &keySymbol ) {
+	virtual void* GetEntityIndex( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol ) {
 		return m_Event->GetEntityIndex(keySymbol);
 	}
-	virtual SOURCESDK::CS2::CPlayerSlot GetPlayerSlot( const u_int &keySymbol ) {
+	virtual SOURCESDK::CS2::CPlayerSlot GetPlayerSlot( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol ) {
 
-		if (attacker.newId.use && hashString("attacker") == keySymbol) return SOURCESDK::CS2::CPlayerSlot(attacker.newId.value.ResolveToUserId());
-		if (victim.newId.use && hashString("userid") == keySymbol) return SOURCESDK::CS2::CPlayerSlot(victim.newId.value.ResolveToUserId());
-		if (assister.newId.use && hashString("assister") == keySymbol) return SOURCESDK::CS2::CPlayerSlot(assister.newId.value.ResolveToUserId());
+		if (attacker.newId.use && IsHashStringEqual("attacker", keySymbol)) return SOURCESDK::CS2::CPlayerSlot(attacker.newId.value.ResolveToUserId());
+		if (victim.newId.use && IsHashStringEqual("userid", keySymbol)) return SOURCESDK::CS2::CPlayerSlot(victim.newId.value.ResolveToUserId());
+		if (assister.newId.use && IsHashStringEqual("assister", keySymbol)) return SOURCESDK::CS2::CPlayerSlot(assister.newId.value.ResolveToUserId());
 
 		return m_Event->GetPlayerSlot(keySymbol);
 	}
-	virtual SOURCESDK::CS2::CEntityInstance *GetPlayerController( const u_int &keySymbol ) {
+	virtual SOURCESDK::CS2::CEntityInstance *GetPlayerController( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol ) {
 		return m_Event->GetPlayerController(keySymbol);
 	}
-	virtual SOURCESDK::CS2::CEntityInstance *GetPlayerPawn( const u_int &keySymbol ) {
+	virtual SOURCESDK::CS2::CEntityInstance *GetPlayerPawn( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol ) {
 		return m_Event->GetPlayerPawn(keySymbol);
 	}
-	virtual SOURCESDK::CS2::CEntityHandle GetPawnEHandle( const u_int &keySymbol ) {
+	virtual SOURCESDK::CS2::CEntityHandle GetPawnEHandle( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol ) {
 		return m_Event->GetPawnEHandle(keySymbol);
 	}
-	virtual void* GetPawnEntityIndex( const u_int &keySymbol ) {
+	virtual void* GetPawnEntityIndex( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol ) {
 		return m_Event->GetPawnEntityIndex(keySymbol);
 	}
-	virtual void SetBool( const u_int &keySymbol, bool value ) {
+	virtual void SetBool( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol, bool value ) {
 		m_Event->SetBool(keySymbol,value);
 	}
-	virtual void SetInt( const u_int &keySymbol, int value ) {
+	virtual void SetInt( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol, int value ) {
 		m_Event->SetInt(keySymbol,value);
 	}
-	virtual void SetUint64( const u_int &keySymbol, uint64_t value ) {
+	virtual void SetUint64( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol, uint64_t value ) {
 		m_Event->SetUint64(keySymbol,value);
 	}
-	virtual void SetFloat( const u_int &keySymbol, float value ) {
+	virtual void SetFloat( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol, float value ) {
 		m_Event->SetFloat(keySymbol,value);
 	}
-	virtual void SetString( const u_int &keySymbol, const char *value ) {
+	virtual void SetString( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol, const char *value ) {
 		m_Event->SetString(keySymbol,value);
 	}
-	virtual void SetPtr( const u_int &keySymbol, void *value ) {
+	virtual void SetPtr( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol, void *value ) {
 		m_Event->SetPtr(keySymbol,value);
 	}
-	virtual void SetEntity(const u_int &keySymbol, SOURCESDK::CS2::CEntityInstance *value) {
+	virtual void SetEntity(const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol, SOURCESDK::CS2::CEntityInstance *value) {
 		m_Event->SetEntity(keySymbol,value);
 	}
-	virtual void SetEntity( const u_int &keySymbol, void* value ) {
+	virtual void SetEntity( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol, void* value ) {
 		m_Event->SetEntity(keySymbol,value);
 	}
-	virtual void SetPlayer( const u_int &keySymbol, SOURCESDK::CS2::CEntityInstance *pawn ) {
+	virtual void SetPlayer( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol, SOURCESDK::CS2::CEntityInstance *pawn ) {
 		m_Event->SetPlayer(keySymbol,pawn);
 	}
-	virtual void SetPlayer( const u_int &keySymbol, SOURCESDK::CS2::CPlayerSlot value ) {
+	virtual void SetPlayer( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol, SOURCESDK::CS2::CPlayerSlot value ) {
 		m_Event->SetPlayer(keySymbol,value);
 	}
-	virtual void SetPlayerRaw( const u_int &controllerKeySymbol, const u_int &pawnKeySymbol, SOURCESDK::CS2::CEntityInstance *pawn ) {
+	virtual void SetPlayerRaw( const SOURCESDK::CS2::GameEventKeySymbol_t &controllerKeySymbol, const SOURCESDK::CS2::GameEventKeySymbol_t &pawnKeySymbol, SOURCESDK::CS2::CEntityInstance *pawn ) {
 		m_Event->SetPlayerRaw(controllerKeySymbol,pawnKeySymbol,pawn);
 	}
-	virtual bool HasKey( const u_int &keySymbol ) {
+	virtual bool HasKey( const SOURCESDK::CS2::GameEventKeySymbol_t &keySymbol ) {
 		return m_Event->HasKey(keySymbol);
 	}
 	virtual void CreateVMTable( void* &Table ) {
@@ -910,13 +922,20 @@ g_Original_handlePlayerDeath_t g_Original_handlePlayerDeath = nullptr;
 
 void __fastcall handleDeathnotice(u_char* hudDeathNotice, SOURCESDK::CS2::IGameEvent* gameEvent) {
 
+	if (!AFXADDR_GET(cs2_deathmsg_lifetime_offset) || !AFXADDR_GET(cs2_deathmsg_lifetimemod_offset)) {
+		advancedfx::Warning("AFXERROR: deathmsg offsets not installed.\n");
+		return g_Original_handlePlayerDeath(hudDeathNotice, gameEvent);
+	}
+
+	auto lifetimeOffset = (uint8_t)AFXADDR_GET(cs2_deathmsg_lifetime_offset);
+	auto lifetimeModOffset = (uint8_t)AFXADDR_GET(cs2_deathmsg_lifetimemod_offset);
+
 	float orgDeathNoticeLifetime, orgDeathNoticeLocalPlayerLifetimeMod;
 
 	MyDeathMsgGameEventWrapper myWrapper(gameEvent);
 
-	// TODO: see if can find these with sig, but these rarely change
-	auto pDeathNoticeLifetime = (float*)(hudDeathNotice + 0x6C);
-	auto pDeathNoticeLocalPlayerLifetimeMod = (float*)(hudDeathNotice + 0x70);
+	auto pDeathNoticeLifetime = (float*)(hudDeathNotice + lifetimeOffset);
+	auto pDeathNoticeLocalPlayerLifetimeMod = (float*)(hudDeathNotice + lifetimeModOffset);
 
 	auto uidAttacker = (int)(int16_t)gameEvent->GetInt(myWrapper.hashString("attacker"));
 	auto uidVictim = (int)(int16_t)gameEvent->GetInt(myWrapper.hashString("userid"));
@@ -1208,14 +1227,14 @@ void __fastcall My_Panorama_CStylePropertyWashColor_Clone(void * This, void * pT
 
 void getDeathMsgAddrs(HMODULE clientDll) {
 	// can be found with strings like "attacker" and "userid", etc. it basically takes all info from player_death event
-	if (auto addr = getAddress(clientDll, "48 89 4C 24 ?? 55 53 57 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 2B E0 48 8B 02")) {
+	if (auto addr = getAddress(clientDll, "48 89 4C 24 ?? 55 53 57 41 55 41 57")) {
 		g_Original_handlePlayerDeath = (g_Original_handlePlayerDeath_t)(addr);
 	} else ErrorBox(MkErrStr(__FILE__, __LINE__));
 
 	// called in multiple places with strings like "userid", "attacker", etc. as second argument
 	// e.g. in function above too
-	if (auto addr = getAddress(clientDll, "4C 8B F2 48 8D 4C 24 ?? 48 8B D7 48 8B 58 ?? E8 ?? ?? ?? ??")) {
-		g_Original_hashString = (g_Original_hashString_t)(addr + 15 + 5 + *(int32_t*)(addr + 15 + 1));
+	if (auto addr = getAddress(clientDll, "4C 8B EA 48 8D 4D ?? 48 8B D7 48 8B 58 ?? E8 ?? ?? ?? ??")) {
+		g_Original_hashString = (g_Original_hashString_t)(addr + 14 + 5 + *(int32_t*)(addr + 14 + 1));
 	} else ErrorBox(MkErrStr(__FILE__, __LINE__));	
 
 	// snippet from function handlePlayerDeath above	
@@ -1230,7 +1249,7 @@ void getDeathMsgAddrs(HMODULE clientDll) {
 	//       bVar4 = true;
 	//     }
 	//   }
-	size_t g_Original_getLocalSteamId_addr = getAddress(clientDll,"40 53 48 83 EC ?? 8B 91 ?? ?? ?? ?? 48 8B D9 83 FA ?? 0F 84 ?? ?? ?? ?? 4C 8B 0D");
+	size_t g_Original_getLocalSteamId_addr = getAddress(clientDll,"40 53 48 83 EC ?? 8B 51 ?? 48 8B D9 83 FA FF 0F 84 ?? ?? ?? ?? 4C 8B 0D ?? ?? ?? ??");
 	if (0 == g_Original_getLocalSteamId_addr) {
 		ErrorBox(MkErrStr(__FILE__, __LINE__));	
 	};

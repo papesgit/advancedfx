@@ -7,7 +7,7 @@ This fork adds an in-game overlay for faster camera work, observing, and recordi
 
 ## About
 
-Half-Life Advanced Effects (HLAE) is a tool to enrich Source (mainly CS:GO) engine based movie making.
+Half-Life Advanced Effects (HLAE) is a tool to enrich content creation mainly for the Counter-Strike series.
 
 ## Download
 
@@ -15,7 +15,7 @@ Half-Life Advanced Effects (HLAE) is a tool to enrich Source (mainly CS:GO) engi
 
 **Epilepsy warning**: This software will cause fast-changing images and colors on your screen.
 
-### Lastest release
+### Latest release
 
 https://github.com/advancedfx/advancedfx/releases/latest  
 Compatible with latest Steam version.

@@ -1,9 +1,11 @@
 #include "stdafx.h"
 
+#include "addresses.h"
 #include "CampathDrawer.h"
 #include "ClientEntitySystem.h"
 #include "GameEvents.h"
 #include "hlaeFolder.h"
+#include "RenderServiceHooks.h"
 #include "RenderSystemDX11Hooks.h"
 #include "WrpConsole.h"
 #include "AfxHookSource2Rs.h"
@@ -37,7 +39,7 @@
 #include "../shared/StringTools.h"
 #include "../shared/binutils.h"
 #include "../shared/CommandSystem.h"
-#include "../shared/ImageBufferPoolThreadSafe.h"
+#include "../shared/GrowingBufferPoolThreadSafe.h"
 #include "../shared/ThreadPool.h"
 #include "../shared/MirvCamIO.h"
 #include "../shared/MirvCampath.h"
@@ -150,6 +152,31 @@ void HookEngineDll(HMODULE engineDll) {
 			ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}*/
 }
+
+typedef void (__fastcall * HostStateRequest_Start_t)(void * This);
+HostStateRequest_Start_t g_Old_HostStateRequest_Start = nullptr;
+void __fastcall New_HostStateRequest_Start(void * This) {
+	if(4 == *(int *)This) {
+		// "HostStateRequest::Start(HSR_QUIT)\n"
+		AfxStreams_ShutDown();
+	}
+	g_Old_HostStateRequest_Start(This);
+}
+
+void Hook_Engine__HostStateRequest_Start() {
+	static bool bFirstRun = true;
+	if(bFirstRun) {
+		bFirstRun = false;
+		if(AFXADDR_GET(cs2_engine_HostStateRequest_Start)) {
+			g_Old_HostStateRequest_Start = (HostStateRequest_Start_t)AFXADDR_GET(cs2_engine_HostStateRequest_Start);
+			DetourTransactionBegin();
+			DetourUpdateThread(GetCurrentThread());
+			DetourAttach(&(PVOID&)g_Old_HostStateRequest_Start,New_HostStateRequest_Start);
+			if(NO_ERROR != DetourTransactionCommit()) ErrorBox(MkErrStr(__FILE__, __LINE__));
+		}
+	}
+}
+
 
 SOURCESDK::CS2::ISource2EngineToClient * g_pEngineToClient = nullptr;
 
@@ -952,12 +979,12 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	float curTime = g_MirvTime.curtime_get(); //TODO: + m_PausedTime
 	float absTime = g_MirvTime.absoluteframetime_get();
 
-	int *pWidth = (int*)((unsigned char *)ThisCViewSetup + 0x474);
-	int *pHeight = (int*)((unsigned char *)ThisCViewSetup + 0x47c);
+	int *pWidth = (int*)((unsigned char *)ThisCViewSetup + 0x434);
+	int *pHeight = (int*)((unsigned char *)ThisCViewSetup + 0x43C);
 
-	float *pFov = (float*)((unsigned char *)ThisCViewSetup + 0x4d8);
-	float *pViewOrigin = (float*)((unsigned char *)ThisCViewSetup + 0x4e0);
-	float *pViewAngles = (float*)((unsigned char *)ThisCViewSetup + 0x4f8);
+	float *pFov = (float*)((unsigned char *)ThisCViewSetup + 0x498);
+	float *pViewOrigin = (float*)((unsigned char *)ThisCViewSetup + 0x4a0);
+	float *pViewAngles = (float*)((unsigned char *)ThisCViewSetup + 0x4b8);
 
 	int width = *pWidth;
 	int height = *pHeight;
@@ -1367,8 +1394,6 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
 	g_WorldToScreenMatrix.m[3][3] = proj[4*3+3];
 
 	g_CampathDrawer.OnEngineThread_SetupViewDone();
-
-	RenderSystemDX11_EngineThread_Prepare();
 }
 
 /*
@@ -1630,6 +1655,10 @@ int new_CCS2_Client_Connect(void* This, SOURCESDK::CreateInterfaceFn appSystemFa
 		}
 		else ErrorBox(MkErrStr(__FILE__, __LINE__));
 
+		if (g_pSceneSystem = (SOURCESDK::CS2::IGameUIService*)appSystemFactory("SceneSystem_002", NULL)) {
+			Hook_SceneSystem_WaitForRenderingToComplete(g_pSceneSystem);
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
 	return old_CCS2_Client_Connect(This, appSystemFactory);
@@ -1836,7 +1865,9 @@ void * new_CS2_Client_LevelInitPreEntity(void* This, void * pUnk1, void * pUnk2)
 }
 
 typedef void (* CS2_Client_FrameStageNotify_t)(void* This, SOURCESDK::CS2::ClientFrameStage_t curStage);
+
 CS2_Client_FrameStageNotify_t old_CS2_Client_FrameStageNotify;
+
 void  new_CS2_Client_FrameStageNotify(void* This, SOURCESDK::CS2::ClientFrameStage_t curStage) {
 
 	/*
@@ -2552,13 +2583,22 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 
 		g_h_engine2Dll = hModule;
 
+		Addresses_InitEngine2Dll((AfxAddr)hModule);
+
 		HookEngineDll(hModule);
 
 		g_Import_engine2.Apply(hModule);
+
+		Hook_Engine_RenderService();
+
+		Hook_Engine__HostStateRequest_Start();
 	}
 	else if(bFirstSceneSystem && StringEndsWithW( lpLibFileName, L"scenesystem.dll"))
 	{
 		bFirstSceneSystem = false;
+
+		Addresses_InitSceneSystemDll((AfxAddr)hModule);
+
 		g_Import_SceneSystem.Apply(hModule);
 		Hook_SceneSystem(hModule);
 		HookSceneSystem(hModule);
@@ -2582,6 +2622,8 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 		bFirstClient = false;
 
 		g_H_ClientDll = hModule;
+
+		Addresses_InitClientDll((AfxAddr)hModule);
 
 		//if(!g_Import_client.Apply(hModule)) ErrorBox("client.dll steam_api64 hooks failed.");
 
@@ -2655,7 +2697,7 @@ CAfxImportsHook g_Import_PROCESS(CAfxImportsHooks({
 
 
 advancedfx::CThreadPool * g_pThreadPool = nullptr;
-advancedfx::CImageBufferPoolThreadSafe * g_pImageBufferPoolThreadSafe = nullptr;
+advancedfx::CGrowingBufferPoolThreadSafe * g_pImageBufferPoolThreadSafe = nullptr;
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 {
@@ -2699,7 +2741,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 			}
 			g_pThreadPool = new advancedfx::CThreadPool(thread_pool_thread_count);
 
-			g_pImageBufferPoolThreadSafe = new advancedfx::CImageBufferPoolThreadSafe();
+			g_pImageBufferPoolThreadSafe = new advancedfx::CGrowingBufferPoolThreadSafe();
 
 			g_ConsolePrinter = new CConsolePrinter();
 

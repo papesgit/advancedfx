@@ -12,30 +12,52 @@
 #include "../shared/AfxCommandLine.h"
 #include "addresses.h"
 #include "RenderView.h"
-#include "SourceInterfaces.h"
+#include <SourceInterfaces.h>
 #include "WrpVEngineClient.h"
 #include "WrpConsole.h"
 #include "WrpGlobals.h"
 #include "d3d9Hooks.h"
+
+#ifndef _WIN64
 #include "csgo_SndMixTimeScalePatch.h"
 #include "csgo_CSkyBoxView.h"
-#include "AfxClasses.h"
+#include "csgo/AfxMaterials.h"
+#endif //#ifndef _WIN64
+
 #include "AfxStreams.h"
 #include "hlaeFolder.h"
 #include "CampathDrawer.h"
+
+#ifndef _WIN64
 #include "asmClassTools.h"
 #include "csgo_Stdshader_dx9_Hooks.h"
+#endif //#ifndef _WIN64
+
 #include "AfxShaders.h"
+
+#ifndef _WIN64
 #include "csgo_CViewRender.h"
+#endif //#ifndef _WIN64
+
 #include "../shared/CommandSystem.h"
 #include "ClientTools.h"
+
+#ifndef _WIN64
 #include "csgo/ClientToolsCsgo.h"
+#endif //#ifndef _WIN64
+
 #include "tf2/ClientToolsTf2.h"
+
+#ifndef _WIN64
 #include "momentum/ClientToolsMom.h"
 #include "css/ClientToolsCss.h"
 #include "cssV34/ClientToolsCssV34.h"
 #include "garrysmod/ClientToolsGarrysmod.h"
+#endif //#ifndef _WIN64
+
 #include "MaterialSystemHooks.h"
+
+#ifndef _WIN64
 #include "MatRenderContextHook.h"
 //#include "csgo_IPrediction.h"
 #include "csgo_MemAlloc.h"
@@ -45,6 +67,8 @@
 #include "AfxInterop.h"
 #include "csgo_Audio.h"
 #include "mirv_voice.h"
+#endif //#ifndef _WIN64
+
 #include "Gui.h"
 #include <csgo/sdk_src/public/tier0/memalloc.h>
 #include <csgo/sdk_src/public/tier1/convar.h>
@@ -57,14 +81,18 @@
 #include <bm/sdk_src/public/tier0/memalloc.h>
 #include <bm/sdk_src/public/tier1/convar.h>
 #include <bm/sdk_src/public/cdll_int.h>
-#include <csgo/Panorama.h>
 //#include <csgo/hooks/studiorender.h>
 #include <insurgency2/public/cdll_int.h>
-#include "MirvTime.h"
+
+#ifndef _WIN64
+#include <csgo/Panorama.h>
 #include "csgo_CRendering3dView.h"
 //#include "csgo_CDemoFile.h"
 #include "csgo_net_chan.h"
+#endif //#ifndef _WIN64
+
 #include "csgo/hooks/engine/cmd.h"
+#include "MirvTime.h"
 #include "ReShadeAdvancedfx.h"
 
 #include <Windows.h>
@@ -104,7 +132,6 @@ SOURCESDK::BM::IMemAlloc *SOURCESDK::BM::g_pMemAlloc = 0;
 SOURCESDK::BM::ICvar * SOURCESDK::BM::cvar = 0;
 SOURCESDK::BM::ICvar * SOURCESDK::BM::g_pCVar = 0;
 
-
 bool SOURCESDK::CSGO::IsSurceSdkVerCsCo() {
 	return g_SourceSdkVer == SourceSdkVer_CSCO;
 }
@@ -143,6 +170,7 @@ bool g_bFirstSwapBuffersCallForFrame = false;
 
 extern WrpVEngineClient * g_VEngineClient;
 
+#ifndef _WIN64
 bool CssGetEngineIsWindowedMode() {
 	switch(g_SourceSdkVer) {
 		case SourceSdkVer_CSSV84:
@@ -162,6 +190,7 @@ int GetMaxClients() {
 	}
 	return 1;
 }
+#endif //#ifndef _WIN64
 
 FovScaling GetDefaultFovScaling() {
 	switch (g_SourceSdkVer)
@@ -169,11 +198,13 @@ FovScaling GetDefaultFovScaling() {
 	case SourceSdkVer_CSGO:
 	case SourceSdkVer_CSCO:
 	case SourceSdkVer_TF2:
+	case SourceSdkVer_TF2Classified:
 	case SourceSdkVer_SWARM:
 	case SourceSdkVer_L4D2:
 	case SourceSdkVer_Momentum:
 		return FovScaling_AlienSwarm;
 	case SourceSdkVer_CSSV84:
+#ifndef _WIN64	
 	case SourceSdkVer_CSS:
 		{
 			static SOURCESDK::CSS::ConVar * m_pConVar_sv_restrict_aspect_ratio_fov = nullptr;
@@ -188,6 +219,7 @@ FovScaling GetDefaultFovScaling() {
 		    sv_restrict_aspect_ratio_fov_int == 2 )
 			return FovScaling_Sdk2013Restricted;	
 		}
+#endif //#ifndef _WIN64
 		return FovScaling_AlienSwarm;
 	case SourceSdkVer_BM:
 	default:
@@ -266,6 +298,7 @@ public:
 
 		g_Engine_ClientEngineTools->PostToolMessage(hEntity, msg);
 
+#ifndef _WIN64		
 		if (g_SourceSdkVer == SourceSdkVer_CSGO || g_SourceSdkVer == SourceSdkVer_CSCO)
 		{
 			if(msg)			
@@ -289,6 +322,7 @@ public:
 				}
 			}
 		}
+#endif //#ifndef _WIN64
 	}
 	virtual void AdjustEngineViewport( int& x, int& y, int& width, int& height )
 	{
@@ -375,6 +409,7 @@ void OnAfter_CMaterialSystem_SwappBuffers() {
 
 SOURCESDK::CreateInterfaceFn g_AppSystemFactory = 0;
 
+#ifndef _WIN64
 SOURCESDK::IMaterialSystem_csgo * g_MaterialSystem_csgo = 0;
 
 SOURCESDK::IFileSystem_csgo * g_FileSystem_csgo = 0;
@@ -393,6 +428,7 @@ SOURCESDK::CSGO::CPanoramaUIClient * g_pPanoramaUIClient = nullptr;
 SOURCESDK::CSGO::IStudioRender * g_pStudioRender = nullptr;
 
 SOURCESDK::CSGO::IVModelInfoClient* g_pModelInfo = nullptr;	
+#endif //#ifndef _WIN64
 
 void MySetup(SOURCESDK::CreateInterfaceFn appSystemFactory, WrpGlobals *pGlobals)
 {
@@ -410,6 +446,7 @@ void MySetup(SOURCESDK::CreateInterfaceFn appSystemFactory, WrpGlobals *pGlobals
 
 		switch (g_SourceSdkVer)
 		{
+#ifndef _WIN64			
 		case SourceSdkVer_CSGO:
 		case SourceSdkVer_CSCO:
 			if (iface = appSystemFactory(VENGINE_CLIENT_INTERFACE_VERSION_014_CSGO, NULL))
@@ -439,6 +476,7 @@ void MySetup(SOURCESDK::CreateInterfaceFn appSystemFactory, WrpGlobals *pGlobals
 				g_VEngineClient = new WrpVEngineClient_L4D2((SOURCESDK::L4D2::IVEngineClient*)iface);
 			}
 			break;
+#endif //#ifndef _WIN64			
 		default:
 			if (iface = appSystemFactory(VENGINE_CLIENT_INTERFACE_VERSION_015, NULL))
 			{
@@ -533,7 +571,7 @@ void MySetup(SOURCESDK::CreateInterfaceFn appSystemFactory, WrpGlobals *pGlobals
 		}
 
 		// Other
-
+#ifndef _WIN64
 		if(SourceSdkVer_CSGO == g_SourceSdkVer || g_SourceSdkVer == SourceSdkVer_CSCO)
 		{
 			if(iface = appSystemFactory(MATERIAL_SYSTEM_INTERFACE_VERSION_CSGO_80, NULL))
@@ -632,7 +670,8 @@ void MySetup(SOURCESDK::CreateInterfaceFn appSystemFactory, WrpGlobals *pGlobals
 			}
 			*/
 		}
-		
+#endif //#ifndef _WIN64
+
 		g_Hook_VClient_RenderView.Install(pGlobals);
 
 		//AfxV34HookWindow();
@@ -657,11 +696,19 @@ void* AppSystemFactory_ForClient(const char *pName, int *pReturnCode)
 	return g_AppSystemFactory(pName, pReturnCode);
 }
 
-typedef int(__fastcall * CVClient_Init_Unknown_t)(void* This, void* Edx, SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CreateInterfaceFn physicsFactory, SOURCESDK::CGlobalVarsBase *pGlobals);
+typedef int(__fastcall * CVClient_Init_Unknown_t)(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CreateInterfaceFn physicsFactory, SOURCESDK::CGlobalVarsBase *pGlobals);
 
 CVClient_Init_Unknown_t old_CVClient_Init_Unkown;
 
-int __fastcall new_CVClient_Init_Unknown(void* This, void* Edx, SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CreateInterfaceFn physicsFactory, SOURCESDK::CGlobalVarsBase *pGlobals)
+int __fastcall new_CVClient_Init_Unknown(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CreateInterfaceFn physicsFactory, SOURCESDK::CGlobalVarsBase *pGlobals)
 {
 	static bool bFirstCall = true;
 
@@ -681,14 +728,26 @@ int __fastcall new_CVClient_Init_Unknown(void* This, void* Edx, SOURCESDK::Creat
 		MySetup(appSystemFactory, pWrpGlobals);
 	}
 
-	return old_CVClient_Init_Unkown(This, Edx, AppSystemFactory_ForClient, physicsFactory, pGlobals);
+	return old_CVClient_Init_Unkown(This,
+#ifndef _WIN64
+	Edx,
+#endif //#ifndef _WIN64
+	 AppSystemFactory_ForClient, physicsFactory, pGlobals);
 }
 
-typedef int(__fastcall* CVClient_Init_Swarm_t)(void* This, void* Edx, SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CGlobalVarsBase *pGlobals);
+typedef int(__fastcall* CVClient_Init_Swarm_t)(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CGlobalVarsBase *pGlobals);
 
 CVClient_Init_Swarm_t old_CVClient_Init_Swarm;
 
-int __fastcall new_CVClient_Init_Swarm(void* This, void* Edx, SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CGlobalVarsBase *pGlobals)
+int __fastcall new_CVClient_Init_Swarm(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CGlobalVarsBase *pGlobals)
 {
 	static bool bFirstCall = true;
 
@@ -698,14 +757,26 @@ int __fastcall new_CVClient_Init_Swarm(void* This, void* Edx, SOURCESDK::CreateI
 		MySetup(appSystemFactory, new WrpGlobalsOther(pGlobals));
 	}
 
-	return old_CVClient_Init_Swarm(This, Edx, AppSystemFactory_ForClient, pGlobals);
+	return old_CVClient_Init_Swarm(This,
+#ifndef _WIN64
+	Edx,
+#endif //#ifndef _WIN64
+	 AppSystemFactory_ForClient, pGlobals);
 }
 
-typedef int(__fastcall* CVClient_Init_BM_t)(void *This, void* Edx, SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CGlobalVarsBase *pGlobals);
+typedef int(__fastcall* CVClient_Init_BM_t)(void *This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CGlobalVarsBase *pGlobals);
 
 CVClient_Init_BM_t old_CVClient_Init_BM;
 
-int __fastcall new_CVClient_Init_BM(void* This, void* Edx, SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CGlobalVarsBase *pGlobals)
+int __fastcall new_CVClient_Init_BM(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CGlobalVarsBase *pGlobals)
 {
 	static bool bFirstCall = true;
 
@@ -716,15 +787,27 @@ int __fastcall new_CVClient_Init_BM(void* This, void* Edx, SOURCESDK::CreateInte
 		MySetup(appSystemFactory, new WrpGlobalsOther(pGlobals));
 	}
 
-	return old_CVClient_Init_BM(This, Edx, AppSystemFactory_ForClient, pGlobals);
+	return old_CVClient_Init_BM(This,
+#ifndef _WIN64
+	Edx,
+#endif //#ifndef _WIN64
+	 AppSystemFactory_ForClient, pGlobals);
 }
 
 
-typedef int(__fastcall* CVClient_Init_Garrysmod_t)(void* This, void* Edx, SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CreateInterfaceFn physicsFactory, SOURCESDK::CGlobalVarsBase* pGlobals, void * unknown3);
+typedef int(__fastcall* CVClient_Init_Garrysmod_t)(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CreateInterfaceFn physicsFactory, SOURCESDK::CGlobalVarsBase* pGlobals, void * unknown3);
 
 CVClient_Init_Garrysmod_t old_CVClient_Init_Garrysmod;
 
-int __fastcall new_CVClient_Init_Garrysmod(void* This, void* Edx, SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CreateInterfaceFn physicsFactory, SOURCESDK::CGlobalVarsBase* pGlobals, void* unknown3)
+int __fastcall new_CVClient_Init_Garrysmod(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CreateInterfaceFn appSystemFactory, SOURCESDK::CreateInterfaceFn physicsFactory, SOURCESDK::CGlobalVarsBase* pGlobals, void* unknown3)
 {
 	static bool bFirstCall = true;
 
@@ -734,7 +817,11 @@ int __fastcall new_CVClient_Init_Garrysmod(void* This, void* Edx, SOURCESDK::Cre
 		MySetup(appSystemFactory, new WrpGlobalsOther(pGlobals));
 	}
 
-	return old_CVClient_Init_Garrysmod(This, Edx, AppSystemFactory_ForClient, physicsFactory, pGlobals, unknown3);
+	return old_CVClient_Init_Garrysmod(This,
+#ifndef _WIN64
+	Edx,
+#endif //#ifndef _WIN64
+	 AppSystemFactory_ForClient, physicsFactory, pGlobals, unknown3);
 }
 
 
@@ -748,7 +835,11 @@ void Shared_BeforeFrameRenderStart(void)
 void Shared_AfterFrameRenderEnd(void)
 {
 	if (CClientTools * instance = CClientTools::Instance()) instance->OnAfterFrameRenderEnd();
+
+#ifndef _WIN64
 	Mirv_Voice_OnAfterFrameRenderEnd();
+#endif //#ifndef _WIN64
+
 	AfxHookSource::Gui::OnGameFrameRenderEnd();
 }
 
@@ -770,12 +861,20 @@ void __fastcall new_CVClient_Shutdown(void* This, void* Edx)
 	old_CVClient_Shutdown(This, Edx);
 }
 
-typedef void(__fastcall* CVClient_FrameStageNotify_Garrysmod_t)(void* This, void* Edx, SOURCESDK::GARRYSMOD::ClientFrameStage_t curStage);
+typedef void(__fastcall* CVClient_FrameStageNotify_Garrysmod_t)(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::GARRYSMOD::ClientFrameStage_t curStage);
 
 CVClient_FrameStageNotify_Garrysmod_t old_CVClient_FrameStageNotify_Garrysmod;
 
 // Notification that we're moving into another stage during the frame.
-void __fastcall new_CVClient_FrameStageNotify_Garrysmod(void* This, void* Edx, SOURCESDK::GARRYSMOD::ClientFrameStage_t curStage)
+void __fastcall new_CVClient_FrameStageNotify_Garrysmod(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::GARRYSMOD::ClientFrameStage_t curStage)
 {
 	switch (curStage)
 	{
@@ -784,7 +883,11 @@ void __fastcall new_CVClient_FrameStageNotify_Garrysmod(void* This, void* Edx, S
 		break;
 	}
 
-	old_CVClient_FrameStageNotify_Garrysmod(This, Edx, curStage);
+	old_CVClient_FrameStageNotify_Garrysmod(This,
+#ifndef _WIN64
+	Edx,
+#endif //#ifndef _WIN64
+	 curStage);
 
 	switch (curStage)
 	{
@@ -794,12 +897,20 @@ void __fastcall new_CVClient_FrameStageNotify_Garrysmod(void* This, void* Edx, S
 	}
 }
 
-typedef void (__fastcall* CVClient_FrameStageNotify_TF2_t)(void* This, void* Edx, SOURCESDK::TF2::ClientFrameStage_t curStage);
+typedef void (__fastcall* CVClient_FrameStageNotify_TF2_t)(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::TF2::ClientFrameStage_t curStage);
 
 CVClient_FrameStageNotify_TF2_t old_CVClient_FrameStageNotify_TF2;
 
 // Notification that we're moving into another stage during the frame.
-void __fastcall new_CVClient_FrameStageNotify_TF2(void* This, void* Edx, SOURCESDK::TF2::ClientFrameStage_t curStage)
+void __fastcall new_CVClient_FrameStageNotify_TF2(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::TF2::ClientFrameStage_t curStage)
 {
 	switch (curStage)
 	{
@@ -808,7 +919,11 @@ void __fastcall new_CVClient_FrameStageNotify_TF2(void* This, void* Edx, SOURCES
 		break;
 	}
 
-	old_CVClient_FrameStageNotify_TF2(This, Edx, curStage);
+	old_CVClient_FrameStageNotify_TF2(This,
+#ifndef _WIN64
+	Edx,
+#endif //#ifndef _WIN64
+	 curStage);
 
 	switch (curStage)
 	{
@@ -818,12 +933,20 @@ void __fastcall new_CVClient_FrameStageNotify_TF2(void* This, void* Edx, SOURCES
 	}
 }
 
-typedef void(__fastcall* CVClient_FrameStageNotify_CSS_t)(void* This, void* Edxr, SOURCESDK::CSS::ClientFrameStage_t curStage);
+typedef void(__fastcall* CVClient_FrameStageNotify_CSS_t)(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CSS::ClientFrameStage_t curStage);
 
 CVClient_FrameStageNotify_CSS_t old_CVClient_FrameStageNotify_CSS;
 
 // Notification that we're moving into another stage during the frame.
-void __fastcall new_CVClient_FrameStageNotify_CSS(void* This, void* Edx, SOURCESDK::CSS::ClientFrameStage_t curStage)
+void __fastcall new_CVClient_FrameStageNotify_CSS(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CSS::ClientFrameStage_t curStage)
 {
 	switch (curStage)
 	{
@@ -832,7 +955,11 @@ void __fastcall new_CVClient_FrameStageNotify_CSS(void* This, void* Edx, SOURCES
 		break;
 	}
 
-	old_CVClient_FrameStageNotify_CSS(This, Edx, curStage);
+	old_CVClient_FrameStageNotify_CSS(This,
+#ifndef _WIN64
+	Edx,
+#endif //#ifndef _WIN64
+	 curStage);
 
 	switch (curStage)
 	{
@@ -842,12 +969,20 @@ void __fastcall new_CVClient_FrameStageNotify_CSS(void* This, void* Edx, SOURCES
 	}
 }
 
-typedef void (__fastcall* CVClient_FrameStageNotify_CSSV34_t)(void* This, void* Edxr, SOURCESDK::CSSV34::ClientFrameStage_t curStage);
+typedef void (__fastcall* CVClient_FrameStageNotify_CSSV34_t)(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CSSV34::ClientFrameStage_t curStage);
 
 CVClient_FrameStageNotify_CSSV34_t old_CVClient_FrameStageNotify_CSSV34;
 
 // Notification that we're moving into another stage during the frame.
-void __fastcall new_CVClient_FrameStageNotify_CSSV34(void* This, void* Edx, SOURCESDK::CSSV34::ClientFrameStage_t curStage)
+void __fastcall new_CVClient_FrameStageNotify_CSSV34(void* This,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 SOURCESDK::CSSV34::ClientFrameStage_t curStage)
 {
 	switch (curStage)
 	{
@@ -856,7 +991,11 @@ void __fastcall new_CVClient_FrameStageNotify_CSSV34(void* This, void* Edx, SOUR
 		break;
 	}
 
-	old_CVClient_FrameStageNotify_CSSV34(This, Edx, curStage);
+	old_CVClient_FrameStageNotify_CSSV34(This,
+#ifndef _WIN64
+	Edx,
+#endif //#ifndef _WIN64
+	 curStage);
 
 	switch (curStage)
 	{
@@ -868,6 +1007,7 @@ void __fastcall new_CVClient_FrameStageNotify_CSSV34(void* This, void* Edx, SOUR
 
 bool g_csgo_FirstFrameAfterNetUpdateEnd = false;
 
+#ifndef _WIN64
 extern int g_Mirv_Pov_PingAdjustMent;
 int MirvGetPing(int playerIndex);
 
@@ -1224,13 +1364,8 @@ void CAfxBaseClientDll::LevelInitPreEntity(char const* pMapName)
 	MirvCalcs_LevelInitPreEntity();
 }
 
-void CAfxBaseClientDll::LevelInitPostEntity()
-{ // NAKED_JMP_CLASSMEMBERIFACE_FN(CAfxBaseClientDll, m_Parent, 6)
-
-	m_Parent->LevelInitPostEntity();
-
-	g_AfxStreams.LevelInitPostEntity();
-}
+__declspec(naked)  void CAfxBaseClientDll::LevelInitPostEntity()
+{ NAKED_JMP_CLASSMEMBERIFACE_FN(CAfxBaseClientDll, m_Parent, 6) }
 
 //__declspec(naked) 
 void CAfxBaseClientDll::LevelShutdown(void)
@@ -1398,8 +1533,6 @@ void CAfxBaseClientDll::FrameStageNotify(SOURCESDK::CSGO::ClientFrameStage_t cur
 		MirvPgl::CheckStartedAndRestoreIfDown();
 		MirvPgl::ExecuteQueuedCommands();
 #endif
-
-		g_AfxStreams.BeforeFrameStart();
 		break;
 	case SOURCESDK::CSGO::FRAME_NET_UPDATE_END:
 		firstFrameAfterNetUpdateEnd = true;
@@ -1860,45 +1993,51 @@ __declspec(naked) void CAfxBaseClientDll::_UNKOWN_138(void)
 __declspec(naked) void CAfxBaseClientDll::_UNKOWN_139(void)
 { NAKED_JMP_CLASSMEMBERIFACE_FN(CAfxBaseClientDll, m_Parent, 139) }
 
+#endif //#ifndef _WIN64
+
+
 void HookClientDllInterface_011_Init(void * iface)
 {
-	int * vtable = *(int**)iface;
+	void ** vtable = *(void***)iface;
 
 	AfxDetourPtr((PVOID *)&(vtable[0]), new_CVClient_Init_Unknown, (PVOID*)&old_CVClient_Init_Unkown);
 }
 
 void HookClientDllInterface_Swarm_Init(void * iface)
 {
-	int * vtable = *(int**)iface;
+	void ** vtable = *(void***)iface;
 
 	AfxDetourPtr((PVOID*) & (vtable[1]), new_CVClient_Init_Swarm, (PVOID*)&old_CVClient_Init_Swarm);
 }
 
 void HookClientDllInterface_BM_Init(void * iface)
 {
-	int * vtable = *(int**) iface;
+	void ** vtable = *(void***) iface;
 
 	AfxDetourPtr((PVOID*)&(vtable[2]), new_CVClient_Init_BM, (PVOID*)&old_CVClient_Init_BM);
 }
 
 void HookClientDllInterface_Insurgency2_Init(void * iface)
 {
-	int * vtable = *(int**)iface;
+	void ** vtable = *(void***)iface;
 
 	AfxDetourPtr((PVOID*) & (vtable[2]), new_CVClient_Init_Swarm, (PVOID*)&old_CVClient_Init_Swarm);
 }
 
 void HookClientDllInterface_Garrysmod_Init(void* iface)
 {
-	int* vtable = *(int**)iface;
+	void ** vtable = *(void***)iface;
 
 	AfxDetourPtr((PVOID*) & (vtable[0]), new_CVClient_Init_Garrysmod, (PVOID*)&old_CVClient_Init_Garrysmod);
 }
 
+#ifndef _WIN64
 SOURCESDK::IClientEntityList_csgo * SOURCESDK::g_Entitylist_csgo = 0;
+#endif //#ifndef _WIN64
 
 SOURCESDK::CreateInterfaceFn old_Client_CreateInterface = 0;
 
+#ifndef _WIN64
 class CAfxCsgoPrediction : public SOURCESDK::CSGO::IPrediction
 {
 public:
@@ -1967,6 +2106,8 @@ private:
 };
 
 CAfxCsgoPrediction* g_AfxCsgoPrediction = nullptr;
+#endif //#ifndef _WIN64
+
 
 void* new_Client_CreateInterface(const char *pName, int *pReturnCode)
 {
@@ -2046,13 +2187,14 @@ void* new_Client_CreateInterface(const char *pName, int *pReturnCode)
 			}
 
 			if(iface) {
-				int * vtable = *(int**)iface;
+				void ** vtable = *(void***)iface;
 
 				switch(g_SourceSdkVer) {
 				case SourceSdkVer_Garrysmod:
 					AfxDetourPtr((PVOID*)&(vtable[2]), new_CVClient_Shutdown, (PVOID*)&old_CVClient_Shutdown);
 					AfxDetourPtr((PVOID*)&(vtable[35]), new_CVClient_FrameStageNotify_Garrysmod, (PVOID*)&old_CVClient_FrameStageNotify_Garrysmod);
 					break;
+				case SourceSdkVer_TF2Classified:
 				case SourceSdkVer_TF2:
 					AfxDetourPtr((PVOID*) & (vtable[2]), new_CVClient_Shutdown, (PVOID*)&old_CVClient_Shutdown);
 					AfxDetourPtr((PVOID*) & (vtable[35]), new_CVClient_FrameStageNotify_TF2, (PVOID*)&old_CVClient_FrameStageNotify_TF2);
@@ -2085,6 +2227,7 @@ void* new_Client_CreateInterface(const char *pName, int *pReturnCode)
 				}
 			}
 		}
+#ifndef _WIN64		
 		if(SourceSdkVer_CSGO == g_SourceSdkVer || SourceSdkVer_CSCO == g_SourceSdkVer)
 		{
 			// isCsgo.
@@ -2094,11 +2237,13 @@ void* new_Client_CreateInterface(const char *pName, int *pReturnCode)
 			if (SOURCESDK::CSGO::IClientTools * iface = (SOURCESDK::CSGO::IClientTools *)old_Client_CreateInterface(SOURCESDK_CSGO_VCLIENTTOOLS_INTERFACE_VERSION, NULL))
 				new CClientToolsCsgo(iface);
 		}
-		if (SourceSdkVer_TF2 == g_SourceSdkVer) {
+#endif //#ifndef _WIN64		
+		if (SourceSdkVer_TF2 == g_SourceSdkVer || SourceSdkVer_TF2Classified == g_SourceSdkVer) {
 
 			if (SOURCESDK::TF2::IClientTools * iface = (SOURCESDK::TF2::IClientTools *)old_Client_CreateInterface(SOURCESDK_TF2_VCLIENTTOOLS_INTERFACE_VERSION, NULL))
 				new CClientToolsTf2(iface);
 		}
+#ifndef _WIN64		
 		if (SourceSdkVer_Momentum == g_SourceSdkVer) {
 
 			if (SOURCESDK::TF2::IClientTools* iface = (SOURCESDK::TF2::IClientTools*)old_Client_CreateInterface(SOURCESDK_TF2_VCLIENTTOOLS_INTERFACE_VERSION, NULL))
@@ -2120,8 +2265,10 @@ void* new_Client_CreateInterface(const char *pName, int *pReturnCode)
 			if (SOURCESDK::CSSV34::IClientTools * iface = (SOURCESDK::CSSV34::IClientTools *)old_Client_CreateInterface(SOURCESDK_CSSV34_VCLIENTTOOLS_INTERFACE_VERSION, NULL))
 				new CClientToolsCssV34(iface);
 		}
+#endif //#ifndef _WIN64		
 	}
 
+#ifndef _WIN64	
 	if(SourceSdkVer_CSGO == g_SourceSdkVer || SourceSdkVer_CSCO == g_SourceSdkVer)
 	{
 		if(!g_AfxBaseClientDll && !strcmp(pName, CLIENT_DLL_INTERFACE_VERSION_CSGO_018))
@@ -2141,6 +2288,7 @@ void* new_Client_CreateInterface(const char *pName, int *pReturnCode)
 		}
 		*/
 	}
+#endif //#ifndef _WIN64	
 
 	return pRet;
 }
@@ -2420,6 +2568,8 @@ LRESULT CALLBACK new_Afx_WindowProc(
 	return CallWindowProcW(g_NextWindProc, hwnd, uMsg, wParam, lParam);
 }
 
+#ifndef _WIN64
+
 // TODO: this is risky, actually we should track the hWnd maybe.
 LONG WINAPI new_GetWindowLongW(
 	__in HWND hWnd,
@@ -2509,6 +2659,55 @@ LONG WINAPI new_SetWindowLongA(
 
 	return SetWindowLongA(hWnd, nIndex, dwNewLong);
 }
+
+#else 
+
+// TODO: this is risky, actually we should track the hWnd maybe.
+LONG_PTR WINAPI new_GetWindowLongPtrW(
+  __in HWND hWnd,
+  __in int  nIndex
+)
+{
+	if(nIndex == GWLP_WNDPROC)
+	{
+		if(g_afxWindowProcSet)
+		{
+			return (LONG_PTR)g_NextWindProc;
+		}
+	}
+
+	return GetWindowLongPtrW(hWnd, nIndex);
+}
+
+// TODO: this is risky, actually we should track the hWnd maybe.
+LONG_PTR WINAPI new_SetWindowLongPtrW(
+  __in HWND     hWnd,
+  __in int      nIndex,
+  __in LONG_PTR dwNewLong
+)
+{
+	if(nIndex == GWLP_WNDPROC)
+	{
+		LONG lResult = SetWindowLongPtrW(hWnd, nIndex, (LONG_PTR)new_Afx_WindowProc);
+
+		if(!g_afxWindowProcSet)
+		{
+			g_afxWindowProcSet = true;
+		}
+		else
+		{
+			lResult = (LONG_PTR)g_NextWindProc;
+		}
+
+		g_NextWindProc = (WNDPROC)dwNewLong;
+
+		return lResult;
+	}
+
+	return SetWindowLongPtrW(hWnd, nIndex, dwNewLong);
+}
+
+#endif //#ifndef _WIN64
 
 // Cursor detour trampoline pointers (must appear before first use)
 static BOOL (WINAPI * True_GetCursorPos_Detour)(LPPOINT) = nullptr;
@@ -2627,28 +2826,7 @@ BOOL WINAPI new_ReleaseCapture()
 	return ReleaseCapture();
 }
 
-FARPROC WINAPI new_shaderapidx9_GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
-{
-	FARPROC nResult;
-	nResult = GetProcAddress(hModule, lpProcName);
-
-	if (!nResult)
-		return nResult; // This can happen on Windows XP for Direct3DCreateEx9
-
-	if (HIWORD(lpProcName))
-	{
-		if (
-			!lstrcmp(lpProcName, "Direct3DCreate9Ex")
-		) {
-			old_Direct3DCreate9Ex = (Direct3DCreate9Ex_t)nResult;
-			return (FARPROC) &new_Direct3DCreate9Ex;
-		}
-	}
-
-	return nResult;
-}
-
-
+#ifndef _WIN64
 bool g_b_Suppress_csgo_engine_Do_CCLCMsg_FileCRCCheck = true;
 typedef void (__fastcall * csgo_engine_Do_CCLCMsg_FileCRCCheck_t)(void * This, void * Edx);
 csgo_engine_Do_CCLCMsg_FileCRCCheck_t g_Org_csgo_engine_Do_CCLCMsg_FileCRCCheck = nullptr;
@@ -2679,7 +2857,7 @@ bool Install_csgo_engine_Do_CCLCMsg_FileCRCCheck() {
 
 	return firstResult;
 }
-
+#endif //#ifndef _WIN64
 // Global detours for USER32 cursor APIs (ensure process-wide behavior in all games)
 // True_ShowCursor_Detour is declared above; initialize on first use
 INT WINAPI new_ShowCursor(BOOL bShow)  ; // forward (defined above for import hook as well)
@@ -2709,6 +2887,9 @@ HMODULE WINAPI new_LoadLibraryExA(LPCSTR lpLibFileName, HANDLE hFile, DWORD dwFl
 
 extern HMODULE g_H_EngineDll;
 
+
+#ifndef _WIN64
+
 typedef void(__fastcall * csgo_ICommandLine_RemoveParm_t)(void * This, void * edx, const char *parm);
 
 csgo_ICommandLine_RemoveParm_t True_csgo_ICommandLine_RemoveParam;
@@ -2726,6 +2907,9 @@ void __fastcall My_csgo_ICommandLine_RemoveParam(void * This, void * edx, const 
 typedef void csgo_ICommandLine_t;
 
 typedef csgo_ICommandLine_t * (*csgo_CommandLine_t)();
+
+#endif //#ifndef _WIN64
+
 
 CAfxImportFuncHook<BOOL (WINAPI *)(LPPOINT)> g_Import_Tier0_USER32_GetCursorPos("GetCursorPos", new_GetCursorPos);
 CAfxImportFuncHook<BOOL (WINAPI *)(int, int)> g_Import_Tier0_USER32_SetCursorPos("SetCursorPos", new_SetCursorPos);
@@ -2765,6 +2949,8 @@ void CommonHooks()
 				const wchar_t* game = g_CommandLine->GetArgV(gameIdx);
 				if (0 == _wcsicmp(L"tf", game))
 					g_SourceSdkVer = SourceSdkVer_TF2;
+				else if (0 == _wcsicmp(L"tf2classified", game))
+					g_SourceSdkVer = SourceSdkVer_TF2Classified;
 				else if (0 == _wcsicmp(L"csgo", game))
 					g_SourceSdkVer = SourceSdkVer_CSGO;
 				else if (0 == _wcsicmp(L"csco", game))
@@ -2829,6 +3015,14 @@ void CommonHooks()
 		{
 			g_SourceSdkVer = SourceSdkVer_TF2;
 		}
+		else if (StringIEndsWith(filePath, "tf_win64.exe"))
+		{
+			g_SourceSdkVer = SourceSdkVer_TF2;
+		}
+		else if (StringIEndsWith(filePath, "tf2classified_win64.exe"))
+		{
+			g_SourceSdkVer = SourceSdkVer_TF2Classified;
+		}
 		else if (StringIEndsWith(filePath, "hl2mp.exe"))
 		{
 			g_SourceSdkVer = SourceSdkVer_HL2MP;
@@ -2845,6 +3039,8 @@ void CommonHooks()
 				const wchar_t* game = g_CommandLine->GetArgV(gameIdx);
 				if(0 == _wcsicmp(L"tf", game))
 					g_SourceSdkVer = SourceSdkVer_TF2;
+				else if (0 == _wcsicmp(L"tf2classified", game))
+					g_SourceSdkVer = SourceSdkVer_TF2Classified;
 				else if (0 == _wcsicmp(L"cstrike", game))
 					g_SourceSdkVer = SourceSdkVer_CSS;
 				else if (0 == _wcsicmp(L"garrysmod", game))
@@ -2881,6 +3077,7 @@ void CommonHooks()
                 InstallUser32CursorDetoursOnce();
             }
 
+#ifndef _WIN64
 			if (SourceSdkVer_CSGO == g_SourceSdkVer || SourceSdkVer_CSCO == g_SourceSdkVer)
 			{
 				SOURCESDK::CSGO::g_pMemAlloc = *(SOURCESDK::CSGO::IMemAlloc **)GetProcAddress(hTier0, "g_pMemAlloc");
@@ -2907,6 +3104,7 @@ void CommonHooks()
 				else ErrorBox("Could not find tier0!Commandline.");
 				*/
 			}
+#endif //#ifndef _WIN64
 
 			if (SourceSdkVer_SWARM == g_SourceSdkVer)
 			{
@@ -3055,9 +3253,11 @@ CAfxImportDllHook g_Import_engine_KERNEL32("KERNEL32.dll", CAfxImportDllHooks({
 	, &g_Import_engine_KERNEL32_LoadLibraryExA
 	, &g_Import_engine_KERNEL32_GetProcAddress }));
 
+#ifndef _WIN64
 // actually this is not required, since engine.dll calls first and thus is lower in the chain:
 CAfxImportFuncHook<LONG(WINAPI*)(HWND, int)> g_Import_engine_USER32_GetWindowLongW("GetWindowLongW", &new_GetWindowLongW);
 CAfxImportFuncHook<LONG(WINAPI*)(HWND, int, LONG)> g_Import_engine_USER32_SetWindowLongW("SetWindowLongW", &new_SetWindowLongW);
+#endif //#ifndef _WIN64
 
 CAfxImportFuncHook<HCURSOR(WINAPI*)(HCURSOR)> g_Import_engine_USER32_SetCursor("SetCursor", &new_SetCursor);
 CAfxImportFuncHook<HWND(WINAPI*)(HWND)> g_Import_engine_USER32_SetCapture("SetCapture", &new_SetCapture);
@@ -3068,8 +3268,10 @@ CAfxImportFuncHook<BOOL(WINAPI*)(LPPOINT)> g_Import_engine_USER32_GetCursorPos("
 CAfxImportFuncHook<BOOL(WINAPI*)(int, int)> g_Import_engine_USER32_SetCursorPos("SetCursorPos", &new_SetCursorPos);
 
 CAfxImportDllHook g_Import_engine_USER32("USER32.dll", CAfxImportDllHooks({
+#ifndef _WIN64
 	&g_Import_engine_USER32_GetWindowLongW,
 	&g_Import_engine_USER32_SetWindowLongW,
+#endif //#ifndef _WIN64
 	&g_Import_engine_USER32_SetCursor,
 	&g_Import_engine_USER32_SetCapture,
 	&g_Import_engine_USER32_ReleaseCapture }));
@@ -3079,13 +3281,20 @@ CAfxImportsHook g_Import_engine(CAfxImportsHooks({
 	&g_Import_engine_KERNEL32,
 	&g_Import_engine_USER32 }));
 
-
+#ifndef _WIN64
 CAfxImportFuncHook<LONG(WINAPI*)(HWND, int)> g_Import_inputsystem_USER32_GetWindowLongW("GetWindowLongW", &new_GetWindowLongW);
 CAfxImportFuncHook<LONG(WINAPI*)(HWND, int, LONG)> g_Import_inputsystem_USER32_SetWindowLongW("SetWindowLongW", &new_SetWindowLongW);
 
 // CSSV34 only:
 CAfxImportFuncHook<LONG(WINAPI*)(HWND, int)> g_Import_inputsystem_USER32_GetWindowLongA("GetWindowLongA", &new_GetWindowLongA);
 CAfxImportFuncHook<LONG(WINAPI*)(HWND, int, LONG)> g_Import_inputsystem_USER32_SetWindowLongA("SetWindowLongA", &new_SetWindowLongA);
+
+#else
+
+CAfxImportFuncHook<LONG_PTR(WINAPI*)(HWND, int)> g_Import_inputsystem_USER32_GetWindowLongPtrW("GetWindowLongPtrW", &new_GetWindowLongPtrW);
+CAfxImportFuncHook<LONG_PTR(WINAPI*)(HWND, int, LONG_PTR)> g_Import_inputsystem_USER32_SetWindowLongPtrW("SetWindowLongPtrW", &new_SetWindowLongPtrW);
+
+#endif //#ifndef _WIN64
 
 CAfxImportFuncHook<HCURSOR(WINAPI*)(HCURSOR)> g_Import_inputsystem_USER32_SetCursor("SetCursor", &new_SetCursor);
 CAfxImportFuncHook<HWND(WINAPI*)(HWND)> g_Import_inputsystem_USER32_SetCapture("SetCapture", &new_SetCapture);
@@ -3124,10 +3333,15 @@ UINT WINAPI New_GetRawInputData(
 }
 
 CAfxImportDllHook g_Import_inputsystem_USER32("USER32.dll", CAfxImportDllHooks({
+#ifndef _WIN64
 	&g_Import_inputsystem_USER32_GetWindowLongA,
 	&g_Import_inputsystem_USER32_SetWindowLongA,
 	&g_Import_inputsystem_USER32_GetWindowLongW,
 	&g_Import_inputsystem_USER32_SetWindowLongW,
+#else
+	&g_Import_inputsystem_USER32_GetWindowLongPtrW,
+	&g_Import_inputsystem_USER32_SetWindowLongPtrW,
+#endif //#ifndef _WIN64
 	&g_Import_inputsystem_USER32_SetCursor,
 	&g_Import_inputsystem_USER32_SetCapture,
 	&g_Import_inputsystem_USER32_ReleaseCapture,
@@ -3201,7 +3415,31 @@ CAfxImportsHook g_Import_materialsystem(CAfxImportsHooks({
 	&g_Import_materialsystem_KERNEL32 }));
 
 
+FARPROC WINAPI new_shaderapidx9_GetProcAddress(HMODULE hModule, LPCSTR lpProcName);
+
 CAfxImportFuncHook<FARPROC(WINAPI*)(HMODULE, LPCSTR)> g_Import_shaderapidx9_KERNEL32_GetProcAddress("GetProcAddress", &new_shaderapidx9_GetProcAddress);
+
+FARPROC WINAPI new_shaderapidx9_GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
+{
+	FARPROC nResult;
+	nResult = g_Import_shaderapidx9_KERNEL32_GetProcAddress.TrueFunc(hModule, lpProcName);
+
+	if (!nResult)
+		return nResult; // This can happen on Windows XP for Direct3DCreateEx9
+
+	if (HIWORD(lpProcName))
+	{
+		if (
+			!lstrcmp(lpProcName, "Direct3DCreate9Ex")
+		) {
+			old_Direct3DCreate9Ex = (Direct3DCreate9Ex_t)nResult;
+			return (FARPROC) &new_Direct3DCreate9Ex;
+		}
+	}
+
+	return nResult;
+}
+
 
 CAfxImportDllHook g_Import_shaderapidx9_KERNEL32("KERNEL32.dll", CAfxImportDllHooks({
 	&g_Import_shaderapidx9_KERNEL32_GetProcAddress }));
@@ -3276,11 +3514,23 @@ CAfxImportsHook g_Import_panorama(CAfxImportsHooks({
 	&g_Import_panorama_tier0 }));
 
 
-typedef void (__fastcall * CVideoMode_Common__WriteMovieFrame_t)( void * Ecx, void * Edx, void * movie_info );
+typedef void (__fastcall * CVideoMode_Common__WriteMovieFrame_t)( void * Ecx,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 void * movie_info );
 CVideoMode_Common__WriteMovieFrame_t g_CVideoMode_Common__WriteMovieFrame = nullptr;
-void __fastcall New_CVideoMode_Common__WriteMovieFrame( void * Ecx, void * Edx, void * movie_info ) {
+void __fastcall New_CVideoMode_Common__WriteMovieFrame( void * Ecx,
+#ifndef _WIN64
+	void* Edx,
+#endif //#ifndef _WIN64
+	 void * movie_info ) {
 	if(g_AfxStreams.IsRecording()) return; // don't let it do that when recording ourselves, it downloads image from GPU and wastes it for nothing.
-	g_CVideoMode_Common__WriteMovieFrame(Ecx, Edx, movie_info);
+	g_CVideoMode_Common__WriteMovieFrame(Ecx,
+#ifndef _WIN64
+	Edx,
+#endif //#ifndef _WIN64
+	 movie_info);
 }
 
 bool Hook_CVideoMode_Common__WriteMovieFrame() {
@@ -3378,6 +3628,7 @@ void LibraryHooksA(HMODULE hModule, LPCSTR lpLibFileName)
 
 		g_Import_engine.Apply(hModule);
 
+#ifndef _WIN64
 		// Init the hook early, so we don't run into issues with threading:
 		Hook_csgo_SndMixTimeScalePatch();
 		csgo_Audio_Install();
@@ -3386,6 +3637,7 @@ void LibraryHooksA(HMODULE hModule, LPCSTR lpLibFileName)
 		if(SourceSdkVer_CSGO == g_SourceSdkVer || SourceSdkVer_CSCO == g_SourceSdkVer) {
 			Install_csgo_engine_Do_CCLCMsg_FileCRCCheck();
 		}
+#endif //#ifndef _WIN64
 		if(SourceSdkVer_CSGO == g_SourceSdkVer || SourceSdkVer_CSCO == g_SourceSdkVer || SourceSdkVer_TF2 == g_SourceSdkVer) {
 			Install_csgo_tf2_Cmd_ExecuteCommand();
 		}
@@ -3427,10 +3679,12 @@ void LibraryHooksA(HMODULE hModule, LPCSTR lpLibFileName)
 		//
 		// Install early hooks:
 
+#ifndef _WIN64
 		csgo_CSkyBoxView_Draw_Install();
 		csgo_CViewRender_Install();
 		Hook_csgo_PlayerAnimStateFix();
 		csgo_CRendering3dView_Install();
+#endif //#ifndef _WIN64
 	}
 	else if(bFirstPanorama && StringEndsWith( lpLibFileName, "panorama.dll"))
 	{
@@ -3442,7 +3696,10 @@ void LibraryHooksA(HMODULE hModule, LPCSTR lpLibFileName)
 		// Install hooks:
 
 		g_Import_panorama.Apply(hModule);
+
+#ifndef _WIN64
 		PanoramaHooks_Install();
+#endif //#ifndef _WIN64
 	}
 	else if(bFirstStdshader_dx9 && StringEndsWith( lpLibFileName, "stdshader_dx9.dll"))
 	{
@@ -3575,9 +3832,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 			// things here that would have problems with that.
 			//
 
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 			AfxInterop::DllProcessAttach();
 #endif
+#endif //#ifndef _WIN64
 
 			AfxHookSource::Gui::DllProcessAttach();
 
@@ -3591,9 +3850,10 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 
 			g_CampathDrawer.End();
 
+#ifndef _WIN64
 			MatRenderContextHook_Shutdown();
-
 			if(g_AfxBaseClientDll) { delete g_AfxBaseClientDll; g_AfxBaseClientDll = 0; }
+#endif //#ifndef _WIN64
 
 			AfxHookSource::Gui::DllProcessDetach();
 

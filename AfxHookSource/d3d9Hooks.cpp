@@ -10,9 +10,17 @@
 #include "SourceInterfaces.h"
 #include "CampathDrawer.h"
 #include "AfxShaders.h"
+
+#ifndef _WIN64
 #include "MirvPgl.h"
+#endif //#ifndef _WIN64
+
 #include "AfxStreams.h"
+
+#ifndef _WIN64
 #include "AfxInterop.h"
+#endif //#ifndef _WIN64
+
 #include "ReShadeAdvancedfx.h"
 #include "addresses.h"
 
@@ -34,11 +42,14 @@
 
 #include <mutex>
 
+#include <cassert>
+
 #define AFX_GOLDENRATIO 1.618033988749894848204586834365638
 
 typedef struct __declspec(novtable) Interface_s abstract {} * Interface_t;
-typedef void * (__stdcall Interface_s::*InterfaceFn_t) (void *);
+typedef void (__stdcall Interface_s::*InterfaceFn_t) (void);
 
+#ifndef _WIN64
 #define IFACE_PASSTHROUGH_DECL(iface,method) \
 	virtual void __stdcall iface ##method(void);
 
@@ -51,7 +62,19 @@ typedef void * (__stdcall Interface_s::*InterfaceFn_t) (void *);
 		__asm MOV EAX, fn_ ##iface ##method \
 		__asm JMP EAX \
 	}
+#else
+#define IFACE_PASSTHROUGH_DECL(iface,method) \
+	virtual void __stdcall iface ##method(void * rdx, void * r8, void * r9);
 
+#include <intrin.h>
+extern "C" void __fastcall afx_iface_passthrough(void *,void *,void *,void *,void *,void *,void *);
+#define IFACE_PASSTHROUGH_DEF(iface,method,className,ifacePtr) \
+	static InterfaceFn_t fn_ ##iface ##method = (InterfaceFn_t)&iface::method; \
+	void __stdcall className::iface ##method(void * rdx, void * r8, void * r9) \
+	{ \
+		afx_iface_passthrough(this, rdx, r8, r9, ifacePtr, &fn_ ##iface ##method, _AddressOfReturnAddress()); \
+	}
+#endif //#ifndef _WIN64
 
 extern bool g_bD3D9DebugPrint;
 bool g_bD3D9DumpVertexShader = false;
@@ -150,9 +173,11 @@ void Shared_Direct3DDevice9_Init(
 {
 	g_Adapter = adapter;
 
+#ifndef _WIN64
 #ifdef AFX_MIRV_PGL
 	MirvPgl::D3D9_BeginDevice(device);
 #endif
+#endif //#ifndef _WIN64
 
 	AfxHookSource::Gui::On_Direct3DDevice9_Init(hDeviceWindow, device);
 
@@ -182,9 +207,11 @@ void Shared_Direct3DDevice9_Shutdown()
     // Drop overlay renderer
     advancedfx::overlay::Overlay::Get().SetRenderer(std::unique_ptr<advancedfx::overlay::IOverlayRenderer>());
 
+#ifndef _WIN64
 #ifdef AFX_MIRV_PGL
 	MirvPgl::D3D9_EndDevice();
 #endif
+#endif //#ifndef _WIN64
 }
 
 void Shared_Direct3DDevice9_EndScene()
@@ -2228,6 +2255,7 @@ bool g_bSupportsIntz = false;
 /// <param name="pFixPresentationParameters">MUST NOT BE NULL</param>
 void FixPresentationParementers(D3DPRESENT_PARAMETERS* pFixPresentationParameters)
 {
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 	if (AfxInterop::MainEnabled())
 	{
@@ -2236,6 +2264,7 @@ void FixPresentationParementers(D3DPRESENT_PARAMETERS* pFixPresentationParameter
 		pFixPresentationParameters->SwapEffect = D3DSWAPEFFECT_DISCARD;
 	}
 #endif
+#endif //#ifndef _WIN64
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2330,163 +2359,351 @@ IDirect3DSurface9* AfxGetSourceSurface(IDirect3DSurface9* replacementSurface) {
 // CAfxD3D9ImageBuffer /////////////////////////////////////////////////////////
 
 class CAfxD3D9Capture
-	: public IAfxD3D9Capture {
+	: public CRefCountedThreadSafe
+	, public IAfxD3D9Capture
+	, private IAfxD3D9OnRelease {
 public:
 	static IAfxD3D9Capture * Create(IDirect3DSurface9* pSrcSurf) {
 
 		if(pSrcSurf == nullptr)
 			return nullptr;
 
-		IDirect3DDevice9 * pDevice = nullptr;
 		D3DSURFACE_DESC desc;
-		IDirect3DSurface9 * pIntermediateSurface = nullptr;
-		IDirect3DSurface9 * pOffscreenSurface = nullptr;
 		IAfxD3D9Capture * result = nullptr;
 
-		if(SUCCEEDED(pSrcSurf->GetDevice(&pDevice))) {
-			if(SUCCEEDED(pSrcSurf->GetDesc(&desc))
-				&& (desc.Pool == D3DPOOL_DEFAULT)
-				&& (desc.Format == D3DFMT_A8R8G8B8 || desc.Format == D3DFMT_R8G8B8 || desc.Format == D3DFMT_R32F)
-			) {
-				if(desc.MultiSampleType == D3DMULTISAMPLE_NONE || SUCCEEDED(pDevice->CreateRenderTarget(
-					desc.Width, desc.Height,
-					desc.Format, D3DMULTISAMPLE_NONE, 0, FALSE,
-					&pIntermediateSurface, NULL
-				))) {
-					if (SUCCEEDED(pDevice->CreateOffscreenPlainSurface(
-						desc.Width, desc.Height,
-						desc.Format, D3DPOOL_SYSTEMMEM,
-						&pOffscreenSurface, NULL
-					))) {
-						result = new CAfxD3D9Capture(pIntermediateSurface, pOffscreenSurface);
-					}
-				}
-			}
-		}
-
-		if(pOffscreenSurface) pOffscreenSurface->Release();
-		if(pIntermediateSurface) pIntermediateSurface->Release();
-		if(pDevice) pDevice->Release();
-
-		return result;
-	}
-
-	CAfxD3D9Capture(IDirect3DSurface9 * pIntermediateSurface, IDirect3DSurface9 * pOffscreenSurface)
-		: m_RefCount(1)
-		, m_pIntermediateSurface(pIntermediateSurface)
-		, m_pOffscreenSurface(pOffscreenSurface)
-	{
-		if(pIntermediateSurface) pIntermediateSurface->AddRef();
-		pOffscreenSurface->AddRef();
-	}
-
-	virtual void AddRef() {
-		m_RefCount++;
-	}
-
-    virtual void Release() {
-		m_RefCount--;
-		if(m_RefCount == 0) delete this;
-	}
-
-	virtual bool Capture() {
-		IDirect3DSurface9* sourceSurface = AfxGetRenderTargetSurface();
-		IDirect3DDevice9 * pDevice = nullptr;
-		bool result = false;
-
-		if (m_pIntermediateSurface) {
-			if (SUCCEEDED(m_pIntermediateSurface->GetDevice(&pDevice))) {
-				if (SUCCEEDED(pDevice->StretchRect(
-					sourceSurface, NULL,
-					m_pIntermediateSurface, NULL,
-					D3DTEXF_NONE
-				))) {
-					if (SUCCEEDED(pDevice->GetRenderTargetData(
-						m_pIntermediateSurface, m_pOffscreenSurface
-					))) {
-						result = true;
-					}
-				}
-			}
-		}
-		else {
-			if (SUCCEEDED(sourceSurface->GetDevice(&pDevice))) {
-				if (SUCCEEDED(pDevice->GetRenderTargetData(
-					sourceSurface, m_pOffscreenSurface
-				))) {
-					result = true;
-				}
-			}
-		}
-
-		if(pDevice) pDevice->Release();
-		return result;
-	}
-
-    virtual const advancedfx::IImageBuffer * LockCpu() {
-		D3DSURFACE_DESC desc;
-		D3DLOCKED_RECT lockedRect;
-
-		if(SUCCEEDED(m_pOffscreenSurface->GetDesc(&desc))
+		if(SUCCEEDED(pSrcSurf->GetDesc(&desc))
+			&& (desc.Pool == D3DPOOL_DEFAULT)
 			&& (desc.Format == D3DFMT_A8R8G8B8 || desc.Format == D3DFMT_R8G8B8 || desc.Format == D3DFMT_R32F)
-			&& desc.MultiSampleType == D3DMULTISAMPLE_NONE
-		) {	
-			if(SUCCEEDED(m_pOffscreenSurface->LockRect(&lockedRect,NULL,D3DLOCK_NO_DIRTY_UPDATE|D3DLOCK_READONLY))) {
-				advancedfx::CImageFormat imageFormat(
-					desc.Format == D3DFMT_A8R8G8B8 ? advancedfx::ImageFormat::BGRA : (desc.Format == D3DFMT_R8G8B8 ? advancedfx::ImageFormat::BGR : advancedfx::ImageFormat::ZFloat),
-					desc.Width,
-					desc.Height,
-					lockedRect.Pitch
-				);
-				imageFormat.SetOrigin(advancedfx::ImageOrigin::TopLeft);
-				m_ImageBuffer = new CImageBufferWrapper(imageFormat, lockedRect.pBits);
-				return m_ImageBuffer;
+		) {
+			result = new CAfxD3D9Capture(desc);
+			result->AddRef();
+		}
+
+		return result;
+	}
+
+	CAfxD3D9Capture(const D3DSURFACE_DESC & desc)
+		: CRefCountedThreadSafe()
+		, m_pIntermediateSurface(nullptr)
+		, m_SurfaceDesc(desc)
+	{
+	}
+
+	virtual void IAfxD3D9Capture::AddRef() override {
+		TRefCounted<true>::AddRef();
+		m_GpuRefCount++;
+	}
+
+    virtual void IAfxD3D9Capture::Release() override {
+		if(1 == m_GpuRefCount) {
+			ReleaseIntermediate();
+		}
+		m_GpuRefCount--;
+		TRefCounted<true>::Release();
+	}
+
+	virtual IAfxD3D9CaptureBuffer * Capture() override {
+		IDirect3DSurface9* pSourceSurface = AfxGetRenderTargetSurface(); 
+		IDirect3DDevice9 * pDevice = nullptr;
+		IAfxD3D9CaptureBuffer * pResult = nullptr;
+		bool bError = true;
+
+		if(pSourceSurface) {
+			if(SUCCEEDED(pSourceSurface->GetDevice(&pDevice))) {
+				if(m_SurfaceDesc.MultiSampleType != D3DMULTISAMPLE_NONE) {
+					if (m_pIntermediateSurface || AquireIntermediate(pDevice)) {
+						if(auto pOffScreen = AquireOffscreen(pDevice)) {
+							if (SUCCEEDED(pDevice->StretchRect(
+								pSourceSurface, NULL,
+								m_pIntermediateSurface, NULL,
+								D3DTEXF_NONE
+							))) {
+								if (SUCCEEDED(pDevice->GetRenderTargetData(
+									m_pIntermediateSurface, pOffScreen->GetOffScreenSurfaceNoRef()
+								))) {
+									bError = false;
+								}
+							}
+							pResult = pOffScreen;
+						}
+					}
+				}
+				else {
+					if(auto pOffScreen = AquireOffscreen(pDevice)) {
+						if (SUCCEEDED(pDevice->GetRenderTargetData(
+							pSourceSurface, pOffScreen->GetOffScreenSurfaceNoRef()
+						))) {
+							bError = false;
+						}
+						pResult = pOffScreen;
+					}
+				}
+
+
+				pDevice->Release();
+			}
+
+			// Do not release, AfxGetRenderTargetSurface() doesn't increase ref.
+		}
+
+		if(bError) {
+			if(pResult) {
+				pResult->Release();
+				pResult = nullptr;
 			}
 		}
 
-		return nullptr;
+		return pResult;
 	}
     
-	virtual void UnlockCpu() {
-		delete m_ImageBuffer;
-		m_pOffscreenSurface->UnlockRect();
+protected:
+	~CAfxD3D9Capture() override {
+		// ReleaseIntermediate should have been already called from GPU thread at this point.
+		assert(m_pIntermediateSurface == nullptr);
+
+		// Wait for and then release Off-Screen surfaces:
+		{
+			std::unique_lock<std::mutex> lock(m_OffscreenSurfacesMutex);
+			m_OffscreenSurfacesCv.wait(lock,[this]{return m_OffscreenSurfaces.size() == m_NumOffscreenSurfaces;});
+			for(auto it = m_OffscreenSurfaces.begin(); it != m_OffscreenSurfaces.end(); it++) {
+				static_cast<CRefCountedThreadSafe *>(*it)->Release();
+			}
+		}
+	}
+private:
+	class CImageBufferWrapper;
+
+	struct D3d9SurfaceDescCmp
+	{
+    	bool operator()(const D3DSURFACE_DESC& lhs, const D3DSURFACE_DESC& rhs) const
+    	{
+			int cmp = (int32_t)lhs.Format - (int32_t)rhs.Format;
+			if(cmp) return cmp < 0;
+
+			cmp = (int32_t)lhs.Type - (int32_t)rhs.Type;
+			if(cmp) return cmp < 0;
+
+			cmp = (int32_t)lhs.Usage - (int32_t)rhs.Usage;
+			if(cmp) return cmp < 0;
+
+			cmp = (int32_t)lhs.Pool - (int32_t)rhs.Pool;
+			if(cmp) return cmp < 0;
+
+			cmp = (int32_t)lhs.MultiSampleType - (int32_t)rhs.MultiSampleType;
+			if(cmp) return cmp < 0;
+
+			cmp = (int32_t)lhs.MultiSampleQuality - (int32_t)rhs.MultiSampleQuality;
+			if(cmp) return cmp < 0;
+
+			cmp = (int32_t)lhs.Width - (int32_t)rhs.Width;
+			if(cmp) return cmp < 0;
+
+			cmp = (int32_t)lhs.Height - (int32_t)rhs.Height;
+			if(cmp) return cmp < 0;
+
+			return false; // equal
+    	}
+	};
+
+	static std::map<D3DSURFACE_DESC, std::pair<size_t, IDirect3DSurface9 *>, D3d9SurfaceDescCmp> m_IntermediateSurfaces;
+
+	std::mutex m_OffscreenSurfacesMutex;
+	std::condition_variable m_OffscreenSurfacesCv;
+	size_t m_NumOffscreenSurfaces = 0;
+	std::list<class CImageBufferWrapper *> m_OffscreenSurfaces;
+
+	bool AquireIntermediate(IDirect3DDevice9 * pDevice) {
+		if (m_pIntermediateSurface) return true;
+
+		auto it = m_IntermediateSurfaces.find(m_SurfaceDesc);
+		if(it != m_IntermediateSurfaces.end()) {
+			// we can reuse existing one.
+			auto & pair = it->second;
+			auto & cnt = std::get<0>(pair);
+			cnt++;
+			m_pIntermediateSurface = std::get<1>(pair);
+			return true;
+		} else {
+			// need to try to create new one.
+			if(SUCCEEDED(pDevice->CreateRenderTarget(
+				m_SurfaceDesc.Width, m_SurfaceDesc.Height,
+				m_SurfaceDesc.Format, D3DMULTISAMPLE_NONE, 0, FALSE,
+				&m_pIntermediateSurface, NULL))) {
+				m_IntermediateSurfaces.emplace(std::piecewise_construct, std::forward_as_tuple(m_SurfaceDesc), std::forward_as_tuple(1,m_pIntermediateSurface));
+				return true;
+			}
+		}
+		return false;
 	}
 
-protected:
+	void ReleaseIntermediate() {
+		if (m_pIntermediateSurface) {
+			auto it = m_IntermediateSurfaces.find(m_SurfaceDesc);
+			auto & pair = it->second;
+			auto & cnt = std::get<0>(pair);
+			if(1 == cnt) {
+				// we are the last usage, remove.
+				m_IntermediateSurfaces.erase(it);
+				m_pIntermediateSurface->Release();
+			} else {
+				cnt--;
+			}
+			m_pIntermediateSurface = nullptr;
+		}
+	}
 
-private:
-	~CAfxD3D9Capture() {
-		m_pOffscreenSurface->Release();
-		if (m_pIntermediateSurface) m_pIntermediateSurface->Release();
+	class CImageBufferWrapper * AquireOffscreen(IDirect3DDevice9 * pDevice) {
+		class CImageBufferWrapper * pResult = nullptr;
+		{
+			std::unique_lock<std::mutex> lock(m_OffscreenSurfacesMutex);
+			if(2 <= m_NumOffscreenSurfaces) {
+				m_OffscreenSurfacesCv.wait(lock,[this]{return !m_OffscreenSurfaces.empty();});
+				pResult = m_OffscreenSurfaces.front();
+				m_OffscreenSurfaces.pop_front();
+			}
+			else if(!m_OffscreenSurfaces.empty()) {
+				pResult = m_OffscreenSurfaces.front();
+				m_OffscreenSurfaces.pop_front();
+			} else {
+				m_NumOffscreenSurfaces++;		
+				lock.unlock();
+
+				IDirect3DSurface9 * pOffscreenSurface = nullptr;
+				if (SUCCEEDED(pDevice->CreateOffscreenPlainSurface(
+					m_SurfaceDesc.Width, m_SurfaceDesc.Height,
+					m_SurfaceDesc.Format, D3DPOOL_SYSTEMMEM,
+					&pOffscreenSurface, NULL
+				))) {
+					pResult = new CImageBufferWrapper(this, pOffscreenSurface);
+					static_cast<CRefCountedThreadSafe *>(pResult)->AddRef(); // for ourselves
+				} else {
+					lock.lock();
+					m_NumOffscreenSurfaces--;
+				}			
+			}
+		}
+		if(pResult) {
+			static_cast<CRefCountedThreadSafe *>(pResult)->AddRef(); // for the caller
+			this->AddRef();
+		}
+		return pResult;
+	}
+
+	void ReturnOffscreen(class CImageBufferWrapper * pOffscreen) {
+		{
+			std::unique_lock<std::mutex> lock(m_OffscreenSurfacesMutex);
+			m_OffscreenSurfaces.push_back(pOffscreen);
+			m_OffscreenSurfacesCv.notify_one();
+		}
+		this->Release();
 	}
 
 	class CImageBufferWrapper
-		: public advancedfx::IImageBuffer {
+	: public CRefCountedThreadSafe
+	, public IAfxD3D9CaptureBuffer
+	, private advancedfx::IImageBufferThreadSafe{
 	public:
-		CImageBufferWrapper(const advancedfx::CImageFormat & imageFormat, const void * pData)
-			: m_ImageFormat(imageFormat)
-			, m_pData(pData)
+		CImageBufferWrapper(CAfxD3D9Capture * pCapture, IDirect3DSurface9* pOffscreenSurface)
+		: m_pCapture(pCapture)
+		, m_ImageFormat()
+		, m_pData(nullptr)
+		, m_LockedCount(0)
+		, m_pOffscreenSurface(pOffscreenSurface)
 		{
-
+			m_pOffscreenSurface->AddRef();
 		}
 
-		virtual const advancedfx::CImageFormat * GetImageBufferFormat() const {
-			return &m_ImageFormat;
+		virtual void IAfxD3D9CaptureBuffer::AddRef() override {
+			TRefCounted<true>::AddRef();
 		}
-		virtual const void * GetImageBufferData() const {
-			return m_pData;
+
+		virtual void IAfxD3D9CaptureBuffer::Release() override {
+			TRefCounted<true>::Release();
 		}
+
+	    virtual advancedfx::IImageBufferThreadSafe * IAfxD3D9CaptureBuffer::LockCpu() override {
+			static_cast<advancedfx::IImageBufferThreadSafe *>(this)->AddRef();
+			return this;
+		}
+
+		IDirect3DSurface9 * GetOffScreenSurfaceNoRef() {
+			return m_pOffscreenSurface;
+		}
+
+	protected:
+		virtual ~CImageBufferWrapper() {
+			m_pOffscreenSurface->Release();
+		}	
 
 	private:
+		CAfxD3D9Capture * m_pCapture;
 		advancedfx::CImageFormat m_ImageFormat;
 		const void * m_pData;
+		std::atomic_int m_LockedCount;
+		IDirect3DSurface9 * m_pOffscreenSurface = nullptr;
+
+		virtual void advancedfx::IImageBufferThreadSafe::AddRef() override {
+			TRefCounted<true>::AddRef();
+			if(0 == std::atomic_fetch_add_explicit(&m_LockedCount, 1, std::memory_order_relaxed)) {
+				// Buffer is about to be accessed the first time.
+				if(nullptr != m_pOffscreenSurface) {
+					D3DSURFACE_DESC desc;
+					D3DLOCKED_RECT lockedRect;
+
+					if(SUCCEEDED(m_pOffscreenSurface->GetDesc(&desc))
+						&& (desc.Format == D3DFMT_A8R8G8B8 || desc.Format == D3DFMT_R8G8B8 || desc.Format == D3DFMT_R32F)
+						&& desc.MultiSampleType == D3DMULTISAMPLE_NONE
+					) {	
+						if(SUCCEEDED(m_pOffscreenSurface->LockRect(&lockedRect,NULL,D3DLOCK_NO_DIRTY_UPDATE|D3DLOCK_READONLY))) {
+							advancedfx::CImageFormat imageFormat(
+								desc.Format == D3DFMT_A8R8G8B8 ? advancedfx::ImageFormat::BGRA : (desc.Format == D3DFMT_R8G8B8 ? advancedfx::ImageFormat::BGR : advancedfx::ImageFormat::ZFloat),
+								desc.Width,
+								desc.Height,
+								lockedRect.Pitch
+							);
+							imageFormat.SetOrigin(advancedfx::ImageOrigin::TopLeft);
+
+							m_ImageFormat = imageFormat;
+							m_pData =  lockedRect.pBits;
+						}
+					}
+				}
+			}
+		}
+
+		virtual void advancedfx::IImageBufferThreadSafe::Release() override {
+			if(1 == std::atomic_fetch_sub_explicit(&m_LockedCount, 1, std::memory_order_relaxed)) {
+				// Buffer is about to be accessed the last time.
+				if(nullptr != m_pOffscreenSurface) {
+					m_pOffscreenSurface->UnlockRect();
+					
+					m_ImageFormat = advancedfx::CImageFormat();
+					m_pData = nullptr;
+
+					m_pCapture->ReturnOffscreen(this);
+				}
+			}
+			TRefCounted<true>::Release();
+		}
+
+		virtual const advancedfx::CImageFormat * GetImageBufferFormat() const override {
+			return &m_ImageFormat;
+		}
+		virtual const void * GetImageBufferData() const override {
+			return m_pData;
+		}
 	};
 
-	int m_RefCount = 0;
 	IDirect3DSurface9 * m_pIntermediateSurface;
-	IDirect3DSurface9 * m_pOffscreenSurface;
-	CImageBufferWrapper * m_ImageBuffer;
+	D3DSURFACE_DESC m_SurfaceDesc;
+	int m_GpuRefCount = 0;
+
+	virtual void AfxD3D9OnRelease() override {
+		ReleaseIntermediate();
+	}
 };
+
+std::map<D3DSURFACE_DESC, std::pair<size_t, IDirect3DSurface9 *>, CAfxD3D9Capture::D3d9SurfaceDescCmp> CAfxD3D9Capture::m_IntermediateSurfaces;
 
 // NewDirect3DDevice9 //////////////////////////////////////////////////////////
 
@@ -2539,15 +2756,18 @@ private:
 
 	IDirect3DTexture9* r32fRenderTarget = nullptr;
 
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 	IDirect3DQuery9 * waitQuery = nullptr;
 #endif
+#endif //#ifndef _WIN64
 
 	std::set<IAfxD3D9OnRelease *> m_OnRelease;
 	std::recursive_mutex m_OnReleaseMutex;
 	unsigned int m_OnReleaseMutexCount = 0;
 	bool m_OnRleaseTrigger = false;
 
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 	void ReleaseQueries()
 	{
@@ -2561,7 +2781,9 @@ private:
 		}
 	}
 #endif
+#endif //#ifndef _WIN64
 
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 	void CreateQueries()
 	{
@@ -2572,6 +2794,7 @@ private:
 		}
 	}
 #endif
+#endif //#ifndef _WIN64
 
 	void TriggerAfxD3D9OnRelease() {
 		std::unique_lock<std::recursive_mutex> lock(m_OnReleaseMutex);
@@ -2696,9 +2919,11 @@ public:
 
 	void Init(D3DPRESENT_PARAMETERS* pPresentationParameters)
 	{
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 		CreateQueries();
 #endif
+#endif //#ifndef _WIN64
 
 		HookInitialBuffers();
 
@@ -2755,6 +2980,7 @@ public:
 		}
 	}
 
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 	void AfxWaitForGPU()
 	{
@@ -2767,6 +2993,7 @@ public:
 		}
 	}
 #endif
+#endif //#ifndef _WIN64
 
 	IDirect3DSurface9* AfxCreateCompatibleDepthStencilINTZTextureSurface(IDirect3DSurface9* depthStencil) {
 
@@ -3384,6 +3611,7 @@ private:
 
 	IDirect3DSurface9 * UnwrapSurface(IDirect3DSurface9 * surface)
 	{
+#ifndef _WIN64
 #if 0 && AFX_INTEROP
 		// TODO: handleRef.
 		if (AfxInterop::Enabled() && surface)
@@ -3404,6 +3632,8 @@ private:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
+
 		while (IDirect3DSurface9* result = AfxGetReplacementSurface(surface)) {
 			surface = result;
 		}
@@ -3414,6 +3644,7 @@ private:
 
 	IDirect3DSurface9 * UnwrapSurfaceReverse(IDirect3DSurface9 * surface)
 	{
+#ifndef _WIN64
 #if 0 && AFX_INTEROP
 		// TODO: handleRef.
 		if (AfxInterop::Enabled() && surface)
@@ -3448,6 +3679,7 @@ private:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		while (IDirect3DSurface9* result = AfxGetSourceSurface(surface)) {
 			result->AddRef();
@@ -3457,9 +3689,11 @@ private:
 
 		return surface;
 	}
+
 #if 0
 	IDirect3DBaseTexture9 * UnwrapTextureReverse(IDirect3DBaseTexture9 * pTexture, bool handleRef)
 	{
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 		if (AfxInterop::Enabled() && pTexture)
 		{
@@ -3507,11 +3741,13 @@ private:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 		return pTexture;
 	}
 
 	IDirect3DBaseTexture9 * UnwrapTexture(IDirect3DBaseTexture9 * pTexture)
 	{
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 		if (AfxInterop::Enabled() && pTexture)
 		{
@@ -3541,11 +3777,13 @@ private:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 		return pTexture;
 	}
 
 	IDirect3DVertexBuffer9 * UnwrapVertexBuffer(IDirect3DVertexBuffer9 * buffer)
 	{
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 		if (AfxInterop::Enabled() && buffer)
 		{
@@ -3559,11 +3797,13 @@ private:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 		return buffer;
 	}
 
 	IDirect3DVertexBuffer9 * UnwrapVertexBufferReverse(IDirect3DVertexBuffer9 * buffer, bool handleRef)
 	{
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 		if (AfxInterop::Enabled() && buffer)
 		{
@@ -3583,11 +3823,13 @@ private:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 		return buffer;
 	}
 
 	IDirect3DIndexBuffer9 * UnwrapIndexBuffer(IDirect3DIndexBuffer9 * buffer)
 	{
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 		if (AfxInterop::Enabled() && buffer)
 		{
@@ -3601,11 +3843,13 @@ private:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 		return buffer;
 	}
 
 	IDirect3DIndexBuffer9 * UnwrapIndexBufferReverse(IDirect3DIndexBuffer9 * buffer, bool handleRef)
 	{
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 		if (AfxInterop::Enabled() && buffer)
 		{
@@ -3625,6 +3869,7 @@ private:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 		return buffer;
 	}
 #endif
@@ -4399,7 +4644,7 @@ public:
 				{
 					if (m_Original_VertexShader) m_Original_VertexShader->Release();
 					m_Original_VertexShader = pShader;
-					if (m_Original_VertexShader) m_Original_VertexShader->AddRef();
+					// pShader alredy has AddRef from GetVertexShader.
 
 					g_OldDirect3DDevice9->SetVertexShader(curOverride.m_OverrideValue_VertexShader);
 				}
@@ -4408,7 +4653,7 @@ public:
 			{
 				if (m_Original_VertexShader) m_Original_VertexShader->Release();
 				m_Original_VertexShader = pShader;
-				if (m_Original_VertexShader) m_Original_VertexShader->AddRef();
+				// pShader alredy has AddRef from GetVertexShader.
 			}
 		}
 
@@ -4423,7 +4668,7 @@ public:
 				{
 					if (m_Original_PixelShader) m_Original_PixelShader->Release();
 					m_Original_PixelShader = pShader;
-					if (m_Original_PixelShader) m_Original_PixelShader->AddRef();
+					// pShader alredy has AddRef from GetPixelShader.
 
 					g_OldDirect3DDevice9->SetPixelShader(curOverride.m_OverrideValue_PixelShader);
 				}
@@ -4432,7 +4677,7 @@ public:
 			{
 				if (m_Original_PixelShader) m_Original_PixelShader->Release();
 				m_Original_PixelShader = pShader;
-				if (m_Original_PixelShader) m_Original_PixelShader->AddRef();
+				// pShader alredy has AddRef from GetPixelShader.
 			}
 		}
 
@@ -4489,21 +4734,9 @@ public:
 
 		if(0 == g_NewDirect3DDevice9_RefCount)
 		{
-			TriggerAfxD3D9OnRelease();
+			Afx_Reset_Before(nullptr, nullptr);
 
 			Shared_Direct3DDevice9_Shutdown();
-
-			if (NULL != m_CurrentState)
-			{
-				m_CurrentState->Release();
-				m_CurrentState = NULL;
-			}
-
-			if (NULL != m_InitialState)
-			{
-				m_InitialState->Release();
-				m_InitialState = NULL;
-			}
 
 			if(m_Original_VertexShader)
 			{
@@ -4557,9 +4790,11 @@ public:
         // Notify overlay before device reset
         advancedfx::overlay::Overlay::Get().OnDeviceLost();
 
+#ifndef _WIN64
 #ifdef AFX_MIRV_PGL
 		MirvPgl::D3D9_Reset();
 #endif
+#endif //#ifndef _WIN64
 
 		g_AfxStreams.DrawingThread_DeviceLost();
 
@@ -4586,6 +4821,7 @@ public:
 
 		TriggerAfxD3D9OnRelease();
 
+#ifndef _WIN64
 #if AFX_INTEROP
 		if (AfxInterop::Enabled())
 		{
@@ -4604,6 +4840,7 @@ public:
 			*/
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		if (trackedRenderTarget)
 		{
@@ -4622,6 +4859,7 @@ public:
 	{
 		if (SUCCEEDED(hResult))
 		{
+#ifndef _WIN64
 #if AFX_INTEROP
 			if (AfxInterop::Enabled())
 			{
@@ -4630,6 +4868,7 @@ public:
 				AfxInterop::DrawingThread_DeviceRestored();
 			}
 #endif
+#endif //#ifndef _WIN64
 			HookInitialBuffers();
 
 			if (NULL != m_InitialState)
@@ -4697,9 +4936,11 @@ public:
 	{
 		AfxHookSource::Gui::On_Direct3DDevice9_Present(hResult == D3DERR_DEVICELOST);
 
+#ifndef _WIN64
 #ifdef AFX_MIRV_PGL
 		MirvPgl::DrawingThread_UnleashData();
 #endif
+#endif //#ifndef _WIN64
 	}
 
     STDMETHOD(Present)(THIS_ CONST RECT* pSourceRect,CONST RECT* pDestRect,HWND hDestWindowOverride,CONST RGNDATA* pDirtyRegion)
@@ -4740,6 +4981,7 @@ public:
 /*/
 	STDMETHOD(CreateTexture)(THIS_ UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DTexture9** ppTexture, HANDLE* pSharedHandle)
 	{
+#ifndef _WIN64
 #if AFX_INTEROP
 		if (AfxInterop::Enabled())
 		{
@@ -4765,6 +5007,7 @@ public:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		return g_OldDirect3DDevice9->CreateTexture(Width, Height, Levels, Usage, Format, Pool, ppTexture, pSharedHandle);
 	}
@@ -4774,6 +5017,7 @@ public:
 	/*
 	STDMETHOD(CreateVolumeTexture)(THIS_ UINT Width, UINT Height, UINT Depth, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DVolumeTexture9** ppVolumeTexture, HANDLE* pSharedHandle)
 	{
+#ifndef _WIN64
 #if AFX_INTEROP
 		if (AfxInterop::Enabled())
 		{
@@ -4799,6 +5043,7 @@ public:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		return g_OldDirect3DDevice9->CreateVolumeTexture(Width, Height, Depth, Levels, Usage, Format, Pool, ppVolumeTexture, pSharedHandle);
 	}
@@ -4808,6 +5053,7 @@ public:
 	/*
 	STDMETHOD(CreateCubeTexture)(THIS_ UINT EdgeLength, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DCubeTexture9** ppCubeTexture, HANDLE* pSharedHandle)
 	{
+#ifndef _WIN64
 #if AFX_INTEROP
 		if (AfxInterop::Enabled())
 		{
@@ -4833,7 +5079,7 @@ public:
 			}
 		}
 #endif
-
+#endif //#ifndef _WIN64
 		return g_OldDirect3DDevice9->CreateCubeTexture(EdgeLength, Levels, Usage, Format, Pool, ppCubeTexture, pSharedHandle);
 	}
 	*/
@@ -4842,6 +5088,7 @@ public:
 	/*
 	STDMETHOD(CreateVertexBuffer)(THIS_ UINT Length, DWORD Usage, DWORD FVF, D3DPOOL Pool, IDirect3DVertexBuffer9** ppVertexBuffer, HANDLE* pSharedHandle)
 	{
+#ifndef _WIN64
 #if AFX_INTEROP
 		if (AfxInterop::Enabled())
 		{
@@ -4867,6 +5114,7 @@ public:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		return g_OldDirect3DDevice9->CreateVertexBuffer(Length, Usage, FVF, Pool, ppVertexBuffer, pSharedHandle);
 	}
@@ -4876,6 +5124,7 @@ public:
 	/*
 	STDMETHOD(CreateIndexBuffer)(THIS_ UINT Length, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DIndexBuffer9** ppIndexBuffer, HANDLE* pSharedHandle)
 	{
+#ifndef _WIN64
 #if AFX_INTEROP
 		if (AfxInterop::Enabled())
 		{
@@ -4901,6 +5150,7 @@ public:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		return g_OldDirect3DDevice9->CreateIndexBuffer(Length, Usage, Format, Pool, ppIndexBuffer, pSharedHandle);
 	}
@@ -4961,6 +5211,7 @@ public:
 	/*
 	STDMETHOD(CreateOffscreenPlainSurface)(THIS_ UINT Width, UINT Height, D3DFORMAT Format, D3DPOOL Pool, IDirect3DSurface9** ppSurface, HANDLE* pSharedHandle)
 	{
+#ifndef _WIN64
 #if AFX_INTEROP
 		if (AfxInterop::Enabled())
 		{
@@ -4986,6 +5237,7 @@ public:
 			}
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		return g_OldDirect3DDevice9->CreateOffscreenPlainSurface(Width, Height, Format, Pool, ppSurface, pSharedHandle);
 	}
@@ -5362,12 +5614,14 @@ public:
 	/*
 	STDMETHOD(SetTexture)(THIS_ DWORD Stage, IDirect3DBaseTexture9* pTexture)
 	{
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 		if (AfxInterop::Enabled() && pTexture)
 		{
 			pTexture = UnwrapTexture(pTexture);
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		return g_OldDirect3DDevice9->SetTexture(Stage, pTexture);
 	}
@@ -6001,6 +6255,7 @@ struct NewDirect3D9
 	
 	STDMETHOD(CheckDeviceMultiSampleType)(THIS_ UINT Adapter, D3DDEVTYPE DeviceType, D3DFORMAT SurfaceFormat, BOOL Windowed, D3DMULTISAMPLE_TYPE MultiSampleType, DWORD* pQualityLevels)
 	{
+#ifndef _WIN64
 #if AFX_INTEROP
 		if (AfxInterop::MainEnabled())
 		{
@@ -6010,6 +6265,7 @@ struct NewDirect3D9
 				return D3DERR_NOTAVAILABLE;
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		return g_OldDirect3D9->CheckDeviceMultiSampleType(Adapter, DeviceType, SurfaceFormat, Windowed, MultiSampleType, pQualityLevels);
 	}
@@ -6036,6 +6292,7 @@ struct NewDirect3D9
 			&& SUCCEEDED(g_OldDirect3D9->GetAdapterDisplayMode(Adapter, &displayMode))
 			&& SUCCEEDED(g_OldDirect3D9->CheckDeviceFormat(Adapter, DeviceType, displayMode.Format, D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_TEXTURE, FOURCC_INTZ));
 
+#ifndef _WIN64
 #if AFX_INTEROP
 		if (AfxInterop::Enabled() && g_OldDirect3D9Ex && pPresentationParameters)
 		{
@@ -6075,6 +6332,7 @@ struct NewDirect3D9
 		else
 		{
 #endif
+#endif //#ifndef _WIN64
 			hRet = g_OldDirect3D9->CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters ? pPresentationParameters : pPresentationParameters, ppReturnedDeviceInterface);
 
 			if (SUCCEEDED(hRet) && pPresentationParameters && ppReturnedDeviceInterface)
@@ -6087,9 +6345,11 @@ struct NewDirect3D9
 
 				Shared_Direct3DDevice9_Init(Adapter, pPresentationParameters->hDeviceWindow ? pPresentationParameters->hDeviceWindow : hFocusWindow, g_OldDirect3DDevice9);
 			}
+#ifndef _WIN64
 #if AFX_INTEROP
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		return hRet;
 	}
@@ -6113,6 +6373,7 @@ struct NewDirect3D9
 			&& SUCCEEDED(g_OldDirect3D9->GetAdapterDisplayMode(Adapter, &displayMode))
 			&& SUCCEEDED(g_OldDirect3D9->CheckDeviceFormat(Adapter, DeviceType, displayMode.Format, D3DUSAGE_DEPTHSTENCIL, D3DRTYPE_TEXTURE, FOURCC_INTZ));
 
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 		if (AfxInterop::MainEnabled() && pPresentationParameters)
 		{
@@ -6138,6 +6399,7 @@ struct NewDirect3D9
 		else
 		{
 #endif
+#endif //#ifndef _WIN64
 			hRet = g_OldDirect3D9Ex->CreateDeviceEx(Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPresentationParameters, pFullscreenDisplayMode, ppReturnedDeviceInterface);
 
 			if (SUCCEEDED(hRet) && pPresentationParameters && ppReturnedDeviceInterface)
@@ -6153,9 +6415,11 @@ struct NewDirect3D9
 			}
 			else
 				return D3DERR_NOTAVAILABLE;
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 		}
 #endif
+#endif //#ifndef _WIN64
 
 		return hRet;
 	}
@@ -6191,7 +6455,7 @@ IDirect3D9 * WINAPI new_Direct3DCreate9(UINT SDKVersion)
 {
 	if(D3D_SDK_VERSION == SDKVersion)
 	{
-#if 0 && AFX_INTEROP
+#if 0 && !_WIN64 && AFX_INTEROP
 		if (AfxInterop::Enabled())
 		{
 			IDirect3D9Ex * device = NULL;
@@ -6573,6 +6837,7 @@ void AfxD3D9_EndOwnRender()
 	}
 }
 
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 void AfxD3D_WaitForGPU()
 {
@@ -6581,13 +6846,16 @@ void AfxD3D_WaitForGPU()
 	g_NewDirect3DDevice9.AfxWaitForGPU();
 }
 #endif
+#endif //#ifndef _WIN64
 
 bool AfxD3d9_DrawDepthSupported(void)
 {
+#ifndef _WIN64
 #ifdef AFX_INTEROP
 	if (AfxInterop::MainEnabled())
 		return false;
 #endif
+#endif //#ifndef _WIN64
 
 	return g_OldDirect3DDevice9 && g_bSupportsIntz;
 }

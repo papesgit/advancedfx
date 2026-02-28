@@ -2,28 +2,40 @@
 
 #include "AfxStreams.h"
 
-#include "SourceInterfaces.h"
+#include <SourceInterfaces.h>
 #include "WrpVEngineClient.h"
+
+
+#ifndef _WIN64
 #include "csgo_CSkyBoxView.h"
 #include "csgo_view.h"
 #include "csgo_CViewRender.h"
+#endif //#ifndef _WIN64
+
 #include "RenderView.h"
 #include "ClientTools.h"
 #include "d3d9Hooks.h"
 #include "D3D9ImageBuffer.h"
+
+#ifndef _WIN64
 #include "csgo_GlowOverlay.h"
 #include "MirvPgl.h"
 #include "AfxInterop.h"
 #include "csgo_Audio.h"
 #include "mirv_voice.h"
+#endif //#ifndef _WIN64
+
 #include "addresses.h"
+
+#ifndef _WIN64
 #include "MirvTime.h"
-#include "SourceInterfaces.h"
 //#include "csgo/hooks/c_basentity.h"
 //#include "csgo/hooks/c_baseanimating.h"
 //#include "csgo/hooks/c_basecombatweapon.h"
 //#include "csgo/hooks/staticpropmgr.h"
 #include "csgo/ClientToolsCsgo.h"
+#endif //#ifndef _WIN64
+
 #include "ReShadeAdvancedfx.h"
 #include "MirvQueueCmd.h"
 
@@ -47,10 +59,15 @@
 #undef min
 #undef max
 
+
+#ifndef _WIN64
+
 //#define CAFXBASEFXSTREAM_STREAMCOMBINETYPES "aRedAsAlphaBColor|aColorBRedAsAlpha|aHudWhiteBHudBlack"
 #define CAFXBASEFXSTREAM_STREAMCOMBINETYPES "aRedAsAlphaBColor|aColorBRedAsAlpha"
 #define CAFXBASEFXSTREAM_STREAMCAPTURETYPES "normal|depth24|depth24ZIP|depthF|depthFZIP"
 #define CAFXSTREAMS_ACTIONSUFFIX " <actionName> - Set action with name <actionName> (see mirv_streams actions)."
+
+#endif //#ifndef _WIN64
 
 
 #if AFXSTREAMS_REFTRACKER
@@ -79,6 +96,9 @@ int AfxStreams_RefTracker_Get(void)
 extern advancedfx::CCommandLine  * g_CommandLine;
 
 extern WrpVEngineClient * g_VEngineClient;
+
+
+#ifndef _WIN64
 extern SOURCESDK::IMaterialSystem_csgo * g_MaterialSystem_csgo;
 extern SOURCESDK::IVRenderView_csgo * g_pVRenderView_csgo;
 extern SOURCESDK::CSGO::IVModelInfoClient* g_pModelInfo;
@@ -92,12 +112,15 @@ IAfxMatRenderContext * GetCurrentContext()
 
 	return MatRenderContextHook(g_MaterialSystem_csgo);
 }
+#endif //#ifndef _WIN64
 
-advancedfx::CImageBufferPoolThreadSafe g_ImageBufferPoolThreadSafe;
+
+advancedfx::CGrowingBufferPoolThreadSafe g_ImageBufferPoolThreadSafe;
 CAfxStreams g_AfxStreams;
 
+extern class advancedfx::CThreadPool* g_pThreadPool;
 
-int GetMaterialSystemThread() {
+/*int GetMaterialSystemThread() {
 	static bool bRun = false;
 	static int iFirstResult = 0;
 
@@ -105,13 +128,14 @@ int GetMaterialSystemThread() {
 	iFirstResult = g_CommandLine->FindParam(L"-swapcores") ? 1 : 0;
 	bRun = true;
 	return iFirstResult;
-}
+}*/
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class CCaptureNode::CGpuLockQueue CCaptureNode::s_GpuLockQueue;
 class CCaptureNode::CGpuReleaseQueue CCaptureNode::s_GpuReleaseQueue;
 
+
+#ifndef _WIN64
 std::map<SOURCESDK::matrix3x4_t *, CEntityMetaRef> g_DrawingThread_BonesPtr_To_Meta;
 
 std::set<CAfxRenderViewStream *> m_DrawingThread_NotifyStreams;
@@ -303,6 +327,9 @@ bool csgo_CModelRenderSystem_SetupBones_Install(void)
 	return firstResult;
 }
 
+#endif //#ifndef _WIN64
+
+
 ////////////////////////////////////////////////////////////////////////////////
 
 bool AfxOverrideable_FromConsole(const char * arg, CAfxBoolOverrideable & outValue)
@@ -478,6 +505,9 @@ void DebugDepthFixDraw(IMesh_csgo * pMesh)
 	pMesh->Draw();
 }
 */
+
+
+#ifndef _WIN64
 
 void QueueOrExecute(IAfxMatRenderContextOrg * ctx, SOURCESDK::CSGO::CFunctor * functor)
 {
@@ -658,6 +688,10 @@ private:
 
 #endif
 
+#endif //#ifndef _WIN64
+
+
+#ifndef _WIN64
 
 // CAfxRenderViewStream ////////////////////////////////////////////////////////
 
@@ -723,10 +757,6 @@ void CAfxRenderViewStream::StreamCaptureType_set(StreamCaptureType value)
 {
 	m_StreamCaptureType = value;
 }
-
-extern class advancedfx::CThreadPool* g_pThreadPool;
-
-
 
 /*
 void CAfxRenderViewStream::Console_DisableFastPathRequired()
@@ -854,14 +884,14 @@ void CAfxRecordStream::DoCaptureStart(IAfxMatRenderContextOrg * ctx, const AfxVi
 	m_FirstCapture = false;
 }
 
-void CAfxRecordStream::OnImageBufferCaptured(size_t index, class advancedfx::ICapture* buffer)
+void CAfxRecordStream::OnCapture(size_t index, IAfxD3D9CaptureBuffer* capture)
 {
-	if (buffer) buffer->AddRef();
+	if (capture) capture->AddRef();
 	std::unique_lock<std::mutex> lock(m_ProcessingThreadMutex);
 	if(index == 0) {
-		m_In.push_back(new CBuffers(m_Streams.size()));
+		m_In.push_back(new CCaptures(m_Streams.size()));
 	}
-	(*m_In.rbegin())->SetAt(index, buffer);
+	(*m_In.rbegin())->SetAt(index, capture);
 	if (index + 1  >= m_Streams.size()) {
 		m_ProcessingThreadCv.notify_one();
 	}
@@ -958,6 +988,14 @@ bool CAfxRecordStream::GetStreamFolder(std::wstring& outFolder) const {
 	}
 }
 
+advancedfx::CGrowingBufferPoolThreadSafe * CAfxRecordStream::GetImageBufferPool() const {
+	return g_AfxStreams.GetImageBufferPool();
+}
+
+bool CAfxRecordStream::GetFormatBmpNotTga() const {
+	return g_AfxStreams.GetFormatBmpNotTga();
+}
+
 // CAfxSingleStream ////////////////////////////////////////////////////////////
 
 CAfxSingleStream::CAfxSingleStream(char const * streamName, CAfxRenderViewStream * stream)
@@ -989,9 +1027,8 @@ void CAfxSingleStream::CaptureStart(bool bFirstCapture, const AfxViewportData_t&
 
 void CAfxSingleStream::CaptureEnd()
 {
-	advancedfx::ICapture * capture = m_Task->GetAt(0);
-
-	if (capture)
+	advancedfx::IImageBufferThreadSafe * buffer = CaptureToBuffer( m_Task->GetAt(0) );
+	if (buffer)
 	{
 		advancedfx::StreamCaptureType streamCaptureType = m_Streams[0]->StreamCaptureType_get();
 
@@ -1004,9 +1041,9 @@ void CAfxSingleStream::CaptureEnd()
 				depthOfs = baseFx->DepthVal_get();
 			}
 
-			advancedfx::ICapture* outCapture = advancedfx::ImageTransformer::DepthF(g_pThreadPool, &g_ImageBufferPoolThreadSafe, capture, depthScale, depthOfs);
-			if (capture) capture->Release();
-			capture = outCapture;
+			advancedfx::IImageBufferThreadSafe* outBuffer = advancedfx::ImageTransformer::DepthF(g_pThreadPool, &g_ImageBufferPoolThreadSafe, buffer, depthScale, depthOfs);
+			if (buffer) buffer->Release();
+			buffer = outBuffer;
 		}
 		else if (StreamCaptureType::Depth24 == streamCaptureType || StreamCaptureType::Depth24ZIP == streamCaptureType) {
 			float depthScale = 1.0f;
@@ -1017,48 +1054,41 @@ void CAfxSingleStream::CaptureEnd()
 				depthOfs = baseFx->DepthVal_get();
 			}
 
-			advancedfx::ICapture* outCapture =advancedfx::ImageTransformer::Depth24(g_pThreadPool, &g_ImageBufferPoolThreadSafe, capture, depthScale, depthOfs);
-			if (capture) capture->Release();
-			capture = outCapture;
+			advancedfx::IImageBufferThreadSafe* outBuffer =advancedfx::ImageTransformer::Depth24(g_pThreadPool, &g_ImageBufferPoolThreadSafe, buffer, depthScale, depthOfs);
+			if (buffer) buffer->Release();
+			buffer = outBuffer;
 		}
 		else {
-			advancedfx::ICapture* outCapture = advancedfx::ImageTransformer::StripAlpha(g_pThreadPool,&g_ImageBufferPoolThreadSafe,capture);
-			if (capture) capture->Release();
-			capture = outCapture;
+			advancedfx::IImageBufferThreadSafe* outBuffer = advancedfx::ImageTransformer::StripAlpha(g_pThreadPool,&g_ImageBufferPoolThreadSafe,buffer);
+			if (buffer) buffer->Release();
+			buffer = outBuffer;
 		}
 
-		if (capture) {
-			if (const advancedfx::IImageBuffer* buffer = capture->GetBuffer()) {
-
+		if (buffer) {
+			if (nullptr == m_OutVideoStream)
+			{
+				//TODO: This is currently safe due to mutexes and locks elsewhere, but not nice:
+				m_OutVideoStream = m_Settings->CreateOutVideoStreamCreator(g_AfxStreams, *this, g_AfxStreams.GetStartHostFrameRate(), "")->CreateOutVideoStream(*buffer->GetImageBufferFormat());
 				if (nullptr == m_OutVideoStream)
 				{
-					//TODO: This is currently safe due to mutexes and locks elsewhere, but not nice:
-					m_OutVideoStream = m_Settings->CreateOutVideoStreamCreator(g_AfxStreams, *this, g_AfxStreams.GetStartHostFrameRate(), "")->CreateOutVideoStream(*buffer->GetImageBufferFormat());
-					if (nullptr == m_OutVideoStream)
-					{
-						Tier0_Warning("AFXERROR: Failed to create image stream for %s.\n", this->StreamName_get());
-					}
-					else
-					{
-						m_OutVideoStream->AddRef();
-					}
-				}
-
-				if (nullptr != m_OutVideoStream && !m_OutVideoStream->SupplyImageBuffer(buffer))
-				{
-					Tier0_Warning("AFXERROR: Failed writing image for stream %s.\n", this->StreamName_get());
+					Tier0_Warning("AFXERROR: Failed to create image stream for %s.\n", this->StreamName_get());
 				}
 			}
-			else {
-				Tier0_Warning("AFXERROR: Could not get capture buffer for stream %s.\n", this->StreamName_get());
-			}	
 
-			capture->Release();
+			if (nullptr != m_OutVideoStream && !m_OutVideoStream->SupplyImageBuffer(this, buffer))
+			{
+				Tier0_Warning("AFXERROR: Failed writing image for stream %s.\n", this->StreamName_get());
+			}
+
+			buffer->Release();
 		}
 		else {
-			Tier0_Warning("AFXERROR: Captured image transform failed for stream %s.\n", this->StreamName_get());
-		}
+			Tier0_Warning("AFXERROR: Could not transform buffer for stream %s.\n", this->StreamName_get());
+		}	
 	}
+	else {
+		Tier0_Warning("AFXERROR: No buffer captured for stream %s.\n", this->StreamName_get());
+	}	
 
 	CAfxRecordStream::CaptureEnd();
 }
@@ -1137,50 +1167,40 @@ void CAfxTwinStream::CaptureStart(bool bFirstCapture, const AfxViewportData_t& v
 
 void CAfxTwinStream::CaptureEnd()
 {
-	advancedfx::ICapture * captureA = m_Task->GetAt(0);
-	ICapture * captureB = m_Task->GetAt(1);
+	advancedfx::IImageBufferThreadSafe * bufferA =CaptureToBuffer( m_Task->GetAt(0) );
+	IImageBufferThreadSafe * bufferB =CaptureToBuffer( m_Task->GetAt(1) );
 
-	advancedfx::ICapture* outCapture = nullptr;
+	advancedfx::IImageBufferThreadSafe* outBuffer = nullptr;
 
 	if (CAfxTwinStream::SCT_ARedAsAlphaBColor == m_StreamCombineType)
 	{
-		outCapture = advancedfx::ImageTransformer::AColorBRedAsAlpha(g_pThreadPool,&g_ImageBufferPoolThreadSafe,captureB, captureA);
+		outBuffer = advancedfx::ImageTransformer::AColorBRedAsAlpha(g_pThreadPool,&g_ImageBufferPoolThreadSafe,bufferB, bufferA);
 	}
 	else if (CAfxTwinStream::SCT_AColorBRedAsAlpha == m_StreamCombineType)
 	{
-		outCapture = advancedfx::ImageTransformer::AColorBRedAsAlpha(g_pThreadPool,&g_ImageBufferPoolThreadSafe,captureA, captureB);
+		outBuffer = advancedfx::ImageTransformer::AColorBRedAsAlpha(g_pThreadPool,&g_ImageBufferPoolThreadSafe,bufferA, bufferB);
 	}
 
-	if (captureA) captureA->Release();
-	if (captureB) captureB->Release();
+	if (bufferA) bufferA->Release();
+	if (bufferB) bufferB->Release();
 
-	if (outCapture) {
-		if (const advancedfx::IImageBuffer* buffer = outCapture->GetBuffer()) {
-
+	if (outBuffer) {
+		if (nullptr == m_OutVideoStream)
+		{
+			//TODO: This is currently safe due to mutexes and locks elsewhere, but not nice:
+			m_OutVideoStream = m_Settings->CreateOutVideoStreamCreator(g_AfxStreams, *this, g_AfxStreams.GetStartHostFrameRate(), "")->CreateOutVideoStream(*outBuffer->GetImageBufferFormat());
 			if (nullptr == m_OutVideoStream)
 			{
-				//TODO: This is currently safe due to mutexes and locks elsewhere, but not nice:
-				m_OutVideoStream = m_Settings->CreateOutVideoStreamCreator(g_AfxStreams, *this, g_AfxStreams.GetStartHostFrameRate(), "")->CreateOutVideoStream(*buffer->GetImageBufferFormat());
-				if (nullptr == m_OutVideoStream)
-				{
-					Tier0_Warning("AFXERROR: Failed to create image stream for %s.\n", this->StreamName_get());
-				}
-				else
-				{
-					m_OutVideoStream->AddRef();
-				}
-			}
-
-			if (nullptr != m_OutVideoStream && !m_OutVideoStream->SupplyImageBuffer(buffer))
-			{
-				Tier0_Warning("AFXERROR: Failed writing image for stream %s.\n", this->StreamName_get());
+				Tier0_Warning("AFXERROR: Failed to create image stream for %s.\n", this->StreamName_get());
 			}
 		}
-		else {
-			Tier0_Warning("AFXERROR: Could not get capture buffer for stream %s.\n", this->StreamName_get());
+
+		if (nullptr != m_OutVideoStream && !m_OutVideoStream->SupplyImageBuffer(this, outBuffer))
+		{
+			Tier0_Warning("AFXERROR: Failed writing image for stream %s.\n", this->StreamName_get());
 		}
 
-		outCapture->Release();
+		outBuffer->Release();
 	}
 	else {
 		Tier0_Warning("CAfxTwinStream::CaptureEnd: Combining sub-streams for stream %s, failed.\n", this->StreamName_get());
@@ -1430,42 +1450,31 @@ void CAfxMatteStream::CaptureStart(bool bFirstCapture, const AfxViewportData_t& 
 
 void CAfxMatteStream::CaptureEnd()
 {
-	advancedfx::ICapture * captureA = m_Task->GetAt(0);
-	advancedfx::ICapture * captureB = m_Task->GetAt(1);
+	advancedfx::IImageBufferThreadSafe * bufferA = CaptureToBuffer( m_Task->GetAt(0) );
+	advancedfx::IImageBufferThreadSafe * bufferB = CaptureToBuffer( m_Task->GetAt(1) );
 
-	advancedfx::ICapture* outCapture = advancedfx::ImageTransformer::Matte(g_pThreadPool,&g_ImageBufferPoolThreadSafe,captureA, captureB);
+	advancedfx::IImageBufferThreadSafe* outBuffer = advancedfx::ImageTransformer::Matte(g_pThreadPool,&g_ImageBufferPoolThreadSafe,bufferA, bufferB);
 
-	if (captureA) captureA->Release();
-	if (captureB) captureB->Release();
+	if (bufferA) bufferA->Release();
+	if (bufferB) bufferB->Release();
 
-	if(outCapture) {
-		if (const advancedfx::IImageBuffer* buffer = outCapture->GetBuffer()) {
-
+	if(outBuffer) {
+		if (nullptr == m_OutVideoStream)
+		{
+			//TODO: This is currently safe due to mutexes and locks elsewhere, but not nice:
+			m_OutVideoStream = m_Settings->CreateOutVideoStreamCreator(g_AfxStreams, *this, g_AfxStreams.GetStartHostFrameRate(), "")->CreateOutVideoStream(*outBuffer->GetImageBufferFormat());
 			if (nullptr == m_OutVideoStream)
 			{
-				//TODO: This is currently safe due to mutexes and locks elsewhere, but not nice:
-				m_OutVideoStream = m_Settings->CreateOutVideoStreamCreator(g_AfxStreams, *this, g_AfxStreams.GetStartHostFrameRate(), "")->CreateOutVideoStream(*buffer->GetImageBufferFormat());
-				if (nullptr == m_OutVideoStream)
-				{
-					Tier0_Warning("AFXERROR: Failed to create image stream for %s.\n", this->StreamName_get());
-				}
-				else
-				{
-					m_OutVideoStream->AddRef();
-				}
-			}
-
-			if (nullptr != m_OutVideoStream && !m_OutVideoStream->SupplyImageBuffer(buffer))
-			{
-				Tier0_Warning("AFXERROR: Failed writing image for stream %s.\n", this->StreamName_get());
+				Tier0_Warning("AFXERROR: Failed to create image stream for %s.\n", this->StreamName_get());
 			}
 		}
-		else {
-			Tier0_Warning("AFXERROR: Could not get capture buffer for stream %s.\n", this->StreamName_get());
+
+		if (nullptr != m_OutVideoStream && !m_OutVideoStream->SupplyImageBuffer(this, outBuffer))
+		{
+			Tier0_Warning("AFXERROR: Failed writing image for stream %s.\n", this->StreamName_get());
 		}
 
-		outCapture->Release();
-
+		outBuffer->Release();
 	} else {
 		Tier0_Warning("CAfxMatteStream::CaptureEnd: Combining sub-streams for stream %s, failed.\n", this->StreamName_get());
 	}
@@ -5852,21 +5861,26 @@ CAfxStreamsCaptureOutput::~CAfxStreamsCaptureOutput() {
 	m_Target->Release();
 }
 
-void CAfxStreamsCaptureOutput::OnCapture(class advancedfx::ICapture* capture) {
-	m_Target->OnImageBufferCaptured(m_StreamIndex, capture);
+void CAfxStreamsCaptureOutput::OnCapture(IAfxD3D9CaptureBuffer* capture) {
+	m_Target->OnCapture(m_StreamIndex, capture);
 }
+
+
+#endif //#ifndef _WIN64
 
 
 // CAfxStreams /////////////////////////////////////////////////////////////////
 
 CAfxStreams::CAfxStreams()
 : m_RecordName("untitled_rec")
-, m_PresentRecordOnScreen(false)
 , m_StartMovieWav(true)
+#ifndef _WIN64
+, m_AfxBaseClientDll(0)
+, m_PresentRecordOnScreen(false)
 , m_RecordVoices(false)
 , m_MaterialSystem(0)
-, m_AfxBaseClientDll(0)
 , m_ShaderShadow(0)
+#endif //#ifndef _WIN64
 , m_Recording(false)
 , m_FormatBmpAndNotTga(false)
 , m_View_Render_ThreadId(0)
@@ -5882,17 +5896,23 @@ CAfxStreams::~CAfxStreams()
 	ShutDown();
 }
 
+
+#ifndef _WIN64
 void CAfxStreams::OnClientEntityCreated(SOURCESDK::C_BaseEntity_csgo* ent) {
 }
 
 void CAfxStreams::OnClientEntityDeleted(SOURCESDK::C_BaseEntity_csgo* ent) {
 	QueueOrExecute(GetCurrentContext()->GetOrg(), new CAfxLeafExecute_Functor(new CAfxDeleteEntityMetaFunctor(ent->GetIClientUnknown())));
 }
+#endif //#ifndef _WIN64
+
 
 bool CAfxStreams::OnEngineThread() {
 	return GetCurrentThreadId() == m_View_Render_ThreadId;
 }
 
+
+#ifndef _WIN64
 bool CAfxStreams::IsQueuedThreaded() {
 	return nullptr != m_MaterialSystem && (m_MaterialSystem->GetThreadMode() == SOURCESDK::CSGO::MATERIAL_QUEUED_THREADED);
 }
@@ -5907,6 +5927,8 @@ void CAfxStreams::OnMaterialSystem(SOURCESDK::IMaterialSystem_csgo * value)
 
 	CreateRenderTargets(value);
 }
+#endif //#ifndef _WIN64
+
 
 void CAfxStreams::Set_View_Render_ThreadId(DWORD id)
 {
@@ -5919,6 +5941,8 @@ DWORD CAfxStreams::Get_View_Render_ThreadId()
 }
 
 
+#ifndef _WIN64
+
 void CAfxStreams::OnAfxBaseClientDll(IAfxBaseClientDll * value)
 {
 	m_AfxBaseClientDll = value;
@@ -5928,28 +5952,26 @@ void CAfxStreams::OnAfxBaseClientDll(IAfxBaseClientDll * value)
 	}
 }
 
+/*
 void CAfxStreams::OnAfxBaseClientDll_Free(void)
 {
-	/*
 	if(m_RenderTargetDepthF)
 	{
 		m_RenderTargetDepthF->DecrementReferenceCount();
 		m_RenderTargetDepthF = 0;
 	}
-	*/
-	/*
 	if(m_RgbaRenderTarget)
 	{
 		m_RgbaRenderTarget->DecrementReferenceCount();
 		m_RgbaRenderTarget = 0;
-	}*/
-
+	}
 	if(m_AfxBaseClientDll)
 	{
 		m_AfxBaseClientDll->OnView_Render_set(0);
 		m_AfxBaseClientDll = 0;
 	}
 }
+	*/
 
 void CAfxStreams::OnShaderShadow(SOURCESDK::IShaderShadow_csgo * value)
 {
@@ -6299,24 +6321,6 @@ void CAfxStreams::CalcMainStream()
 	}
 }
 
-class CCaptureNodeGpuQueuesExecution
-	: public CAfxFunctor
-{
-public:
-	virtual void operator()() {
-		CCaptureNode::GpuExecuteLockQueue();
-	}
-};
-
-void QueueCaptureGpuQueuesExecution(bool bShutdown) {
-	if (bShutdown) {
-		CCaptureNode::GpuExecuteLockQueue();
-	}
-	else {
-		QueueOrExecute(GetCurrentContext()->GetOrg(), new CAfxLeafExecute_Functor(new class CCaptureNodeGpuQueuesExecution()));
-	}
-}
-
 class CCaptureNodeGpuQueuesRelease
 	: public CAfxFunctor
 {
@@ -6360,7 +6364,6 @@ public:
 void QueuePopRenderTarget() {
 	QueueOrExecute(GetCurrentContext()->GetOrg(), new CAfxLeafExecute_Functor(new class CPopRenderTargetFunctor()));
 }
-
 
 IAfxMatRenderContextOrg* CAfxStreams::CommitDrawingContext(IAfxMatRenderContextOrg* context, bool blockPresent) {
 	if (blockPresent)
@@ -6578,10 +6581,6 @@ void CAfxStreams::OnRenderView(CCSViewRender_RenderView_t fn, void* This, void* 
 		DoRenderView(fn, This, Edx, view, hudViewSetup, nClearFlags, whatToDraw);
 	}
 
-	if(m_Recording) {
-		QueueCaptureGpuQueuesExecution(false);
-	}
-
 	if (m_PresentBlocked)
 	{
 		BlockPresent(ctxp, false);
@@ -6762,6 +6761,9 @@ void CAfxStreams::OnDrawingSkyBoxViewEnd(void)
 
 }
 
+#endif //#ifndef _WIN64
+
+
 void CAfxStreams::Console_RecordName_set(const char * value)
 {
 	m_RecordName.assign(value);
@@ -6771,6 +6773,9 @@ const char * CAfxStreams::Console_RecordName_get()
 {
 	return m_RecordName.c_str();
 }
+
+
+#ifndef _WIN64
 
 void CAfxStreams::Console_PresentRecordOnScreen_set(bool value)
 {
@@ -6792,6 +6797,8 @@ bool CAfxStreams::Console_PreviewSuspend_get()
 	return m_SuspendPreview;
 }
 
+#endif //#ifndef _WIN64
+
 
 void CAfxStreams::Console_StartMovieWav_set(bool value)
 {
@@ -6802,6 +6809,9 @@ bool CAfxStreams::Console_StartMovieWav_get()
 {
 	return m_StartMovieWav;
 }
+
+
+#ifndef _WIN64
 
 void CAfxStreams::Console_RecordVoices_set(bool value)
 {
@@ -6853,6 +6863,9 @@ float CAfxStreams::Console_MatForceTonemapScale_get()
 	return m_NewMatForceTonemapScale;
 }
 
+#endif //#ifndef _WIN64
+
+
 void CAfxStreams::Console_RecordFormat_set(const char * value)
 {
 	if(!_stricmp(value, "bmp"))
@@ -6876,9 +6889,13 @@ void CAfxStreams::Console_Record_Start()
 
 	Tier0_Msg("Starting recording ... ");
 
+#ifndef _WIN64
 	if (g_SourceSdkVer == SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer) {
 		Console_Record_Start2();
-	} else {
+	}
+	else
+#endif //#ifndef _WIN64
+	{
 		MirvQueueCmd([this]{this->Console_Record_Start2();});
 	}
 }
@@ -6896,10 +6913,12 @@ void CAfxStreams::Console_Record_Start2()
 		std::string utf8TakeDir;
 		bool utf8TakeDirOk = WideStringToUTF8String(m_TakeDir.c_str(), utf8TakeDir);
 
+#ifndef _WIN64
 		if (g_SourceSdkVer == SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer) {
 			BackUpMatVars();
 			SetMatVarsForStreams();
 		}
+#endif //#ifndef _WIN64	
 
 		if (!m_HostFrameRate)
 			m_HostFrameRate = new WrpConVarRef("host_framerate");
@@ -6923,23 +6942,27 @@ void CAfxStreams::Console_Record_Start2()
 		}
 
 		if(m_RecordScreen->Enabled) {
-			m_DrawingRecordScreen = new CDrawingRecordScreen(
-				m_RecordScreen->Settings->CreateOutVideoStreamCreator(
-					*this,
-					*this,
-					GetStartHostFrameRate(),
-					""
-				), advancedfx::StreamCaptureType::Normal
+			auto videoStreamCreator = m_RecordScreen->Settings->CreateOutVideoStreamCreator(
+				*this,
+				*this,
+				GetStartHostFrameRate(),
+				""
 			);
+			m_DrawingRecordScreen = new CDrawingRecordScreen(
+				videoStreamCreator, advancedfx::StreamCaptureType::Normal
+			);
+			videoStreamCreator->Release();
 
 			MaterialSystem_ExecuteOnRenderThread(new CCreateScreenCaptureNodeFunctor(m_DrawingRecordScreen->GetOutVideoStreamCreator()));
 		}
 
-		for(std::list<CAfxRecordStream *>::iterator it = m_Streams.begin(); it != m_Streams.end(); ++it)
+#ifndef _WIN64
+		for(std::list<CAfxRecordStream *>::iterator it = m_Streams.begin(); it != m_Streams.end(); it++)
 		{
 			(*it)->RecordStart();
 			if((*it)->Record_get()) (*it)->SetActive(true);
 		}
+#endif //#ifndef _WIN64	
 
 		if (m_GameRecording)
 		{
@@ -6957,10 +6980,12 @@ void CAfxStreams::Console_Record_Start2()
 			g_Hook_VClient_RenderView.ExportBegin(camFileName.c_str(), frameTime);
 		}
 
+#ifndef _WIN64
 		for (std::list<CEntityBvhCapture *>::iterator it = m_EntityBvhCaptures.begin(); it != m_EntityBvhCaptures.end(); ++it)
 		{
 			(*it)->StartCapture(m_TakeDir, frameTime);
 		}
+#endif //#ifndef _WIN64	
 
 		if(m_CampathAutoSave && 0 < g_Hook_VClient_RenderView.m_CamPath.GetSize())
 		{
@@ -6987,15 +7012,19 @@ void CAfxStreams::Console_Record_Start2()
 
 		if (m_StartMovieWavUsed)
 		{
+#ifndef _WIN64	
 			if (g_SourceSdkVer == SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer) {
 				if (!csgo_Audio_StartRecording(m_TakeDir.c_str()))
 					Tier0_Warning("Error: Could not start WAV audio recording!\n");
 			}
-			else {
+			else
+#endif //#ifndef _WIN64				
+			{
 				g_VEngineClient->ExecuteClientCmd("startmovie " ADVANCEDFX_STARTMOVIE_WAV_KEY " wav");
 			}
 		}
 
+#ifndef _WIN64	
 		m_RecordVoicesUsed = m_RecordVoices;
 
 		if (m_RecordVoicesUsed)
@@ -7004,6 +7033,7 @@ void CAfxStreams::Console_Record_Start2()
 				Tier0_Warning("Error: Could not start voice recording!\n");
 
 		}
+#endif //#ifndef _WIN64	
 	}
 	else
 	{
@@ -7011,7 +7041,9 @@ void CAfxStreams::Console_Record_Start2()
 		Tier0_Warning("Error: Failed to create directories for \"%s\".\n", m_RecordName.c_str());
 	}
 
+#ifndef _WIN64	
 	UpdateStreamDeps();
+#endif //#ifndef _WIN64	
 }
 
 void CAfxStreams::Console_Record_End() {
@@ -7019,6 +7051,7 @@ void CAfxStreams::Console_Record_End() {
 	{
 		Tier0_Msg("Finishing recording ... ");
 
+#ifndef _WIN64	
 		if (g_SourceSdkVer == SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer) {
 
 			if (m_StartMovieWavUsed)
@@ -7027,7 +7060,9 @@ void CAfxStreams::Console_Record_End() {
 			}
 
 			Console_Record_End2();
-		} else {
+		} else
+#endif //#ifndef _WIN64			
+		{
 			if (m_StartMovieWavUsed)
 			{
 				g_VEngineClient->ExecuteClientCmd("endmovie");
@@ -7043,10 +7078,13 @@ void CAfxStreams::Console_Record_End2()
 {
 	if(m_Recording)
 	{
+
+#ifndef _WIN64	
 		if (m_RecordVoicesUsed)
 		{
 			Mirv_Voice_EndRecording();
 		}
+#endif //#ifndef _WIN64	
 
 		if(m_CamExportSet) {
 			m_CamExportSet = false;
@@ -7058,20 +7096,24 @@ void CAfxStreams::Console_Record_End2()
 			g_Hook_VClient_RenderView.ExportEnd();
 		}
 
+#ifndef _WIN64	
 		for (std::list<CEntityBvhCapture *>::iterator it = m_EntityBvhCaptures.begin(); it != m_EntityBvhCaptures.end(); ++it)
 		{
 			(*it)->EndCapture();
 		}
+#endif //#ifndef _WIN64	
 
 		if (m_GameRecording)
 		{
 			if (CClientTools * instance = CClientTools::Instance()) instance->EndRecording();
 		}
 
+#ifndef _WIN64	
 		for(std::list<CAfxRecordStream *>::iterator it = m_Streams.begin(); it != m_Streams.end(); ++it)
 		{
 			(*it)->RecordEnd();
 		}
+#endif //#ifndef _WIN64	
 
 		if(m_DrawingRecordScreen) {
 			delete g_AfxStreams.m_DrawingRecordScreen;
@@ -7079,8 +7121,10 @@ void CAfxStreams::Console_Record_End2()
 			MaterialSystem_ExecuteOnRenderThread(new CDeleteScreenCaptureNodeFunctor());
 		}
 
+#ifndef _WIN64	
 		if (g_SourceSdkVer == SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer)
 			RestoreMatVars();
+#endif //#ifndef _WIN64	
 
 		Tier0_Msg("done.\n");
 
@@ -7088,8 +7132,12 @@ void CAfxStreams::Console_Record_End2()
 	}
 
 	m_Recording = false;
+#ifndef _WIN64	
 	UpdateStreamDeps();
+#endif //#ifndef _WIN64	
 }
+
+#ifndef _WIN64	
 
 void CAfxStreams::Console_AddStream(const char * streamName)
 {
@@ -7352,6 +7400,7 @@ void CAfxStreams::Console_PrintStreams2()
 		index
 	);
 }
+#endif //#ifndef _WIN64	
 
 extern bool Hook_MaterialSystem(void);
 extern bool g_bCaptureAfterSwapBuffers;
@@ -7434,6 +7483,8 @@ void CAfxStreams::Console_RecordScreen(IWrpCommandArgs* args) {
 		, arg0
 	);
 }
+
+#ifndef _WIN64	
 
 void CAfxStreams::Console_MoveStream(IWrpCommandArgs * args)
 {
@@ -9063,7 +9114,7 @@ bool CAfxStreams::Console_EditStream(CAfxRenderViewStream * stream, IWrpCommandA
 
 	return false;
 }
-
+#endif //#ifndef _WIN64
 
 void CAfxStreams::Console_Bvh(IWrpCommandArgs * args)
 {
@@ -9099,6 +9150,7 @@ void CAfxStreams::Console_Bvh(IWrpCommandArgs * args)
 			);
 			return;
 		}
+#ifndef _WIN64			
 		else if ((g_SourceSdkVer == SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer)
 			&& 0 == _stricmp(cmd1, "ent"))
 		{
@@ -9251,16 +9303,19 @@ void CAfxStreams::Console_Bvh(IWrpCommandArgs * args)
 			);
 			return;
 		}
+#endif //#ifndef _WIN64	
 	}
 
 	Tier0_Msg(
 		"%s cam [...] - Whether main camera export (overrides/uses mirv_camexport actually).\n"
 		, prefix
 	);
+#ifndef _WIN64		
 	if(g_SourceSdkVer == SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer) Tier0_Msg(
 		"%s ent [...] - Entity BVH export list control.\n"
 		, prefix
 	);	
+#endif //#ifndef _WIN64	
 }
 
 void CAfxStreams::Console_GameRecording(IWrpCommandArgs * args)
@@ -9316,6 +9371,9 @@ void CAfxStreams::Console_GameRecording(IWrpCommandArgs * args)
 	);
 }
 
+
+#ifndef _WIN64	
+
 SOURCESDK::IMaterialSystem_csgo * CAfxStreams::GetMaterialSystem(void)
 {
 	return m_MaterialSystem;
@@ -9326,15 +9384,15 @@ SOURCESDK::IShaderShadow_csgo * CAfxStreams::GetShaderShadow(void)
 	return m_ShaderShadow;
 }
 
+#endif //#ifndef _WIN64
+
+
 const std::wstring & CAfxStreams::GetTakeDir(void) const
 {
 	return m_TakeDir;
 }
 
-void CAfxStreams :: LevelInitPostEntity(void)
-{
-
-}
+#ifndef _WIN64
 
 void CAfxStreams::LevelShutdown()
 {
@@ -9346,10 +9404,8 @@ void CAfxStreams::LevelShutdown()
 	m_FirstRenderAfterLevelInit = true;
 }
 
-extern bool g_bD3D9DebugPrint;
 
 #ifdef AFX_MIRV_PGL
-
 MirvPgl::CamData GetMirvPglCamData(SOURCESDK::vrect_t_csgo *rect) {
 	return MirvPgl::CamData(
 		g_MirvTime.GetTime(),
@@ -9362,7 +9418,6 @@ MirvPgl::CamData GetMirvPglCamData(SOURCESDK::vrect_t_csgo *rect) {
 		(float)(AlienSwarm_FovScaling(rect->width, rect->height, g_Hook_VClient_RenderView.LastCameraFov))
 	);
 }
-
 #endif
 
 void CAfxStreams::View_Render(IAfxBaseClientDll * cl, SOURCESDK::vrect_t_csgo *rect)
@@ -9967,17 +10022,23 @@ void CAfxStreams::BlockPresent(IAfxMatRenderContextOrg * ctx, bool value)
 	QueueOrExecute(ctx, new CAfxLeafExecute_Functor(new AfxD3D9BlockPresent_Functor(value)));
 }
 
+#endif //#ifndef _WIN64
+
+
 void CAfxStreams::AfxStreamsInitGlobal() {
 	m_RecordScreen = new CRecordScreen(false, advancedfx::CRecordingSettings::GetDefault());
 }
 
 void CAfxStreams::AfxStreamsInit(void)
 {
+#ifndef _WIN64
 	if (g_SourceSdkVer == SourceSdkVer::SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer) {
 		if (!csgo_CModelRenderSystem_SetupBones_Install()) Tier0_Warning("AFXERROR: csgo_CModelRenderSystem_SetupBones_Install() failed.");
 
 		CAfxBaseFxStream::AfxStreamsInit();
 	}
+#endif //#ifndef _WIN64
+
 
 	CCaptureNode::Init();
 
@@ -9994,9 +10055,12 @@ void CAfxStreams::ShutDown(void)
 			Console_Record_End();
 		}
 
+#ifndef _WIN64
 		if (g_SourceSdkVer == SourceSdkVer::SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer) {
 			ShutDown2();
-		} else {
+		} else
+#endif //#ifndef _WIN64		
+		{
 			MirvQueueCmd([this]{this->ShutDown2();});
 		}
 	}
@@ -10004,15 +10068,15 @@ void CAfxStreams::ShutDown(void)
 
 void CAfxStreams::ShutDown2(void)
 {
-	if ((g_SourceSdkVer == SourceSdkVer::SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer)
-		&& m_Recording) {
-		QueueCaptureGpuQueuesExecution(true);
-	}
-
+#ifndef _WIN64
 	// We can do this here, because the dedicated drawing thread is shutdown by then (I think.):
 	QueueCaptureGpuQueuesRelease(true);
+#endif //#ifndef _WIN64
+
 	DrawingThread_DeviceLost();
 
+
+#ifndef _WIN64
 	if (g_SourceSdkVer == SourceSdkVer::SourceSdkVer_CSGO || SourceSdkVer_CSCO == g_SourceSdkVer) {
 		CAfxBaseFxStream::AfxStreamsShutdown();
 	}
@@ -10030,25 +10094,15 @@ void CAfxStreams::ShutDown2(void)
 	}
 
 	delete m_MatPostProcessEnableRef;
+#endif //#ifndef _WIN64
+
+
 	delete m_HostFrameRate;
 
 	delete m_RecordScreen;
 
 	CCaptureNode::Shutdown();
 }
-
-SOURCESDK::C_BaseEntity_csgo * GetMoveParent(SOURCESDK::C_BaseEntity_csgo * value)
-{
-	if (value)
-	{
-		if (SOURCESDK::IClientEntity_csgo * ce = SOURCESDK::g_Entitylist_csgo->GetClientEntityFromHandle(value->AfxGetMoveParentHandle()))
-			return ce->GetBaseEntity();
-
-	}
-
-	return nullptr;
-}
-
 
 void CAfxStreams::DrawingThread_DeviceLost() {
 	if (m_IntZTextureSurface) {
@@ -10168,7 +10222,6 @@ void CAfxStreams::EngineThread_QueueCapture() {
 void CAfxStreams::DrawingThread_Capture() {
 	if (m_DrawingCaptureNode) {
 		m_DrawingCaptureNode->GpuCapture();
-		CCaptureNode::GpuExecuteLockQueue();
 	}
 }
 
@@ -10176,40 +10229,37 @@ void CAfxStreams::CDrawingRecordScreenOutput::ProcessingThreadFunc() {
 	std::unique_lock<std::mutex> lock(m_ProcessingThreadMutex);
 	while (!m_Shutdown || !m_Captures.empty()) {
 		if (!m_Captures.empty()) {
-			advancedfx::ICapture* capture = m_Captures.front();
+			auto * capture = m_Captures.front();
 			m_Captures.pop_front();
 			
 			lock.unlock();
 
-			if(capture) {
-				advancedfx::ICapture* outCapture = advancedfx::ImageTransformer::StripAlpha(g_pThreadPool,&g_ImageBufferPoolThreadSafe,capture);
-				capture->Release();
-				if (outCapture) {
-					if (const advancedfx::IImageBuffer* buffer = outCapture->GetBuffer()) {
+			if (capture) {
+				if(auto buffer = capture->LockCpu()) {
+					advancedfx::IImageBufferThreadSafe* outBuffer = advancedfx::ImageTransformer::StripAlpha(g_pThreadPool,&g_ImageBufferPoolThreadSafe,buffer);
+					buffer->Release();
+					if (outBuffer) {
 						if (m_OutVideoStream == nullptr) {
-							m_OutVideoStream = m_OutVideoStreamCreator->CreateOutVideoStream(*buffer->GetImageBufferFormat());
+							m_OutVideoStream = m_OutVideoStreamCreator->CreateOutVideoStream(*outBuffer->GetImageBufferFormat());
 							if (nullptr == m_OutVideoStream)
 							{
 								Tier0_Warning("AFXERROR: Failed to create image stream for screen recording.\n");
 							}
-							else
-							{
-								m_OutVideoStream->AddRef();
-							}
 						}
-						if (nullptr != m_OutVideoStream && !m_OutVideoStream->SupplyImageBuffer(buffer))
+						if (nullptr != m_OutVideoStream && !m_OutVideoStream->SupplyImageBuffer(this, outBuffer))
 						{
 							Tier0_Warning("AFXERROR: Failed writing image for screen recording.\n");
 						}
+						outBuffer->Release();
+						outBuffer = nullptr;
 					}
 					else {
-						Tier0_Warning("AFXERROR: Could not get capture buffer for screen recording.\n");
+						Tier0_Warning("AFXERROR: Could not get transform buffer for screen recording.\n");
 					}
-					outCapture->Release();
-					outCapture = nullptr;
 				}
+				capture->Release();
 			}
-
+			
 			lock.lock();
 		} else {
 			m_ProcessingThreadCv.wait(lock);
@@ -10217,12 +10267,4 @@ void CAfxStreams::CDrawingRecordScreenOutput::ProcessingThreadFunc() {
 	}
 	if (m_OutVideoStream) m_OutVideoStream->Release();
 	m_OutVideoStreamCreator->Release();
-}
-
-advancedfx::IImageBufferPool * CAfxRecordStream::GetImageBufferPool() const {
-	return g_AfxStreams.GetImageBufferPool();
-}
-
-bool CAfxRecordStream::GetFormatBmpNotTga() const {
-	return g_AfxStreams.GetFormatBmpNotTga();
 }

@@ -148,6 +148,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     ../deps/release/prop/AfxHookSource/SourceSdkShared.h
     ../deps/release/prop/AfxHookSource/SourceInterfaces.h
     
+    ../shared/vcpp/AfxAddr.cpp
+    ../shared/vcpp/AfxAddr.h
+
     ../shared/AfxCommandLine.cpp
     ../shared/AfxCommandLine.h
     ../shared/AfxConsole.cpp
@@ -156,7 +159,6 @@ target_sources(${PROJECT_NAME} PRIVATE
     ../shared/AfxDetours.h
     ../shared/AfxMath.cpp
     ../shared/AfxMath.h
-    ../shared/AfxImageBuffer.h    
     ../shared/AfxOutStreams.cpp
     ../shared/AfxOutStreams.h    
     ../shared/CamIO.cpp
@@ -174,10 +176,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     ../shared/FileTools.h
     ../shared/FovScaling.cpp
     ../shared/FovScaling.h
-    ../shared/ImageBufferPoolThreadSafe.h
+    ../shared/GrowingBufferPoolThreadSafe.h
     ../shared/ImageTransformer.cpp
     ../shared/ImageTransformer.h    
-    ../shared/OutVideoStreamCreators.cpp
     ../shared/OutVideoStreamCreators.h
     ../shared/OpenExrOutput.cpp
     ../shared/OpenExrOutput.h    
@@ -200,6 +201,12 @@ target_sources(${PROJECT_NAME} PRIVATE
     ../shared/MirvInput.h
     ../shared/MirvSkip.cpp
     ../shared/MirvSkip.h
+    ../shared/RefCounted.h
+    ../shared/RefCountedThreadSafe.h
+    ../shared/TRefCounted.h
+
+    addresses.cpp
+    addresses.h
 
     AfxHookSource2Rs.cpp
     AfxHookSource2Rs.h
@@ -253,6 +260,9 @@ target_sources(${PROJECT_NAME} PRIVATE
 
     RenderCommands.cpp
     RenderCommands.h
+
+    RenderServiceHooks.cpp
+    RenderServiceHooks.h
 
     RenderSystemDX11Hooks.cpp
     RenderSystemDX11Hooks.h

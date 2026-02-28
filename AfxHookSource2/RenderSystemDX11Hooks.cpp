@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "CampathDrawer.h"
+#include "RenderServiceHooks.h"
 #include "ReShadeAdvancedfx.h"
 #include "WrpConsole.h"
 #include "CamIO.h"
@@ -17,9 +18,9 @@
 
 #include "../shared/AfxDetours.h"
 #include "../shared/binutils.h"
-#include "../shared/Captures.h"
+#include "../shared/ImageBufferThreadSafe.h"
 #include "../shared/FileTools.h"
-#include "../shared/ImageBufferPoolThreadSafe.h"
+#include "../shared/GrowingBufferPoolThreadSafe.h"
 #include "../shared/ImageTransformer.h"
 #include "../shared/RecordingSettings.h"
 #include "../shared/RefCountedThreadSafe.h"
@@ -38,6 +39,7 @@
 #define _XM_NO_INTRINSICS_
 #include <DirectXMath.h>
 
+#include <cstdlib>
 #include <set>
 #include <map>
 #include <queue>
@@ -57,166 +59,24 @@ extern std::atomic<bool> g_OverlayResizePending;
 extern std::atomic<int>  g_OverlayQuarantineFrames;
 
 extern advancedfx::CThreadPool * g_pThreadPool;
-extern advancedfx::CImageBufferPoolThreadSafe * g_pImageBufferPoolThreadSafe;
+extern advancedfx::CGrowingBufferPoolThreadSafe * g_pImageBufferPoolThreadSafe;
 
 extern SOURCESDK::CS2::ISource2EngineToClient * g_pEngineToClient;
 extern SOURCESDK::CS2::ICvar * SOURCESDK::CS2::g_pCVar;
+
+extern void ExecuteClientCmd(const char * value);
+
+int g_iRenderContextDebug = 0;
+
+ID3D11DeviceContext * g_pImmediateContext = nullptr;
 
 CRenderCommands g_RenderCommands;
 
 bool g_bEnableReShade = true;
 bool g_bReShadeCompositeSmoke = true;
 bool g_bCompositeSmoke = false;
-
-class CAfxCpuTexture
-: public advancedfx::CRefCountedThreadSafe
-, public advancedfx::ICapture
-, public advancedfx::IImageBuffer
-{
-public:
-    virtual void AddRef() override {
-        advancedfx::CRefCountedThreadSafe::AddRef();
-    }
-
-    virtual void Release() override {
-        advancedfx::CRefCountedThreadSafe::Release();
-    }
-
-    virtual const advancedfx::CImageFormat * GetImageBufferFormat() const {
-        return &m_ImageFormat;
-    }
-
-    virtual const void * GetImageBufferData() const {
-        return m_MappedResource.pData;
-    }
-
-	virtual const IImageBuffer* GetBuffer() const {
-        return this;
-    }
-
-    CAfxCpuTexture(ID3D11Device * pDevice)
-    : m_pDevice(pDevice)
-    {
-        m_pDevice->AddRef();
-        m_MappedResource.pData = nullptr;
-        m_Condition.notify_one();
-    }
-
-    void GpuCopyResource(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture, float depthScale, float depthOffset) {
-        m_DepthScale = depthScale;
-        m_DepthOfs = depthOffset;
-        if(m_pCpuTexture == nullptr && pTexture) {
-            D3D11_TEXTURE2D_DESC desc;
-            pTexture->GetDesc(&desc);
-            bool bMultiSampled = 1 < desc.SampleDesc.Count;
-            desc.BindFlags = 0;
-            desc.MiscFlags = 0;
-            desc.MipLevels = 1;
-            desc.SampleDesc.Count = 1;
-            desc.SampleDesc.Quality = 0;
-            advancedfx::ImageFormat format = advancedfx::ImageFormat::Unkown;
-            switch(desc.Format) {
-            case DXGI_FORMAT_R32_FLOAT:
-                format = advancedfx::ImageFormat::ZFloat;
-                desc.Format = DXGI_FORMAT_R32_FLOAT;
-                break;
-            case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-            case DXGI_FORMAT_R8G8B8A8_UNORM:
-            case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-            case DXGI_FORMAT_R8G8B8A8_UINT:
-            case DXGI_FORMAT_R8G8B8A8_SNORM:
-            case DXGI_FORMAT_R8G8B8A8_SINT:
-               format = advancedfx::ImageFormat::RGBA;
-               desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-               break;
-            default:
-                advancedfx::Warning("AFXERROR: GpuCopyResource - unspported DXGI_FORMAT: %i\n",desc.Format);
-            }
-            if(bMultiSampled) {
-                desc.Usage = D3D11_USAGE_DEFAULT;
-                desc.CPUAccessFlags = 0;
-                m_pDevice->CreateTexture2D(&desc, nullptr, &m_pResolveTexture);
-            }
-            desc.Usage = D3D11_USAGE_STAGING;
-            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            m_ImageFormat = advancedfx::CImageFormat(format, desc.Width, desc.Height);
-            m_Format = desc.Format;
-            m_pDevice->CreateTexture2D(&desc, nullptr, &m_pCpuTexture);
-        }
-
-        if(m_pCpuTexture && pTexture) {
-            if(m_pResolveTexture) {
-                pContext->ResolveSubresource(m_pResolveTexture, 0, pTexture, 0, m_Format);
-                pContext->CopyResource(m_pCpuTexture, m_pResolveTexture);
-            } else {
-                pContext->CopyResource(m_pCpuTexture, pTexture);
-            }
-        }
-    }
-
-    void CpuSignalDone() {
-        std::unique_lock<std::mutex> lock(m_Mutex);
-        m_bCpuDone = true;
-        m_Condition.notify_one();
-    }     
-
-    class advancedfx::IImageBuffer * CpuBeginAccess(ID3D11DeviceContext * pContext) {
-        m_MappedResource.pData = nullptr;
-        if(m_pCpuTexture) {
-            if(SUCCEEDED(pContext->Map(m_pCpuTexture, 0, D3D11_MAP_READ , 0, &m_MappedResource))) {
-                m_ImageFormat = advancedfx::CImageFormat(m_ImageFormat.Format, m_ImageFormat.Width, m_ImageFormat.Height, m_MappedResource.RowPitch);
-                return this;
-            }
-        }
-        return nullptr;
-    }
-
-    void IfAcccessedWaitForCpuAndEndAccess(ID3D11DeviceContext * pContext) {        
-        if(m_MappedResource.pData) {
-            WaitForCpu();
-            pContext->Unmap(m_pCpuTexture, 0);    
-            m_MappedResource.pData = nullptr;        
-        }
-    }
-
-    float GetDepthScale() {
-        return m_DepthScale;
-    }
-
-    float GetDepthOffset() {
-        return m_DepthOfs;
-    }
-
-protected:
-    virtual ~CAfxCpuTexture() {
-        if(m_pCpuTexture) {
-            m_pCpuTexture->Release();
-        }
-        if(m_pResolveTexture){
-            m_pResolveTexture->Release();
-        }
-        m_pDevice->Release();
-    }
-
-private:
-    ID3D11Device * m_pDevice;
-    ID3D11Texture2D * m_pCpuTexture = nullptr;
-    ID3D11Texture2D * m_pResolveTexture = nullptr;
-    DXGI_FORMAT m_Format = DXGI_FORMAT_UNKNOWN;
-    std::mutex m_Mutex;
-    std::condition_variable m_Condition;
-    bool m_bCpuDone = false;
-    advancedfx::CImageFormat m_ImageFormat;
-    D3D11_MAPPED_SUBRESOURCE m_MappedResource;
-    float m_DepthScale = 1.0f;
-    float m_DepthOfs = 0.0f;
-
-    void WaitForCpu() {
-        std::unique_lock<std::mutex> lock(m_Mutex);
-        m_Condition.wait(lock, [this] { return m_bCpuDone; });
-        m_bCpuDone = false;
-    }
-};
+bool g_bExpectPresent = false;
+ID3D11RenderTargetView* g_BeforeUiRT = nullptr;
 
 class CAfxCapture {
 public:
@@ -234,181 +94,440 @@ public:
         m_ProcessingThread = std::thread(&CAfxCapture::ProcessingThreadFunc, this);
     }
 
-    void Finish(ID3D11DeviceContext * pDeviceContext) {
-        while(m_CpuTextures[0] || m_CpuTextures[1]) {
-            if(m_CpuTextures[m_Index]) {
-                m_CpuTextures[m_Index]->IfAcccessedWaitForCpuAndEndAccess(pDeviceContext);
-                m_CpuTextures[m_Index]->Release();
-                m_CpuTextures[m_Index] = nullptr;
+    void ShutDown(ID3D11DeviceContext * pDeviceContext)
+    {
+        if(pDeviceContext) {
+            while(m_CurrentCpuTexture || m_CurrentCpuTexture2) {
+                // Make sure we process the texture from the last roundtrip and the current pass if possible (if there are any):
+                OnAfterGpuPresent(pDeviceContext);
             }
-            m_Index = (m_Index + 1) % 2;
         }
-    }
-
-    ~CAfxCapture() {
+    
         {
             std::unique_lock<std::mutex> lock(m_ProcessingThreadMutex);
+            if(m_ShutDown) return; // do not shutdown twice
             m_ShutDown = true;
             m_ProcessingThreadCv.notify_one();
         }
         m_ProcessingThread.join();
-        if(m_CpuTextures[0]) {
-            m_CpuTextures[0]->Release();
+
+        if(m_CurrentCpuTexture2) {
+            // remove lingering unused / not mapped CPU texture from last roundtrip.
+            delete m_CurrentCpuTexture2;
+            m_CurrentCpuTexture2 = nullptr;
+            {
+                std::unique_lock<std::mutex> lock(m_DoneTexturesMutex);
+                m_NumCpuTextures--;
+            }
         }
-        if(m_CpuTextures[1]) {
-            m_CpuTextures[1]->Release();
+
+        if(m_CurrentCpuTexture) {
+            // remove lingering unused / not mapped CPU texture from current roundtrip.
+            delete m_CurrentCpuTexture;
+            m_CurrentCpuTexture = nullptr;
+            {
+                std::unique_lock<std::mutex> lock(m_DoneTexturesMutex);
+                m_NumCpuTextures--;
+            }
         }
+
+        // Wait for all textures to finish / return.
+        {
+            std::unique_lock<std::mutex> lock(m_DoneTexturesMutex);
+            m_DoneTexturesCv.wait(lock, [this]{return m_NumCpuTextures == m_CpuTexturesDone.size();});
+        }
+
+        if(pDeviceContext) {
+            // Unmap textures gracefully:
+            while(!m_CpuTexturesDone.empty()) {
+                auto & pTexture = m_CpuTexturesDone.front();
+                pTexture->CpuEndAccess(pDeviceContext);
+                delete pTexture;
+                m_CpuTexturesDone.pop();
+            }
+        } else {
+            // We can't unmap them right now, just relase them.
+            while(!m_CpuTexturesDone.empty()) {
+                auto & pTexture = m_CpuTexturesDone.front();
+                delete pTexture;
+                m_CpuTexturesDone.pop();
+            }            
+        }
+
+        ReleaseIntermediate();
+    }
+
+    ~CAfxCapture() {
+        ShutDown(nullptr);
     }
 
     void OnBeforeGpuPresent(ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture, float depthScale, float depthOfs) {
-        if(m_CpuTextures[m_Index] == nullptr) {
+        if(nullptr == m_CurrentCpuTexture) {            
             ID3D11Device * pDevice = nullptr;
             pDeviceContext->GetDevice(&pDevice);
             if(pDevice) {
-                auto pCpuTexture = new CAfxCpuTexture(pDevice);
-                pCpuTexture->AddRef();
-                m_CpuTextures[m_Index] = pCpuTexture;
-                pDevice->Release();
+                std::unique_lock<std::mutex> lock(m_DoneTexturesMutex);
+                if(3 <= m_NumCpuTextures) {
+                    // rate limit to prevent drowning in own produce.
+                    m_DoneTexturesCv.wait(lock,[this]{return !m_CpuTexturesDone.empty();});
+                    m_CurrentCpuTexture = m_CpuTexturesDone.front();
+                    m_CpuTexturesDone.pop();
+                }
+                else if(!m_CpuTexturesDone.empty()) {
+                    m_CurrentCpuTexture = m_CpuTexturesDone.front();
+                    m_CpuTexturesDone.pop();
+                }
+                if(nullptr == m_CurrentCpuTexture) {
+                    m_NumCpuTextures++;
+                    lock.unlock();
+                    m_CurrentCpuTexture = new CAfxCpuTexture(this,pDevice); // new
+                }
+                else {
+                    lock.unlock();
+                    m_CurrentCpuTexture->CpuEndAccess(pDeviceContext); // re-use
+                }                
             }
-        } else {
-            m_CpuTextures[m_Index]->IfAcccessedWaitForCpuAndEndAccess(pDeviceContext);
+            pDevice->Release();
         }
-        m_CpuTextures[m_Index]->GpuCopyResource(pDeviceContext, pTexture, depthScale, depthOfs);
+        m_CurrentCpuTexture->GpuCopyResource(pDeviceContext, pTexture, depthScale, depthOfs);
     }
 
     void OnAfterGpuPresent(ID3D11DeviceContext * pDeviceContext) {
-        m_Index = (m_Index + 1) % 2;
-        if(m_CpuTextures[m_Index]) {
-            m_CpuTextures[m_Index]->CpuBeginAccess(pDeviceContext);
-            StartProcess(0,m_CpuTextures[m_Index]);
+        // This trickery is intentional,  thos roundtrip prevents blocking unnecessarily.
+        if(m_CurrentCpuTexture2) {
+            if(m_CurrentCpuTexture2->CpuBeginAccess(pDeviceContext)) {
+                StartProcess(m_CurrentCpuTexture2);
+                m_CurrentCpuTexture2 = nullptr;
+            } else {
+                StartProcess(nullptr);
+                delete m_CurrentCpuTexture2;
+                m_CurrentCpuTexture2 = nullptr;
+            }
+        }
+        if(m_CurrentCpuTexture){
+            m_CurrentCpuTexture2 = m_CurrentCpuTexture;
+            m_CurrentCpuTexture = nullptr;
         }
     }
 
 private:
 
-    void StartProcess(size_t index, CAfxCpuTexture * pCpuTexture) {
+    class CAfxCpuTexture
+    : public advancedfx::IImageBufferThreadSafe
+    {
+    public:
+        virtual void advancedfx::IImageBufferThreadSafe::AddRef() override {
+           m_RefCount++;
+        }
+
+        virtual void advancedfx::IImageBufferThreadSafe::Release() override {
+            if(1 == std::atomic_fetch_sub_explicit(&m_RefCount, 1, std::memory_order_relaxed)) {
+                m_pCapture->ReturnCpuTexture(this);
+            }
+        }
+
+        virtual const advancedfx::CImageFormat * GetImageBufferFormat() const {
+            return &m_ImageFormat;
+        }
+
+        virtual const void * GetImageBufferData() const {
+            return m_MappedResource.pData;
+        }
+
+        CAfxCpuTexture(CAfxCapture * pCapture, ID3D11Device * pDevice)
+        : m_pCapture(pCapture)
+        , m_pDevice(pDevice)
+        {
+            m_pDevice->AddRef();
+            m_MappedResource.pData = nullptr;
+        }
+
+        ~CAfxCpuTexture() {
+            if(m_pCpuTexture) {
+                m_pCpuTexture->Release();
+            }
+            m_pDevice->Release();
+        }
+
+        void GpuCopyResource(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture, float depthScale, float depthOffset) {
+            m_DepthScale = depthScale;
+            m_DepthOfs = depthOffset;
+            if(m_pCpuTexture == nullptr && pTexture) {
+                D3D11_TEXTURE2D_DESC desc;
+                pTexture->GetDesc(&desc);
+                bool bMultiSampled = 1 < desc.SampleDesc.Count;
+                desc.BindFlags = 0;
+                desc.MiscFlags = 0;
+                desc.MipLevels = 1;
+                desc.SampleDesc.Count = 1;
+                desc.SampleDesc.Quality = 0;
+                advancedfx::ImageFormat format = advancedfx::ImageFormat::Unknown;
+                switch(desc.Format) {
+                case DXGI_FORMAT_R32_FLOAT:
+                    format = advancedfx::ImageFormat::ZFloat;
+                    desc.Format = DXGI_FORMAT_R32_FLOAT;
+                    break;
+                case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+                case DXGI_FORMAT_R8G8B8A8_UNORM:
+                case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+                case DXGI_FORMAT_R8G8B8A8_UINT:
+                case DXGI_FORMAT_R8G8B8A8_SNORM:
+                case DXGI_FORMAT_R8G8B8A8_SINT:
+                format = advancedfx::ImageFormat::RGBA;
+                desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                break;
+                default:
+                    advancedfx::Warning("AFXERROR: GpuCopyResource - unspported DXGI_FORMAT: %i\n",desc.Format);
+                }
+                if(bMultiSampled) {
+                    desc.Usage = D3D11_USAGE_DEFAULT;
+                    desc.CPUAccessFlags = 0;
+                    m_pCapture->AquireIntermediate(m_pDevice, desc);
+                    m_pIntermediateTexture = m_pCapture->m_pIntermediateSurface;
+                }
+                desc.Usage = D3D11_USAGE_STAGING;
+                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                m_ImageFormat = advancedfx::CImageFormat(format, desc.Width, desc.Height);
+                m_Format = desc.Format;
+                m_pDevice->CreateTexture2D(&desc, nullptr, &m_pCpuTexture);
+            }
+
+            if(m_pCpuTexture && pTexture) {
+                if(m_pIntermediateTexture) {
+                    pContext->ResolveSubresource(m_pIntermediateTexture, 0, pTexture, 0, m_Format);
+                    pContext->CopyResource(m_pCpuTexture, m_pIntermediateTexture);
+                } else {
+                    pContext->CopyResource(m_pCpuTexture, pTexture);
+                }
+            }
+        }
+
+        advancedfx::IImageBufferThreadSafe * CpuBeginAccess(ID3D11DeviceContext * pContext) {
+            m_MappedResource.pData = nullptr;
+            if(m_pCpuTexture) {
+                if(SUCCEEDED(pContext->Map(m_pCpuTexture, 0, D3D11_MAP_READ , 0, &m_MappedResource))) {
+                    m_ImageFormat = advancedfx::CImageFormat(m_ImageFormat.Format, m_ImageFormat.Width, m_ImageFormat.Height, m_MappedResource.RowPitch);
+                    return this;
+                }
+            }
+            return nullptr;
+        }
+
+        void CpuEndAccess(ID3D11DeviceContext * pContext) {        
+            if(m_MappedResource.pData) {
+                pContext->Unmap(m_pCpuTexture, 0);    
+                m_MappedResource.pData = nullptr;        
+            }
+        }
+
+        float GetDepthScale() {
+            return m_DepthScale;
+        }
+
+        float GetDepthOffset() {
+            return m_DepthOfs;
+        }
+
+    protected:
+
+    private:
+        ID3D11Device * m_pDevice;
+        ID3D11Texture2D * m_pCpuTexture = nullptr;
+        ID3D11Texture2D * m_pIntermediateTexture = nullptr;
+        DXGI_FORMAT m_Format = DXGI_FORMAT_UNKNOWN;
+        advancedfx::CImageFormat m_ImageFormat;
+        D3D11_MAPPED_SUBRESOURCE m_MappedResource;
+        float m_DepthScale = 1.0f;
+        float m_DepthOfs = 0.0f;
+        CAfxCapture * m_pCapture;
+        std::atomic_int m_RefCount = 0;
+    };
+
+    void StartProcess(CAfxCpuTexture * pCpuTexture) {
         std::unique_lock<std::mutex> lock(m_ProcessingThreadMutex);
-        if(index == 0) {
-            m_In.push_back(new CBuffers(m_Streams_size));
-        }
-        (*m_In.rbegin())->SetAt(index, pCpuTexture);
-        if (index + 1  >= m_Streams_size) {
-            m_ProcessingThreadCv.notify_one();
-        }
+        m_CpuTexturesTodo.emplace(pCpuTexture);
+        m_ProcessingThreadCv.notify_one();
     }
 
-    size_t m_Index = 0;
-    CAfxCpuTexture * m_CpuTextures[2]={nullptr,nullptr};
+    void ReturnCpuTexture(CAfxCpuTexture * pCpuTexture) {
+        std::unique_lock<std::mutex> lock(m_DoneTexturesMutex);
+        m_CpuTexturesDone.emplace(pCpuTexture);
+        m_DoneTexturesCv.notify_one();
+    }
 
-    const size_t m_Streams_size = 1;
+    CAfxCpuTexture * m_CurrentCpuTexture = nullptr;
+    CAfxCpuTexture * m_CurrentCpuTexture2 = nullptr;
+
     class advancedfx::COutVideoStreamCreator* m_pOutVideoStreamCreator;
-	advancedfx::COutVideoStream* m_OutVideoStream = nullptr;
+	advancedfx::TIOutVideoStream<true>* m_OutVideoStream = nullptr;
 
     CaptureType_e m_CaptureType;
-
-	class CBuffers {
-	public:
-		CBuffers(size_t size) : m_Buffers(size) {
-		}
-
-		size_t GetSize() const {
-			return m_Buffers.size();
-		}
-
-		class CAfxCpuTexture * GetAt(size_t index) const {
-			return m_Buffers[index];
-		}
-
-		void SetAt(size_t index, class CAfxCpuTexture * value) {
-			m_Buffers[index] = value;
-		}
-
-	private:
-		std::vector<class CAfxCpuTexture *> m_Buffers;
-	};
 
 	std::mutex m_ProcessingThreadMutex;
 	std::condition_variable m_ProcessingThreadCv;
 	std::thread m_ProcessingThread;
 	bool m_ShutDown = false;
 
-	std::list<class CBuffers*> m_In;
+    std::queue<CAfxCpuTexture *> m_CpuTexturesTodo;
+
+    std::mutex m_DoneTexturesMutex;
+    std::condition_variable m_DoneTexturesCv;
+    size_t m_NumCpuTextures = 0;
+    std::queue<CAfxCpuTexture *> m_CpuTexturesDone;
+
+    struct D3d11Texture2DDescCmp
+	{
+        bool operator()(const D3D11_TEXTURE2D_DESC& lhs, const D3D11_TEXTURE2D_DESC& rhs) const {
+            return LessThan(lhs,rhs);
+        }
+
+    	static bool LessThan(const D3D11_TEXTURE2D_DESC& lhs, const D3D11_TEXTURE2D_DESC& rhs)
+    	{
+			int cmp = (int32_t)lhs.Width - (int32_t)rhs.Width;
+			if(cmp) return cmp < 0;
+
+			cmp = (int32_t)lhs.Height - (int32_t)rhs.Height;
+			if(cmp) return cmp < 0;
+
+			cmp = (int32_t)lhs.MipLevels - (int32_t)rhs.MipLevels;
+			if(cmp) return cmp < 0;
+
+            cmp = (int32_t)lhs.ArraySize - (int32_t)rhs.ArraySize;
+			if(cmp) return cmp < 0;
+
+            cmp = (int32_t)lhs.Format - (int32_t)rhs.Format;
+			if(cmp) return cmp < 0;
+
+            cmp = (int32_t)lhs.SampleDesc.Count - (int32_t)rhs.SampleDesc.Count;
+			if(cmp) return cmp < 0;
+
+            cmp = (int32_t)lhs.SampleDesc.Quality - (int32_t)rhs.SampleDesc.Quality;
+			if(cmp) return cmp < 0;
+
+            cmp = (int32_t)lhs.Usage - (int32_t)rhs.Usage;
+			if(cmp) return cmp < 0;
+
+            cmp = (int32_t)lhs.BindFlags - (int32_t)rhs.BindFlags;
+			if(cmp) return cmp < 0;
+
+            cmp = (int32_t)lhs.CPUAccessFlags - (int32_t)rhs.CPUAccessFlags;
+			if(cmp) return cmp < 0;
+
+            cmp = (int32_t)lhs.MiscFlags - (int32_t)rhs.MiscFlags;
+			if(cmp) return cmp < 0;
+
+			return false; // equal
+    	}
+	};    
+
+    static std::map<D3D11_TEXTURE2D_DESC, std::pair<size_t, ID3D11Texture2D *>, D3d11Texture2DDescCmp> m_IntermediateSurfaces;
+
+    D3D11_TEXTURE2D_DESC m_SurfaceDesc;
+    ID3D11Texture2D * m_pIntermediateSurface = nullptr;
+
+    bool AquireIntermediate(ID3D11Device * pDevice, const D3D11_TEXTURE2D_DESC & desc) {
+		if (m_pIntermediateSurface) {
+            if(D3d11Texture2DDescCmp::LessThan(m_SurfaceDesc,desc) == 0)
+                return true;
+            // surface changed, need to re-aquire.
+            ReleaseIntermediate();
+        }
+
+        m_SurfaceDesc = desc;
+		auto it = m_IntermediateSurfaces.find(m_SurfaceDesc);
+		if(it != m_IntermediateSurfaces.end()) {
+			// we can reuse existing one.
+			auto & pair = it->second;
+			auto & cnt = std::get<0>(pair);
+			cnt++;
+			m_pIntermediateSurface = std::get<1>(pair);
+			return true;
+		} else {
+			// need to try to create new one.
+            pDevice->CreateTexture2D(&desc, nullptr, &m_pIntermediateSurface);
+			if(m_pIntermediateSurface) {
+				m_IntermediateSurfaces.emplace(std::piecewise_construct, std::forward_as_tuple(m_SurfaceDesc), std::forward_as_tuple(1,m_pIntermediateSurface));
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void ReleaseIntermediate() {
+		if (m_pIntermediateSurface) {
+			auto it = m_IntermediateSurfaces.find(m_SurfaceDesc);
+			auto & pair = it->second;
+			auto & cnt = std::get<0>(pair);
+			if(1 == cnt) {
+				// we are the last usage, remove.
+				m_IntermediateSurfaces.erase(it);
+				m_pIntermediateSurface->Release();
+			} else {
+				cnt--;
+			}
+			m_pIntermediateSurface = nullptr;
+		}
+	}
 
 	void ProcessingThreadFunc() {
 		std::unique_lock<std::mutex> lock(m_ProcessingThreadMutex);
-		while (!m_ShutDown || !m_In.empty()) {
-			if (!m_In.empty()) {
-				class CBuffers* buffers = m_In.front();
-				if(buffers->GetSize() >= m_Streams_size) {
-					class CBuffers* task = buffers;
-					m_In.pop_front();
-					lock.unlock();
+		while (!m_ShutDown || !m_CpuTexturesTodo.empty()) {
+			if (!m_CpuTexturesTodo.empty()) {
+                auto pTexture = m_CpuTexturesTodo.front();
+                m_CpuTexturesTodo.pop();
+    			lock.unlock();
+                if(pTexture) {
+                    pTexture->AddRef();
 
-                    size_t taskSize = task->GetSize();
-                    for(size_t i=0; i < taskSize; i++) {
-                        auto pTexture = task->GetAt(i);
-                        if(pTexture) {
-                            advancedfx::ICapture* capture = pTexture;
-                            switch(pTexture->GetImageBufferFormat()->Format) {
-                            case advancedfx::ImageFormat::ZFloat:
-                                capture = advancedfx::ImageTransformer::DepthF(g_pThreadPool, g_pImageBufferPoolThreadSafe, pTexture, pTexture->GetDepthScale(), pTexture->GetDepthOffset());
-                                break;
-                            case advancedfx::ImageFormat::RGBA:
-                                switch(m_CaptureType) {
-                                case CaptureType_Rgba:
-                                    capture = advancedfx::ImageTransformer::RgbaToBgra(g_pThreadPool,g_pImageBufferPoolThreadSafe,pTexture);
-                                    break;
-                                case CaptureType_Depth24:
-                                    {
-                                        capture = advancedfx::ImageTransformer::RgbaToBgr(g_pThreadPool,g_pImageBufferPoolThreadSafe,pTexture);
-                                        advancedfx::ICapture* capture2 = advancedfx::ImageTransformer::Depth24(g_pThreadPool, g_pImageBufferPoolThreadSafe, capture, pTexture->GetDepthScale(), pTexture->GetDepthOffset());
-                                        if(capture) capture->Release();
-                                        capture = capture2;
-                                    }
-                                    break;
-                                default:
-                                    capture = advancedfx::ImageTransformer::RgbaToBgr(g_pThreadPool,g_pImageBufferPoolThreadSafe,pTexture);
-                                    break;
-                                }
-                                break;
-                            default:
-                            pTexture->AddRef();
-                                break;
+                    advancedfx::IImageBufferThreadSafe* buffer = pTexture;
+
+                    switch(buffer->GetImageBufferFormat()->Format) {
+                    case advancedfx::ImageFormat::ZFloat:
+                        buffer = advancedfx::ImageTransformer::DepthF(g_pThreadPool, g_pImageBufferPoolThreadSafe, buffer, pTexture->GetDepthScale(), pTexture->GetDepthOffset());
+                        break;
+                    case advancedfx::ImageFormat::RGBA:
+                        switch(m_CaptureType) {
+                        case CaptureType_Rgba:
+                            buffer = advancedfx::ImageTransformer::RgbaToBgra(g_pThreadPool,g_pImageBufferPoolThreadSafe,buffer);
+                            break;
+                        case CaptureType_Depth24:
+                            {
+                                buffer = advancedfx::ImageTransformer::RgbaToBgr(g_pThreadPool,g_pImageBufferPoolThreadSafe,buffer);
+                                advancedfx::IImageBufferThreadSafe* buffer2 = advancedfx::ImageTransformer::Depth24(g_pThreadPool, g_pImageBufferPoolThreadSafe, buffer, pTexture->GetDepthScale(), pTexture->GetDepthOffset());
+                                if(buffer) buffer->Release();
+                                buffer = buffer2;
                             }
-                            if (capture) {
-                                if (const advancedfx::IImageBuffer* buffer = capture->GetBuffer()) {                            
-                                    if (m_OutVideoStream == nullptr) {
-                                        m_OutVideoStream = m_pOutVideoStreamCreator->CreateOutVideoStream(*buffer->GetImageBufferFormat());
-                                        if (nullptr == m_OutVideoStream)
-                                        {
-                                            advancedfx::Warning("AFXERROR: Failed to create image stream for screen recording.\n");
-                                        }
-                                        else
-                                        {
-                                            m_OutVideoStream->AddRef();
-                                        }
-                                    }
-                                    if (nullptr != m_OutVideoStream && !m_OutVideoStream->SupplyImageBuffer(buffer))
-                                    {
-                                        advancedfx::Warning("AFXERROR: Failed writing image for screen recording.\n");
-                                    }
-                                }
-                                else {
-                                   advancedfx::Warning("AFXERROR: Could not get capture buffer for screen recording.\n");
-                                }
-                                capture->Release();
-                                capture = nullptr; 
-                            }                               
-                            pTexture->CpuSignalDone();
+                            break;
+                        default:
+                            buffer = advancedfx::ImageTransformer::RgbaToBgr(g_pThreadPool,g_pImageBufferPoolThreadSafe,buffer);
+                            break;
                         }
+                        break;
+                    default:
+                        buffer->AddRef();
+                        break;
                     }
 
-					delete task;
-					task = nullptr;
-					lock.lock();
-				} else {
-					m_ProcessingThreadCv.wait(lock);
-				}
+                    pTexture->Release();
+                    
+                    if (buffer) {
+                        if (m_OutVideoStream == nullptr) {
+                            m_OutVideoStream = m_pOutVideoStreamCreator->CreateOutVideoStream(*buffer->GetImageBufferFormat());
+                            if (nullptr == m_OutVideoStream)
+                            {
+                                advancedfx::Warning("AFXERROR: Failed to create image stream for screen recording.\n");
+                            }
+                        }
+                        if (nullptr != m_OutVideoStream && !m_OutVideoStream->SupplyImageBuffer(this, buffer))
+                        {
+                            advancedfx::Warning("AFXERROR: Failed writing image for screen recording.\n");
+                        }
+                        buffer->Release();
+                        buffer = nullptr; 
+                    }                    
+                }
+
+				lock.lock();
 			} else {
 				m_ProcessingThreadCv.wait(lock);
 			}		
@@ -417,6 +536,8 @@ private:
         m_pOutVideoStreamCreator->Release();
 	}
 };
+
+std::map<D3D11_TEXTURE2D_DESC, std::pair<size_t, ID3D11Texture2D *>, CAfxCapture::D3d11Texture2DDescCmp> CAfxCapture::m_IntermediateSurfaces;
 
 D3D11_VIEWPORT g_ViewPort;
 
@@ -1024,7 +1145,7 @@ public:
         return nullptr;
     }
 
-    void OnPresent() {
+    void OnEndFrame() {
         m_HasSmokeDepth = false;
         for(int i=0;i<DepthTextureTypeCount;i++) m_HasNormalDepth[i] = false;
     }
@@ -1116,9 +1237,11 @@ private:
 
 
 IDXGISwapChain * g_pSwapChain = nullptr;
-IDXGISwapChain * g_pMainSwapChain = nullptr; // persistent handle to the game's main swapchain
+UINT g_Present_LastSyncInterval = 0;
+UINT g_Present_LastPresentFlags = DXGI_PRESENT_ALLOW_TEARING;
+bool g_Present_Suppress = false;
+HRESULT g_Present_LastResult = S_OK;
 ID3D11Device * g_pDevice = nullptr;
-ID3D11DeviceContext * g_pImmediateContext = nullptr;
 ID3D11DeviceContext * g_pOtherContext = nullptr;
 ID3D11RenderTargetView* g_pRTView = nullptr;
 int g_iDraw = 0;
@@ -1377,8 +1500,14 @@ HRESULT STDMETHODCALLTYPE New_CreateRenderTargetView(  ID3D11Device * This,
                     g_pDevice->Release();
                     g_pDevice = nullptr;
                 }
-                g_DepthCompositor.OnTargetBegin(This, pTexture);
+
+                if(g_BeforeUiRT) {
+                    g_BeforeUiRT->Release();
+                    g_BeforeUiRT = nullptr;
+                }
                 g_iDraw = 0;
+
+                g_DepthCompositor.OnTargetBegin(This, pTexture);
                 g_pRTView = *ppRTView;
                 g_pMainRenderTargetResource = nullptr;
                 g_pDevice = This;
@@ -1491,8 +1620,12 @@ void STDMETHODCALLTYPE New_OMSetRenderTargets( ID3D11DeviceContext * This,
             /* [annotation] */ 
             _In_opt_  ID3D11DepthStencilView *pDepthStencilView) {       
     if (!g_bInOwnDraw && This->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) {
-        if (NumViews >= 1) {
+        if (NumViews >= 1) {         
             if (g_iDraw == 0 && pDepthStencilView && ppRenderTargetViews && ppRenderTargetViews[0]) {
+                if(g_BeforeUiRT) {
+                    g_BeforeUiRT->Release();
+                    g_BeforeUiRT = nullptr;
+                }
                 g_iDraw = 2;
                 g_pImmediateContext = This;
                 g_pCurrentDepthStencilView = pDepthStencilView;
@@ -1521,19 +1654,44 @@ void STDMETHODCALLTYPE New_OMSetRenderTargets( ID3D11DeviceContext * This,
     g_Old_OMSetRenderTargets(This, NumViews, ppRenderTargetViews, pDepthStencilView);
 }
 
+
 class IRenderThreadCallback abstract {
 public:
     virtual void OnCallback(void) abstract = 0;
 };
 
-class CAfxRenderCallbackSetupViewPlayer0 : public IRenderThreadCallback
+
+typedef HRESULT (STDMETHODCALLTYPE * Present_t)( void * This,
+            /* [in] */ UINT SyncInterval,
+            /* [in] */ UINT Flags);
+
+Present_t g_OldPresent = nullptr;
+
+HRESULT STDMETHODCALLTYPE New_Present( void * This,
+            /* [in] */ UINT SyncInterval,
+            /* [in] */ UINT Flags);
+
+void Before_Present();
+void After_Present();
+            
+class CAfxRenderCallbackUpdateBuffers : public IRenderThreadCallback
 {
 public:
-    CAfxRenderCallbackSetupViewPlayer0()
+    CAfxRenderCallbackUpdateBuffers()
     {
     }
 
     virtual void OnCallback(void) {
+        if(g_RenderCommands.RenderThread_FrameBegun()) {
+            Before_Present();
+
+            if(g_bExpectPresent && g_pSwapChain) {
+                g_Present_LastResult = g_OldPresent(g_pSwapChain, g_Present_LastSyncInterval, g_Present_LastPresentFlags);
+            }
+
+            After_Present();
+        }
+
         g_RenderCommands.RenderThread_BeginFrame(g_pImmediateContext);
         delete this;
     }
@@ -1619,91 +1777,35 @@ public:
                 if (pRenderTargetViews[0]) pRenderTargetViews[0]->Release();
             }
 
-            // Always capture current color RT at this stage for overlay preview; also dispatch queues.
-            {
-                ID3D11RenderTargetView* pRenderTargetViews[1] = { nullptr };
-                g_pImmediateContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
-
-                if (pRenderTargetViews[0]) {
-                    ID3D11Resource* pRenderTargetViewResource = nullptr;
-                    pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
-                    if (pRenderTargetViewResource) {
-                        ID3D11Texture2D* pTexture = nullptr;
-                        if (SUCCEEDED(pRenderTargetViewResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&pTexture)) && pTexture) {
-                            // Update global preview texture
-                            if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
-                            g_BeforeUiLatest = pTexture; // keep one ref until Present end
-
-                            // Ensure/refresh a single-sample copy so later readers can sample stable content
-                            D3D11_TEXTURE2D_DESC srcDesc = {};
-                            pTexture->GetDesc(&srcDesc);
-                            bool srcMsaa = srcDesc.SampleDesc.Count > 1;
-                            // Destination desc: same as src but single-sample, bind none (only as copy source)
-                            D3D11_TEXTURE2D_DESC dstDesc = srcDesc;
-                            dstDesc.SampleDesc.Count = 1;
-                            dstDesc.SampleDesc.Quality = 0;
-                            dstDesc.BindFlags = 0;
-                            dstDesc.MiscFlags = 0;
-                            dstDesc.MipLevels = 1;
-                            dstDesc.ArraySize = 1;
-                            dstDesc.Usage = D3D11_USAGE_DEFAULT;
-
-                            bool needRecreate = (g_BeforeUiCopy == nullptr)
-                                || g_BeforeUiCopyDesc.Width  != dstDesc.Width
-                                || g_BeforeUiCopyDesc.Height != dstDesc.Height
-                                || g_BeforeUiCopyDesc.Format != dstDesc.Format
-                                || g_BeforeUiCopyDesc.SampleDesc.Count != dstDesc.SampleDesc.Count
-                                || g_BeforeUiCopyDesc.SampleDesc.Quality != dstDesc.SampleDesc.Quality;
-                            if (needRecreate) {
-                                if (g_BeforeUiCopy) { g_BeforeUiCopy->Release(); g_BeforeUiCopy = nullptr; }
-                                ID3D11Device* dev = g_pDevice;
-                                if (!dev && g_pImmediateContext) g_pImmediateContext->GetDevice(&dev);
-                                if (dev) {
-                                    if (SUCCEEDED(dev->CreateTexture2D(&dstDesc, nullptr, &g_BeforeUiCopy)) && g_BeforeUiCopy) {
-                                        g_BeforeUiCopyDesc = dstDesc;
+            ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
+            g_pImmediateContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
+            if (pRenderTargetViews[0]) {
+                if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
+                {
+                    if(!pRenderPassCommands->BeforeUi.Empty() || !pRenderPassCommands->BeforeUi2.Empty())
+                    {
+                        if(!pRenderPassCommands->BeforeUi.Empty()) {
+                            ID3D11Resource* pRenderTargetViewResource = nullptr;
+                            pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
+                            if(pRenderTargetViewResource) {
+                                ID3D11Texture2D * pTexture = nullptr;
+                                if(SUCCEEDED(pRenderTargetViewResource->QueryInterface(__uuidof(ID3D11Texture2D),(void**)&pTexture))){
+                                    if(pTexture) {
+                                        pRenderPassCommands->OnBeforeUi(pTexture);               
+                                        pTexture->Release();
                                     }
-                                    if (!g_pDevice && dev) dev->Release();
                                 }
+                                pRenderTargetViewResource->Release();
                             }
-                            if (g_BeforeUiCopy) {
-                                // Resolve MSAA or copy
-                                auto ChooseTyped = [](DXGI_FORMAT f)->DXGI_FORMAT {
-                                    switch (f) {
-                                    case DXGI_FORMAT_R8G8B8A8_TYPELESS:    return DXGI_FORMAT_R8G8B8A8_UNORM;
-                                    case DXGI_FORMAT_B8G8R8A8_TYPELESS:    return DXGI_FORMAT_B8G8R8A8_UNORM;
-                                    case DXGI_FORMAT_B8G8R8X8_TYPELESS:    return DXGI_FORMAT_B8G8R8X8_UNORM;
-                                    case DXGI_FORMAT_R10G10B10A2_TYPELESS: return DXGI_FORMAT_R10G10B10A2_UNORM;
-                                    case DXGI_FORMAT_R16G16B16A16_TYPELESS:return DXGI_FORMAT_R16G16B16A16_FLOAT;
-                                    default: return f;
-                                    }
-                                };
-                                if (srcMsaa) {
-                                    DXGI_FORMAT typed = ChooseTyped(srcDesc.Format);
-                                    g_pImmediateContext->ResolveSubresource(g_BeforeUiCopy, 0, pTexture, 0, typed);
-                                } else {
-                                    g_pImmediateContext->CopyResource(g_BeforeUiCopy, pTexture);
-                                }
-                            }
-
-                            if (auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands()) {
-                                if (!pRenderPassCommands->BeforeUi.Empty()) {
-                                    pRenderPassCommands->OnBeforeUi(pTexture);
-                                }
-                                if (!pRenderPassCommands->BeforeUi2.Empty()) {
-                                    pRenderPassCommands->OnBeforeUi2(pRenderTargetViews[0]);
-                                }
-                            }
-                            // Do not release pTexture here; global holds it.
                         }
-                        else {
-                            if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
+                        if(!pRenderPassCommands->BeforeUi2.Empty()) {
+                            pRenderPassCommands->OnBeforeUi2(pRenderTargetViews[0]); 
                         }
-                        pRenderTargetViewResource->Release();
+        
                     }
-
-                    // No queue call needs ownership of RTV; release it.
-                    pRenderTargetViews[0]->Release();
                 }
+                if(g_BeforeUiRT) g_BeforeUiRT->Release();
+                g_BeforeUiRT = pRenderTargetViews[0];
             }
         }
         g_bDetectSmoke = false;
@@ -1765,6 +1867,17 @@ void STDMETHODCALLTYPE New_PSSetShader(ID3D11DeviceContext* This,
     UINT NumClassInstances) {
 
     if (This == g_pImmediateContext) {
+        if(2 <= g_iRenderContextDebug) {
+            char temp[1024];
+            UINT dataSize = 1023;
+            if (pPixelShader && SUCCEEDED(pPixelShader->GetPrivateData(WKPDID_D3DDebugObjectName, &dataSize, &temp[0])) && 0 <= dataSize && dataSize < 1024) {
+                temp[dataSize] = '\0';
+            } else {
+                    temp[0] = '\0';
+            }
+            advancedfx::Message("AFXDEBUG: New_PSSetShader(0x%016x \"%s\" [%lu],0x%016x,%u)\n",pPixelShader,temp,dataSize,ppClassInstances,NumClassInstances);
+        }
+
         if (g_bDetectSmoke && pPixelShader && nullptr == ppClassInstances && NumClassInstances == 0) {
             const char* pKey = "write_smoke_depth_water_reflect";
             const size_t keyLen = 31;
@@ -1883,39 +1996,7 @@ HRESULT WINAPI New_D3D11CreateDevice(
     return result;
 }
 
-typedef HRESULT (STDMETHODCALLTYPE * Present_t)( void * This,
-            /* [in] */ UINT SyncInterval,
-            /* [in] */ UINT Flags);
-
-Present_t g_OldPresent = nullptr;
-
-// Hook IDXGISwapChain::ResizeBuffers to properly handle windowed resolution changes
-typedef HRESULT (STDMETHODCALLTYPE * ResizeBuffers_t)( void * This,
-            /* [in] */ UINT BufferCount,
-            /* [in] */ UINT Width,
-            /* [in] */ UINT Height,
-            /* [in] */ DXGI_FORMAT NewFormat,
-            /* [in] */ UINT SwapChainFlags);
-
-ResizeBuffers_t g_OldResizeBuffers = nullptr;
-
-// ResizeBuffers detour: mark resize pending; actual resource handling is deferred to Present.
-std::atomic<bool> g_OverlayResizePending{false};
-std::atomic<int>  g_OverlayResizeRetry{0};
-// Quarantine: skip overlay and all backbuffer queries for a few frames after resize or when we detect transitional swapchain states.
-std::atomic<int>  g_OverlayQuarantineFrames{0};
-
-// Forward declaration to avoid including overlay sources here
-namespace advancedfx { namespace overlay { bool IsInPlatformWindowsPresent(); } }
-
-HRESULT STDMETHODCALLTYPE New_Present( void * This,
-            /* [in] */ UINT SyncInterval,
-            /* [in] */ UINT Flags) {
-    // Skip all overlay work when ImGui is presenting platform viewports.
-    // This prevents re-entrant Overlay::BeginFrame()/ImGui::NewFrame() calls.
-    if (advancedfx::overlay::IsInPlatformWindowsPresent())
-        return g_OldPresent(This, SyncInterval, Flags);
-
+void Before_Present() {
     g_bInOwnDraw = true;
     // Track the main swapchain only (platform windows were filtered above).
     IDXGISwapChain* sc_present = reinterpret_cast<IDXGISwapChain*>(This);
@@ -1953,155 +2034,55 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
 
     if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
     {
-        if(!pRenderPassCommands->BeforePresent.Empty()
-            && !g_OverlayResizePending.load(std::memory_order_relaxed)
-            && g_OverlayQuarantineFrames.load(std::memory_order_relaxed) <= 0) {
-            ID3D11Texture2D * pTexture = nullptr;
-            IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
-            if(sc) sc->GetBuffer(0,__uuidof(ID3D11Texture2D), (void**)&pTexture);
-            pRenderPassCommands->OnBeforePresent(pTexture);
-            if(pTexture) pTexture->Release();
-        }
-    }
-
-    // Render overlay just before present if visible.
-    {
-        auto &overlay = advancedfx::overlay::Overlay::Get();
-        static bool s_loggedNoRenderer = false;
-        // Ensure WndProc hook is on the current window if we have one
-        {
-            IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
-            DXGI_SWAP_CHAIN_DESC tmp = {};
-            if (sc && sc == g_pMainSwapChain && SUCCEEDED(sc->GetDesc(&tmp))) {
-                auto router = overlay.GetInputRouter();
-                void* cur = router ? router->GetAttachedHwnd() : nullptr;
-                if (router && tmp.OutputWindow && cur && cur != tmp.OutputWindow) {
-                    // Avoid reattaching to Dear ImGui platform windows; their WndProc is owned by the backend.
-                    wchar_t cls[64] = {0};
-                    bool is_imgui_platform = false;
-                    if (GetClassNameW((HWND)tmp.OutputWindow, cls, (int)(sizeof(cls)/sizeof(cls[0])))) {
-                        if (0 == wcscmp(cls, L"ImGui Platform"))
-                            is_imgui_platform = true;
+        if(!pRenderPassCommands->BeforePresent.Empty()) {
+            ID3D11Resource* pRenderTargetViewResource = nullptr;
+            if(g_BeforeUiRT) {
+                g_BeforeUiRT->GetResource(&pRenderTargetViewResource);
+                if(pRenderTargetViewResource) {
+                    ID3D11Texture2D * pTexture = nullptr;
+                    if(SUCCEEDED(pRenderTargetViewResource->QueryInterface(__uuidof(ID3D11Texture2D),(void**)&pTexture))){
+                        if(pTexture) {
+                            pRenderPassCommands->OnBeforePresent(pTexture);
+                            pTexture->Release();
+                        }
                     }
-                    if (!is_imgui_platform) {
-                        router->Detach();
-                        router->Attach(tmp.OutputWindow);
-                        advancedfx::Message("Overlay: WndProc hook reattached hwnd=0x%p\n", tmp.OutputWindow);
-                    }
+                    pRenderTargetViewResource->Release();
                 }
             }
         }
-        if (!overlay.HasRenderer()) {
-            // Try to lazily initialize the overlay renderer here as well using the actual swapchain being presented.
-            IDXGISwapChain* sc = g_pMainSwapChain ? g_pMainSwapChain : reinterpret_cast<IDXGISwapChain*>(This);
-            if (sc) {
-                ID3D11Device* pDev = nullptr;
-                ID3D11DeviceContext* pCtx = nullptr;
-                if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D11Device), (void**)&pDev)) && pDev) {
-                    pDev->GetImmediateContext(&pCtx);
-                    DXGI_SWAP_CHAIN_DESC desc = {};
-                    if (pCtx && SUCCEEDED(sc->GetDesc(&desc))) {
-                        overlay.SetRenderer(std::unique_ptr<advancedfx::overlay::IOverlayRenderer>(
-                            new advancedfx::overlay::OverlayDx11(pDev, pCtx, sc, desc.OutputWindow))
-                        );
-                    }
-                    if (pCtx) pCtx->Release();
-                    pDev->Release();
-                }
-            }
-            if (!overlay.HasRenderer() && !s_loggedNoRenderer) {
-                advancedfx::Message("Overlay: no supported renderer detected\n");
-                s_loggedNoRenderer = true;
-            }
-        }
-        // Skip rendering overlay while a resize is pending or quarantine is active to avoid touching backbuffers mid-transition.
-        if (overlay.IsVisible()
-            && !g_OverlayResizePending.load(std::memory_order_relaxed)
-            && g_OverlayQuarantineFrames.load(std::memory_order_relaxed) <= 0) {
-            overlay.BeginFrame();
-            overlay.RenderFrame();
-            overlay.EndFrame();
-        }
     }
+}
 
-    HRESULT result = g_OldPresent(This, SyncInterval, Flags);
-
+void After_Present() {
     if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands()) {
         pRenderPassCommands->OnAfterPresent();
         pRenderPassCommands->OnAfterPresentOrContextLossReliable();
     }
 
-    g_RenderCommands.RenderThread_EndFrame(g_pImmediateContext);
+    g_RenderCommands.RenderThread_EndFrame(g_pImmediateContext);    
+    g_DepthCompositor.OnEndFrame();
 
 	g_ReShadeAdvancedfx.ResetHasRendered();
 
-    g_DepthCompositor.OnPresent();
-
-    // After the app's main Present() completed, update and present ImGui platform windows.
-    {
-        auto &overlay = advancedfx::overlay::Overlay::Get();
-        if (overlay.IsVisible())
-            overlay.RenderPlatformWindows();
-    }
-
-    // Detect transitional swapchain states (legacy DISCARD + single buffer) and enter a short quarantine.
-    {
-        IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
-        DXGI_SWAP_CHAIN_DESC d = {};
-        if (sc && SUCCEEDED(sc->GetDesc(&d))) {
-            if (d.BufferCount == 1 && d.SwapEffect == DXGI_SWAP_EFFECT_DISCARD) {
-                // Quarantine for N frames to avoid backbuffer queries while engine transitions.
-                int q = g_OverlayQuarantineFrames.load(std::memory_order_relaxed);
-                if (q <= 0) {
-                    g_OverlayQuarantineFrames.store(15, std::memory_order_relaxed);
-                    advancedfx::Message("Overlay: quarantine enter (DISCARD+1)\n");
-                }
-            }
-        }
-        int q = g_OverlayQuarantineFrames.load(std::memory_order_relaxed);
-        if (q > 0) g_OverlayQuarantineFrames.store(q - 1, std::memory_order_relaxed);
-    }
-
-    // Handle pending resize after the app presented the first post-resize frame
-    if (g_OverlayResizePending.load(std::memory_order_relaxed)) {
-        auto &overlay = advancedfx::overlay::Overlay::Get();
-        // Try to determine new size from the backbuffer (now more likely valid)
-        UINT newW = 0, newH = 0;
-        IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
-        if (sc) {
-            ID3D11Texture2D* backbuffer = nullptr;
-            if (SUCCEEDED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backbuffer)) && backbuffer) {
-                D3D11_TEXTURE2D_DESC bbDesc = {};
-                backbuffer->GetDesc(&bbDesc);
-                newW = bbDesc.Width; newH = bbDesc.Height;
-                backbuffer->Release();
-            }
-        }
-        if (newW != 0 && newH != 0) {
-            if (overlay.HasRenderer()) {
-                overlay.OnDeviceLost();
-                overlay.OnResize(newW, newH);
-            }
-            g_OverlayResizePending.store(false, std::memory_order_relaxed);
-        } else {
-            int tries = g_OverlayResizeRetry.load(std::memory_order_relaxed);
-            if (tries > 5) {
-                // Give up and clear pending to avoid blocking overlay indefinitely
-                g_OverlayResizePending.store(false, std::memory_order_relaxed);
-            } else {
-                g_OverlayResizeRetry.store(tries + 1, std::memory_order_relaxed);
-            }
-        }
-    }
-
     g_bInOwnDraw = false;
 
+    if(g_BeforeUiRT) g_BeforeUiRT->Release();
+    g_BeforeUiRT = nullptr;
     g_iDraw = 0;
+}
 
-    // Release per-frame preview texture captured at BeforeUi.
-    if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
-    if (g_BeforeUiCopy)   { g_BeforeUiCopy->Release();   g_BeforeUiCopy   = nullptr; ZeroMemory(&g_BeforeUiCopyDesc, sizeof(g_BeforeUiCopyDesc)); }
-    // AfterUi/PrePresent cleanup removed
+HRESULT STDMETHODCALLTYPE New_Present( void * This,
+            /* [in] */ UINT SyncInterval,
+            /* [in] */ UINT Flags) {
+
+    g_Present_LastSyncInterval = SyncInterval;
+    g_Present_LastPresentFlags = Flags;
+ 
+    Before_Present();
+
+    HRESULT result = g_Present_Suppress ? g_Present_LastResult : (g_Present_LastResult = g_OldPresent(This, SyncInterval, Flags));
+    
+    After_Present();
 
     return result;
 }
@@ -2341,8 +2322,13 @@ public:
         }
     }
 
+    ~CRenderSystemConsolePrint() {
+        if(m_Print_Memory) free(m_Print_Memory);
+    }
+
     virtual void OnCallback(void) {
         advancedfx::Message("AFXDEBUG CreateRenderContextPtr%i(%s):%s\n", m_Nr, m_Fmt, m_Print_Memory ? m_Print_Memory : "");
+        delete this;
     }
 
     int m_Nr;
@@ -2389,8 +2375,6 @@ AFXDEBUG CreateRenderContextPtr1(#%s/SetupLightsAndViewConstants):#PanoramaEngin
 AFXDEBUG CreateRenderContextPtr2(SubmitAllDisplayLists):SubmitAllDisplayLists
 */
 
-bool g_bRenderContextDebug = false;
-
 unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr1(unsigned char * param_1, unsigned char param_2, void* pDevice, void * param_4, const char * fmt, ...) {
 
     // It would be possible to pass vararg on with asm trampoline, but it seems unused?
@@ -2398,7 +2382,7 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr1(unsigned char
 
     //TODO: string comparison is expensive, consider to check string address instead.
 
-    if(g_bRenderContextDebug) {
+    if(g_iRenderContextDebug) {
         const char * saveFmt = fmt ? fmt : "[nullptr]";
 
 		// rendersystemdx11.dll
@@ -2425,7 +2409,7 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr1(unsigned char
 		//   }
 
         if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderConStextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[138];
+            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderConStextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
             va_list args;
             va_start(args, fmt);
             fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CRenderSystemConsolePrint(1, saveFmt,args));
@@ -2441,13 +2425,13 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr1(unsigned char
         if(pszArg0 && 0 == strcmp("Player 0",pszArg0) && pszArg1) {
             if (0 == strcmp("ClearSmokeTargets (4)", pszArg1)) {
                 if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[138];
+                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
                     fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackBeforeMaybeDrawSmoke());
                 }
             }
             else if (0 == strcmp("ClearSmokeTargets", pszArg1)) {
                 if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[138];
+                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
                     fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackAfterMaybeSmokeDrawn());
                 }
             }
@@ -2460,7 +2444,7 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr1(unsigned char
         const char * pszArg0 = va_arg(args, const char *);
         if(pszArg0 && 0 == strcmp("CSGOHud",pszArg0)) {
             if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-                auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[138];
+                auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
                 fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackBeforeUi());
             }
         }
@@ -2477,23 +2461,18 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr2(unsigned char
     // It would be possible to pass vararg on with asm trampoline, but it seems unused?
     unsigned char * result = g_Old_SceneSystem_CreateRenderContextPtr2(param_1, param_2,pDevice,"Hooked by HLAE / advancedfx.org, if you happen to actually see this please file a bug report, please!");
 
-    if (fmt && 0 == strcmp(fmt, "#%s/SetupView")) {
-        va_list args;
-        va_start(args, fmt);
-        const char* pszArg0 = va_arg(args, const char*);
-        if (pszArg0 && 0 == strcmp("Player 0", pszArg0)) {
-            if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-                auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[138];
-                fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackSetupViewPlayer0());
-            }
+    if (fmt && 0 == strcmp(fmt, "UpdateBuffers")) {
+        if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
+            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
+            fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackUpdateBuffers());
         }
     }
 
-    if(g_bRenderContextDebug) {
+    if(g_iRenderContextDebug) {
         const char * saveFmt = fmt ? fmt : "[nullptr]";
 
         if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[138];
+            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
             va_list args;
             va_start(args, fmt);
             fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CRenderSystemConsolePrint(2, saveFmt, args));
@@ -2719,7 +2698,7 @@ void EndCapture() {
             auto & queue = pRenderPassCommands.AfterPresentOrContextLossReliable;
             CAfxCapture * capture = g_ActiveCapture;
             queue.Push([capture](IRenderPassCommands* context){
-                capture->Finish(context->GetContext());
+                capture->ShutDown(context->GetContext());
             }); 
         }
         {
@@ -2738,7 +2717,7 @@ void CreateCapture(class advancedfx::COutVideoStreamCreator* pOutVideoStreamCrea
     g_ActiveCapture = new CAfxCapture(pOutVideoStreamCreator, CAfxCapture::CaptureType_Default);
 }
 
-advancedfx::CImageBufferPoolThreadSafe g_ImageBufferPool;
+advancedfx::CGrowingBufferPoolThreadSafe g_ImageBufferPool;
 
 SOURCESDK::CS2::ConVarHandle Unlock_smoke_volume_lod_ratio_change() {
     static SOURCESDK::CS2::ConVarHandle firstResult;
@@ -2816,7 +2795,9 @@ public:
 	void ShutDown(void) {
         if(m_Shutdown) return;
         m_Shutdown = true;
+        RecordEnd();
 		delete m_RecordScreen;
+        m_RecordScreen = nullptr;
     }    
 
     ~CAfxStreams(){
@@ -2868,7 +2849,7 @@ public:
         return m_StreamCaptureType;
     }
 
-    virtual advancedfx::IImageBufferPool * GetImageBufferPool() const {
+    virtual advancedfx::CGrowingBufferPoolThreadSafe * GetImageBufferPool() const {
         return &g_ImageBufferPool;
     }
 
@@ -2887,12 +2868,16 @@ public:
     void Console_Print();
     void Console_Remove(advancedfx::ICommandArgs* args);
 
+    void Console_Edit_RenderCommands(std::list<std::list<std::string>> & commands, advancedfx::ICommandArgs* args);
+
     void RecordStart();
     void RecordEnd();
 
     bool GetRecording() { return m_Recording; }
 
     void EngineThread_Prepare() {
+        m_RecordingExtraPassesIterator = m_RecordingExtraPasses.begin();
+
         if (m_Recording) {
             if (m_AutoForceFullReSmoke) {
                 if (!m_Restore_smoke_volume_lod_ratio_change) {
@@ -2918,7 +2903,40 @@ public:
         }
     }
 
-    void EngineThread_BeginFrame() {
+    bool EngineThread_HasNextRenderPass() {
+        return m_RecordingExtraPassesIterator != m_RecordingExtraPasses.end();
+    }
+
+    void EngineThread_BeginNextRenderPass() {
+        auto it = m_RecordingExtraPassesIterator;
+        while(it != m_RecordingExtraPasses.end()) {
+            it->EngineThread_BeginFrame();
+
+            auto last_it = it;
+            it++;
+            if(it == m_RecordingExtraPasses.end()) break; // done.
+            if(last_it->CompareRenderPass(*it) != 0) break; // done for this render pass.
+        }
+    }
+
+    void EngineThread_EndNextRenderPass() {
+        while(m_RecordingExtraPassesIterator != m_RecordingExtraPasses.end()) {
+            m_RecordingExtraPassesIterator->EngineThread_EndFrame();
+
+            auto last_it = m_RecordingExtraPassesIterator;
+            m_RecordingExtraPassesIterator++;
+            if(m_RecordingExtraPassesIterator == m_RecordingExtraPasses.end()) break; // done.
+            if(last_it->CompareRenderPass(*m_RecordingExtraPassesIterator) != 0) break; // done for this render pass.
+        }
+
+        EngineThread_Suppress_Present();
+    }    
+
+    void EngineThread_BeginMainRenderPass() {
+        for(auto it = m_RecordingMainPass.begin(); it != m_RecordingMainPass.end(); it++) {
+            it->EngineThread_BeginFrame();
+        }
+
         if(m_Recording) {
             auto & pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
 
@@ -2939,28 +2957,16 @@ public:
                 }
             }
         }
-
-        for(auto it = m_RecordingStreams.begin(); it != m_RecordingStreams.end(); it++) {
-            it->EngineThread_Finish();
-        }
-
-        if(!m_RecordingStreams.empty()) {
-            // ClearBeforeUI is a globally shared setting currently:
-            auto & settings = *m_RecordingStreams.begin();
-            float clearColor[4];
-            if(settings.WantsClearBeforeUi(clearColor)) {
-                float R = clearColor[0];
-                float G = clearColor[1];
-                float B = clearColor[2];
-                float A = clearColor[3];  
-                auto & renderPassCommands = g_RenderCommands.EngineThread_GetCommands();              
-                renderPassCommands.BeforeUi2.Push([R,G,B,A](IRenderPassCommands* context, ID3D11RenderTargetView * pTarget){
-                    float clearColor[4] = {R,G,B,A};
-                    context->GetContext()->ClearRenderTargetView(pTarget, clearColor);
-                });
-            }
-        }
     }
+
+    void EngineThread_EndMainRenderPass() {
+        for(auto it = m_RecordingMainPass.begin(); it != m_RecordingMainPass.end(); it++) {
+            it->EngineThread_EndFrame();
+        }
+
+        if(EngineThread_HasNextRenderPass()) EngineThread_Expect_Present();
+    }
+
 
 private:
     class CStream : public advancedfx::IRecordStreamSettings {
@@ -2981,12 +2987,14 @@ private:
                 captureType = CAfxCapture::CaptureType_Default;
             };
 
-            m_Capture = new CAfxCapture(m_Settings.Settings->CreateOutVideoStreamCreator(
+            auto videoStreamCreator = m_Settings.Settings->CreateOutVideoStreamCreator(
                 *this,
                 *this,
                 m_Streams->m_StartHostFrameRateValue,
                 ""
-            ), captureType);
+            );
+            m_Capture = new CAfxCapture(videoStreamCreator, captureType);
+            videoStreamCreator->Release();
 		}
 
 		~CStream() {
@@ -2995,7 +3003,7 @@ private:
                 auto & queue = pRenderPassCommands.AfterPresentOrContextLossReliable;
                 CAfxCapture * capture = m_Capture;
                 queue.Push([capture](IRenderPassCommands* context){
-                    capture->Finish(context->GetContext());
+                    capture->ShutDown(context->GetContext());
                 }); 
             }
             {
@@ -3042,7 +3050,7 @@ private:
             return advancedfx::StreamCaptureType::Invalid;
         }
 
-        virtual  advancedfx::IImageBufferPool * GetImageBufferPool() const {
+        virtual  advancedfx::CGrowingBufferPoolThreadSafe * GetImageBufferPool() const {
             return &g_ImageBufferPool;
         }
 
@@ -3050,7 +3058,27 @@ private:
             return m_Streams->GetFormatBmpNotTga();
         }
 
-        void EngineThread_Finish() {
+        void EngineThread_BeginFrame() const {
+            // Execute before commands:
+            if(!m_Settings.BeforeCommands.empty())
+                ExecuteCommands(m_Settings.BeforeCommands);
+
+            // Setup clear color:
+            float clearColor[4];
+            if(WantsClearBeforeUi(clearColor)) {
+                float R = clearColor[0];
+                float G = clearColor[1];
+                float B = clearColor[2];
+                float A = clearColor[3];  
+                auto & renderPassCommands = g_RenderCommands.EngineThread_GetCommands();              
+                renderPassCommands.BeforeUi2.Push([R,G,B,A](IRenderPassCommands* context, ID3D11RenderTargetView * pTarget){
+                    float clearColor[4] = {R,G,B,A};
+                    context->GetContext()->ClearRenderTargetView(pTarget, clearColor);
+                });
+            }
+
+            // Setup capturing:
+
             if(nullptr == m_Capture) return;
 
             auto & renderPassCommands = g_RenderCommands.EngineThread_GetCommands();
@@ -3147,7 +3175,13 @@ private:
             }            
         }
 
-        bool WantsClearBeforeUi(float outColor[4]) {
+        void EngineThread_EndFrame() const {
+            // Execute after commands:
+            if(!m_Settings.AfterCommands.empty())
+                ExecuteCommands(m_Settings.AfterCommands);
+        }        
+
+        bool WantsClearBeforeUi(float outColor[4]) const {
             if(m_Settings.ClearBeforeUi) {
                 outColor[0] = m_Settings.ClearBeforeUiColor.R;
                 outColor[1] = m_Settings.ClearBeforeUiColor.G;
@@ -3158,13 +3192,235 @@ private:
             return false;
         }
 
+        bool CanCaptureInMainPass() const {
+            return m_Settings.CanCaptureInMainPass();                
+        }
+
+        int CompareRenderPass(const CStream & o) const {
+            return m_Settings.CompareRenderPass(o.m_Settings);
+        }
+
     private:
         CAfxStreams * m_Streams;
         CStreamSettings m_Settings;
         CAfxCapture * m_Capture;
+
+        void ExecuteCommands(const std::list<std::list<std::string>> & commands) const {
+            for(auto it = commands.begin(); it != commands.end(); it++) {
+                auto & command = *it;
+                auto it2 = command.begin();
+                if(it2 == command.end()) continue;
+                const char * pArg0 = it2->c_str();
+                auto cvar_handle = SOURCESDK::CS2::g_pCVar->FindConVar(pArg0, false);
+                if(SOURCESDK::CS2::Cvar_s * p_cvar = SOURCESDK::CS2::g_pCVar->GetCvar(cvar_handle.Get())) {
+                    const char * pszError = nullptr;
+                    const char * pszWrongNumberOfArguments = "Wrong number of arguments";
+                    auto & value = p_cvar->m_Value;
+                    switch(p_cvar->m_eVarType) {
+                    case SOURCESDK::CS2::EConVarType_Bool:
+                        if(command.size() < 2) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++;
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_bValue = value.m_bValue;
+                            value.m_bValue = 0 == strcmp("true", it2->c_str()) || 0 != std::strtol(it2->c_str(),nullptr,10);
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    case SOURCESDK::CS2::EConVarType_Int16:
+                        if(command.size() < 2) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++;
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_i16Value = value.m_i16Value;                            
+                            value.m_i16Value = (int16_t)std::strtol(it2->c_str(),nullptr,10);
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    case SOURCESDK::CS2::EConVarType_UInt16:
+                        if(command.size() < 2) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++;
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_u16Value = value.m_u16Value;                            
+                            value.m_u16Value = (uint16_t)std::strtoul(it2->c_str(),nullptr,10);
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    case SOURCESDK::CS2::EConVarType_Int32:
+                        if(command.size() < 2) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++;
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_i32Value = value.m_i32Value;                               
+                            value.m_i32Value = (int32_t)std::strtol(it2->c_str(),nullptr,10);
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    case SOURCESDK::CS2::EConVarType_UInt32:
+                        if(command.size() < 2) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++;
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_u32Value = value.m_u32Value;                               
+                            value.m_u32Value = (uint32_t)std::strtoul(it2->c_str(),nullptr,10);
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    case SOURCESDK::CS2::EConVarType_Int64:
+                        if(command.size() < 2) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++;
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_i64Value = value.m_i64Value;                               
+                            value.m_i64Value = (int64_t)std::strtoll(it2->c_str(),nullptr,10);
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    case SOURCESDK::CS2::EConVarType_UInt64:
+                        if(command.size() < 2) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++;
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_u64Value = value.m_u64Value;                               
+                            value.m_u64Value = (uint64_t)std::strtoull(it2->c_str(),nullptr,10);
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    case SOURCESDK::CS2::EConVarType_Float32:
+                        if(command.size() < 2) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++;
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_flValue = value.m_flValue;                               
+                            value.m_flValue = std::strtof(it2->c_str(),nullptr);
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;                    
+                    case SOURCESDK::CS2::EConVarType_Float64:
+                        if(command.size() < 2) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++;
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_dbValue = value.m_dbValue;                               
+                            value.m_dbValue = std::strtod(it2->c_str(),nullptr);
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }    
+                        break;           
+                    case SOURCESDK::CS2::EConVarType_String:
+                        if(command.size() < 2) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++;
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_szValue.Set(value.m_szValue.Get());
+                            value.m_szValue.Set(it2->c_str());
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }    
+                        break;           
+                    case SOURCESDK::CS2::EConVarType_Color:
+                        if(command.size() < 5) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++; float f1 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f2 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f3 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f4 =std::strtof( it2->c_str(),nullptr);
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_clrValue = value.m_clrValue;
+                            value.m_clrValue.SetColor(f1,f2,f3,f4);
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;                    
+                    case SOURCESDK::CS2::EConVarType_Vector2:
+                        if(command.size() < 3) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++; float f1 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f2 = std::strtof(it2->c_str(),nullptr);
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_vec2Value = value.m_vec2Value;
+                            value.m_vec2Value.x = f1;
+                            value.m_vec2Value.y = f2;
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    case SOURCESDK::CS2::EConVarType_Vector3:
+                        if(command.size() < 4) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++; float f1 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f2 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f3 = std::strtof(it2->c_str(),nullptr);
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_vec3Value = value.m_vec3Value;
+                            value.m_vec3Value.x = f1;
+                            value.m_vec3Value.y = f2;
+                            value.m_vec3Value.z = f3;
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    case SOURCESDK::CS2::EConVarType_Vector4:
+                        if(command.size() < 5) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++; float f1 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f2 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f3 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f4 =std::strtof( it2->c_str(),nullptr);
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_vec4Value = value.m_vec4Value;
+                            value.m_vec4Value.x = f1;
+                            value.m_vec4Value.y = f2;
+                            value.m_vec4Value.z = f3;
+                            value.m_vec4Value.w = f4;
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    case SOURCESDK::CS2::EConVarType_Qangle:
+                        if(command.size() < 4) pszError = pszWrongNumberOfArguments;
+                        else  {
+                            it2++; float f1 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f2 = std::strtof(it2->c_str(),nullptr);
+                            it2++; float f3 = std::strtof(it2->c_str(),nullptr);
+                            SOURCESDK::CS2::CVValue_t oldValue = {};
+                            oldValue.m_angValue = value.m_angValue;
+                            value.m_angValue.x = f1;
+                            value.m_angValue.y = f2;
+                            value.m_angValue.z = f3;
+                            SOURCESDK::CS2::g_pCVar->CallChangeCallback(cvar_handle, 0, &value, &oldValue);
+                        }
+                        break;
+                    default:
+                        pszError = "Unknown cvar type";
+                        break;
+                    }
+                    if(pszError){
+                        advancedfx::Warning("AFXWARNING: \"%s\" cvar to be set has the following problem: %s.", pArg0,pszError);
+                    }
+                } else {
+                   SOURCESDK::CS2::ConCommandHandle cmd_handle = SOURCESDK::CS2::g_pCVar->FindCommand(pArg0, false );
+                    if(cmd_handle.IsValid()) {
+                        std::vector<const char *> vecArgs(command.size());
+                        size_t i = 0;
+                        while(it2 != command.end()) {
+                            vecArgs[i] = it2->c_str();
+                            it2++;
+                            i++;
+                        }
+                        SOURCESDK::CS2::g_pCVar->DispatchConCommand(cmd_handle, SOURCESDK::CS2::CCommandContext(SOURCESDK::CS2::CT_FIRST_SPLITSCREEN_CLIENT,0), SOURCESDK::CS2::CCommand(vecArgs.size(),vecArgs.data()));
+                    } else {
+                        advancedfx::Warning("AFXWARNING: \"%s\" to be set / executed is not a command or cvar.", pArg0);
+                    }
+                }
+            }
+        }
 	};
 
-    std::list<CStream> m_RecordingStreams;
+    struct RenderPassCompare {
+          bool operator() (const CStream & lhs, const CStream & rhs) const {
+            return lhs.CompareRenderPass(rhs) < 0;
+        }
+    };
+
+    std::list<CStream> m_RecordingMainPass;
+    std::multiset<CStream,RenderPassCompare> m_RecordingExtraPasses;
+    std::multiset<CStream,RenderPassCompare>::iterator m_RecordingExtraPassesIterator;
 
     std::map<std::string, CStreamSettings> m_Streams;
 
@@ -3243,20 +3499,54 @@ private:
 
         return true;
     }
+
+    void EngineThread_Suppress_Present() {
+        auto & pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
+        {
+            auto & queue = pRenderPassCommands.BeforePresent;
+            CAfxCapture * capture = g_ActiveCapture;
+            queue.Push([capture](IRenderPassCommands* context, ID3D11Texture2D * pTexture){
+                g_Present_Suppress = true;
+            }); 
+        }
+        {
+            auto & queue = pRenderPassCommands.AfterPresent;
+            CAfxCapture * capture = g_ActiveCapture;
+            queue.Push([capture](IRenderPassCommands* context){
+                g_Present_Suppress = false;
+            }); 
+        }
+    }
+
+    void EngineThread_Expect_Present() {
+        auto & pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
+        {
+            auto & queue = pRenderPassCommands.BeforePresent;
+            CAfxCapture * capture = g_ActiveCapture;
+            queue.Push([capture](IRenderPassCommands* context, ID3D11Texture2D * pTexture){
+                g_bExpectPresent = true;
+            }); 
+        }
+        {
+            auto & queue = pRenderPassCommands.AfterPresent;
+            CAfxCapture * capture = g_ActiveCapture;
+            queue.Push([capture](IRenderPassCommands* context){
+                g_bExpectPresent = false;
+            }); 
+        }        
+    }
 } g_AfxStreams;
+
+void AfxStreams_ShutDown() {
+    g_AfxStreams.ShutDown();
+}
 
 bool g_bEngine_Prepared = false;
 
 bool __fastcall New_CRenderDeviceBase_Present(
     void * This, void * Rdx, void * R8d, void * R9d, void * Stack0, void * Stack1, void * Stack2, void * Stack3, void * Stack4) {
 
-    g_CampathDrawer.OnEngineThread_EndFrame();
-
-    g_RenderCommands.EngineThread_BeforePresent();
-
     bool result = g_Old_CRenderDeviceBase_Present(This, Rdx, R8d, R9d, Stack0, Stack1, Stack2, Stack3, Stack4);
-
-    g_RenderCommands.EngineThread_AfterPresent(result);
 
     g_bEngine_Prepared = false;
 
@@ -3334,7 +3624,18 @@ void CAfxStreams::Console_Add(advancedfx::ICommandArgs* args) {
         CStreamSettings settings(advancedfx::CRecordingSettings::GetDefault());
 
         if(0 == _stricmp(arg1,"normal")) {
-
+        } else if(0 == _stricmp(arg1,"hudBlack")) {
+            settings.ClearBeforeUiColor.R = 0.0f;
+            settings.ClearBeforeUiColor.G = 0.0f;
+            settings.ClearBeforeUiColor.B = 0.0f;
+            settings.ClearBeforeUiColor.A = 0.0f;
+            settings.ClearBeforeUi = true;
+        } else if(0 == _stricmp(arg1,"hudWhite")) {
+            settings.ClearBeforeUiColor.R = 1.0f;
+            settings.ClearBeforeUiColor.G = 1.0f;
+            settings.ClearBeforeUiColor.B = 1.0f;
+            settings.ClearBeforeUiColor.A = 0.0f;
+            settings.ClearBeforeUi = true;
         } else if(0 == _stricmp(arg1,"depth")) {
             settings.Capture = CStreamSettings::Capture_e::BeforeUi;
             settings.CaptureType = CStreamSettings::CaptureType_e::DepthRgb;
@@ -3359,13 +3660,6 @@ void CAfxStreams::Console_Add(advancedfx::ICommandArgs* args) {
         auto it = m_Streams.begin();
         if(it != m_Streams.end()) {
             // Copy globally shared settings from first stream:
-
-            settings.ClearBeforeUi = it->second.ClearBeforeUi;
-            settings.ClearBeforeUiColor.R = it->second.ClearBeforeUiColor.R;
-            settings.ClearBeforeUiColor.G = it->second.ClearBeforeUiColor.G;
-            settings.ClearBeforeUiColor.B = it->second.ClearBeforeUiColor.B;
-            settings.ClearBeforeUiColor.A = it->second.ClearBeforeUiColor.A;
-
             settings.AutoForceFullResSmoke = it->second.AutoForceFullResSmoke;
         }
 
@@ -3374,7 +3668,58 @@ void CAfxStreams::Console_Add(advancedfx::ICommandArgs* args) {
 	}
 
 	advancedfx::Message(
-		"%s normal|depth <sUiniqueStreamName> - Adds a stream of given type.\n"
+		"%s normal|depth|hudBlack|hudWhite <sUiniqueStreamName> - Adds a stream of given type.\n"
+		, arg0
+	);
+}
+
+void CAfxStreams::Console_Edit_RenderCommands(std::list<std::list<std::string>> & commands, advancedfx::ICommandArgs* args) {
+ 	int argC = args->ArgC();
+	char const* arg0 = args->ArgV(0);
+    
+    if(2 <= argC) {
+        char const* arg1 = args->ArgV(1);
+        if(0 == strcmp("add", arg1))
+        {
+            if(3 <= argC) {
+                std::list<std::string> command;
+                for(int i = 2; i < argC; i++) {
+                    command.emplace_back(args->ArgV(i));
+                }
+                commands.emplace_back(command);
+                return;
+            }
+            advancedfx::Message(
+                "%s add <sCommandOrCvar> (<sArgument>)*\n"
+                , arg0
+            );
+            return;
+        }
+        else if(0 == strcmp("print",arg1)) {
+            int index = 0;
+            for(auto it = commands.begin(); it != commands.end(); it++){
+                auto & command = *it;
+                advancedfx::Message("%i:", index);
+                for(auto it2 = command.begin(); it2 != command.end(); it2++){
+                    advancedfx::Message(" \"%s\"", it2->c_str());                    
+                }
+                advancedfx::Message("\n");
+                index++;
+            }
+            return;
+        }
+        else if(0 == strcmp("clear",arg1)) {
+            commands.clear();
+            return;
+        }
+    }
+    
+	advancedfx::Message(
+		"%s add [...] - Adds a command with arguments to the list.\n"
+		"%s print - Prints the command list.\n"
+		"%s clear - Clears the command list.\n"
+		, arg0
+		, arg0
 		, arg0
 	);
 }
@@ -3677,14 +4022,7 @@ void CAfxStreams::Console_Edit(advancedfx::ICommandArgs* args) {
                 if(4 <= argC) {
                     if(4 == argC) {
                         if(0 == _stricmp("none", args->ArgV(3))) {
-                            bool bChanged = false;
-                            for(auto it2=m_Streams.begin();it2!=m_Streams.end();it2++) {
-                                bChanged = bChanged || it != it2 && it2->second.ClearBeforeUi != false;
-                                it2->second.ClearBeforeUi = false;
-                            }
-                            if(bChanged) {
-                                advancedfx::Warning("AFXWarning: Value is globally shared and has been changed on other streams.\n");
-                            }
+                            it->second.ClearBeforeUi = false;
                             return;
                         }
                     } else if(7 == argC) {
@@ -3693,30 +4031,17 @@ void CAfxStreams::Console_Edit(advancedfx::ICommandArgs* args) {
                         float g = atof(args->ArgV(4));
                         float b = atof(args->ArgV(5));
                         float a = atof(args->ArgV(6));
-                        for(auto it2=m_Streams.begin();it2!=m_Streams.end();it2++) {
-                            bChanged = bChanged || it != it2 && (
-                                it2->second.ClearBeforeUi != true
-                                || it2->second.ClearBeforeUiColor.R != r
-                                || it2->second.ClearBeforeUiColor.G != g
-                                || it2->second.ClearBeforeUiColor.B != b
-                                || it2->second.ClearBeforeUiColor.A != a
-                            );
-                            it2->second.ClearBeforeUi = true;
-                            it2->second.ClearBeforeUiColor.R = r;
-                            it2->second.ClearBeforeUiColor.G = g;
-                            it2->second.ClearBeforeUiColor.B = b;
-                            it2->second.ClearBeforeUiColor.A = a;
-                        }
-                        if(bChanged) {
-                            advancedfx::Warning("AFXWarning: Value is globally shared and has been changed on other streams.\n");
-                        }
+                        it->second.ClearBeforeUi = true;
+                        it->second.ClearBeforeUiColor.R = r;
+                        it->second.ClearBeforeUiColor.G = g;
+                        it->second.ClearBeforeUiColor.B = b;
+                        it->second.ClearBeforeUiColor.A = a;
                         return;
                     }
                 }
 
                 advancedfx::Message(
-                    "%s %s clearBeforeUI none|(<fRed> <fGreen> <fBlue> <fAlpha>) - Whether not to clear (none, default) or in which color (floating point values in range [0.0, 1.0]).\n"
-                    "\tAttention: This value is _currently_ globally shared, changeing it for one stream changes it also for all others.\n"
+                    "%s %s clearBeforeUI none|(<fRed> <fGreen> <fBlue> <fAlpha>) - Whether or not to clear (none, default) or in which color (floating point values in range [0.0, 1.0]).\n"
                     , arg0, arg1
                 );
                 if(!stream.ClearBeforeUi) advancedfx::Message(
@@ -3749,6 +4074,14 @@ void CAfxStreams::Console_Edit(advancedfx::ICommandArgs* args) {
                     , arg0, arg1
                     , stream.AutoForceFullResSmoke ? 1 : 0
                 );
+                return;
+            } else if(0 == _stricmp("beforeCommands", arg2)) {
+                advancedfx::CSubCommandArgs subArgs(args, 3);
+                g_AfxStreams.Console_Edit_RenderCommands(stream.BeforeCommands, &subArgs);
+                return;            
+            } else if(0 == _stricmp("afterCommands", arg2)) {
+                advancedfx::CSubCommandArgs subArgs(args, 3);
+                g_AfxStreams.Console_Edit_RenderCommands(stream.AfterCommands, &subArgs);
                 return;
             }
         }
@@ -3790,14 +4123,22 @@ void CAfxStreams::Console_Edit(advancedfx::ICommandArgs* args) {
             , arg0, arg1
         );
         advancedfx::Message(
-            "%s %s clearBeforeUI  [...] - If and with what color to clear before Panorama UI. (Globally shared!)\n"
+            "%s %s clearBeforeUI  [...] - If and with what color to clear before Panorama UI.\n"
             , arg0, arg1
         );
         advancedfx::Message(
             "%s %s autoForceFullResSmoke [...] - When capturing smoke depth: If to force the engine into full resolution smoke passes (recommended). (Globally shared!)\n"
             , arg0, arg1
         );
-        return;
+        advancedfx::Message(
+            "%s %s beforeCommands [...] - Commands to execute before the stream is rendered.\n"
+            , arg0, arg1
+        );        
+        advancedfx::Message(
+            "%s %s afterCommands [...] - Commands to execute before the stream is rendered.\n"
+            , arg0, arg1
+        );
+		return;
     }
 
 	advancedfx::Message(
@@ -3965,14 +4306,14 @@ void CAfxStreams::RecordStart()
 		}
 
 		if(m_RecordScreen->Enabled) {
-			CreateCapture(
-				m_RecordScreen->Settings->CreateOutVideoStreamCreator(
-					*this,
-					*this,
-					m_StartHostFrameRateValue,
-					""
-				)
-			);
+            auto videoStreamCreator = m_RecordScreen->Settings->CreateOutVideoStreamCreator(
+                *this,
+                *this,
+                m_StartHostFrameRateValue,
+                ""
+            );
+			CreateCapture(videoStreamCreator);
+            videoStreamCreator->Release();
 		}
 
         m_AutoForceFullReSmoke = false;
@@ -3982,7 +4323,11 @@ void CAfxStreams::RecordStart()
             if(!it->second.Record) continue;
             m_CompositeSmoke = m_CompositeSmoke || it->second.WantsSmokeComposite();
             m_AutoForceFullReSmoke = m_AutoForceFullReSmoke || it->second.WantsFullResSmoke();
-            m_RecordingStreams.emplace_back(this, it->second);
+
+            if(it->second.CanCaptureInMainPass())
+                m_RecordingMainPass.emplace_back(this, it->second);
+            else
+                m_RecordingExtraPasses.emplace(this, it->second);
         }
 
         if (m_CompositeSmoke) {
@@ -4046,7 +4391,8 @@ void CAfxStreams::RecordEnd()
 			g_S2CamIO.SetCamExport(nullptr);
 		}
 
-        m_RecordingStreams.clear();
+        m_RecordingExtraPasses.clear();
+        m_RecordingMainPass.clear();
 
         if(m_RecordScreen->Enabled) {
             EndCapture();
@@ -4120,9 +4466,6 @@ bool g_bEngine_ReShade_Enabled = true;
 bool g_bEngine_ReShade_FoceSmokeFullresPass = true;
 
 void RenderSystemDX11_EngineThread_Prepare() {
-    if (g_bEngine_Prepared) return;
-    g_bEngine_Prepared = true;
-
     if(g_ReShadeAdvancedfx.IsConnected() && g_bEngine_ReShade_Enabled && g_bEngine_ReShade_FoceSmokeFullresPass) {
         Update_smoke_volume_lod_ratio_change(0.0f);
         Update_r_csgo_mboit_force_mixed_resolution(false);
@@ -4139,11 +4482,33 @@ void RenderSystemDX11_EngineThread_Prepare() {
             g_RenderThread_ProjectionMatrix.Set(projectionMatrix);
         });
     }
-
-    g_AfxStreams.EngineThread_BeginFrame();
-
-    g_RenderCommands.EngineThread_BeginFrame();
 }
+
+void RenderSystemDX11_EngineThread_BeforeRender() {
+    g_RenderCommands.EngineThread_EndFrame();
+    g_CampathDrawer.OnEngineThread_EndFrame();
+}
+
+bool RenderSystemDX11_EngineThread_HasNextRenderPass() {
+    return g_AfxStreams.EngineThread_HasNextRenderPass();
+}
+
+void RenderSystemDX11_EngineThread_BeginNextRenderPass() {
+    g_AfxStreams.EngineThread_BeginNextRenderPass();
+}
+
+void RenderSystemDX11_EngineThread_EndNextRenderPass() {
+    g_AfxStreams.EngineThread_EndNextRenderPass();
+}
+
+void RenderSystemDX11_EngineThread_BeginMainRenderPass() {
+    g_AfxStreams.EngineThread_BeginMainRenderPass();
+}
+
+void RenderSystemDX11_EngineThread_EndMainRenderPass() {
+    g_AfxStreams.EngineThread_EndMainRenderPass();
+}
+
 
 void RenderSystemDX11_SupplyProjectionMatrix(const SOURCESDK::VMatrix & projectionMatrix) {
     g_EngineThread_ProjectionMatrix.Set(projectionMatrix);
@@ -4502,12 +4867,12 @@ CON_COMMAND(__mirv_debug_scenesystem_rendercontexts, "")
     const char * cmd0 = args->ArgV(0);
 
     if(2 <= argc) {
-        g_bRenderContextDebug = 0 != atoi(args->ArgV(1));
+        g_iRenderContextDebug = atoi(args->ArgV(1));
         return;
     }
 
     advancedfx::Message(
         "%s 0|1\n"
         "Current value: %i\n"
-        , cmd0, g_bRenderContextDebug ? 1 : 0);
+        , cmd0, g_iRenderContextDebug);
 }
