@@ -74,8 +74,8 @@ set(HLAE_OVERLAY_SOURCES
     third_party/imguizmo/ImGuizmo.cpp
 )
 
-# Add DX9 backend only on 32-bit (Source 1)
-if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+# Add DX9 backend for Source 1 paths
+if (WIN32)
     list(APPEND HLAE_OVERLAY_SOURCES
         OverlayDx9.h
         OverlayDx9.cpp
@@ -101,8 +101,8 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imguizmo
 )
 
-# For 32-bit (Source 1), allow DX9 overlay to include AfxHookSource headers and deps.
-if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+# For Source 1 overlay paths, allow DX9 overlay to include AfxHookSource headers and deps.
+if (WIN32)
     target_include_directories(${PROJECT_NAME} PRIVATE
         ${CMAKE_SOURCE_DIR}
         ${CMAKE_SOURCE_DIR}/AfxHookSource

@@ -54,9 +54,10 @@
 #include <dxgi.h>
 #include <dxgi1_4.h>
 
-// Forward declarations for overlay resize/quarantine state used across this file
-extern std::atomic<bool> g_OverlayResizePending;
-extern std::atomic<int>  g_OverlayQuarantineFrames;
+// Overlay resize/quarantine state shared with overlay backend.
+std::atomic<bool> g_OverlayResizePending{false};
+std::atomic<int>  g_OverlayResizeRetry{0};
+std::atomic<int>  g_OverlayQuarantineFrames{0};
 
 extern advancedfx::CThreadPool * g_pThreadPool;
 extern advancedfx::CGrowingBufferPoolThreadSafe * g_pImageBufferPoolThreadSafe;
@@ -1237,6 +1238,7 @@ private:
 
 
 IDXGISwapChain * g_pSwapChain = nullptr;
+IDXGISwapChain * g_pMainSwapChain = nullptr; // persistent handle to the game's main swapchain
 UINT g_Present_LastSyncInterval = 0;
 UINT g_Present_LastPresentFlags = DXGI_PRESENT_ALLOW_TEARING;
 bool g_Present_Suppress = false;
@@ -1667,12 +1669,21 @@ typedef HRESULT (STDMETHODCALLTYPE * Present_t)( void * This,
 
 Present_t g_OldPresent = nullptr;
 
+typedef HRESULT (STDMETHODCALLTYPE * ResizeBuffers_t)( void * This,
+            /* [in] */ UINT BufferCount,
+            /* [in] */ UINT Width,
+            /* [in] */ UINT Height,
+            /* [in] */ DXGI_FORMAT NewFormat,
+            /* [in] */ UINT SwapChainFlags);
+
+ResizeBuffers_t g_OldResizeBuffers = nullptr;
+
 HRESULT STDMETHODCALLTYPE New_Present( void * This,
             /* [in] */ UINT SyncInterval,
             /* [in] */ UINT Flags);
 
-void Before_Present();
-void After_Present();
+void Before_Present(void * This, UINT SyncInterval, UINT Flags);
+void After_Present(void * This);
             
 class CAfxRenderCallbackUpdateBuffers : public IRenderThreadCallback
 {
@@ -1683,13 +1694,13 @@ public:
 
     virtual void OnCallback(void) {
         if(g_RenderCommands.RenderThread_FrameBegun()) {
-            Before_Present();
+            Before_Present(g_pSwapChain, g_Present_LastSyncInterval, g_Present_LastPresentFlags);
 
             if(g_bExpectPresent && g_pSwapChain) {
                 g_Present_LastResult = g_OldPresent(g_pSwapChain, g_Present_LastSyncInterval, g_Present_LastPresentFlags);
             }
 
-            After_Present();
+            After_Present(g_pSwapChain);
         }
 
         g_RenderCommands.RenderThread_BeginFrame(g_pImmediateContext);
@@ -1780,30 +1791,80 @@ public:
             ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
             g_pImmediateContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
             if (pRenderTargetViews[0]) {
-                if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
-                {
-                    if(!pRenderPassCommands->BeforeUi.Empty() || !pRenderPassCommands->BeforeUi2.Empty())
-                    {
-                        if(!pRenderPassCommands->BeforeUi.Empty()) {
-                            ID3D11Resource* pRenderTargetViewResource = nullptr;
-                            pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
-                            if(pRenderTargetViewResource) {
-                                ID3D11Texture2D * pTexture = nullptr;
-                                if(SUCCEEDED(pRenderTargetViewResource->QueryInterface(__uuidof(ID3D11Texture2D),(void**)&pTexture))){
-                                    if(pTexture) {
-                                        pRenderPassCommands->OnBeforeUi(pTexture);               
-                                        pTexture->Release();
-                                    }
+                ID3D11Resource* pRenderTargetViewResource = nullptr;
+                pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
+                if (pRenderTargetViewResource) {
+                    ID3D11Texture2D * pTexture = nullptr;
+                    if (SUCCEEDED(pRenderTargetViewResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&pTexture)) && pTexture) {
+                        // Update global preview texture.
+                        if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
+                        g_BeforeUiLatest = pTexture; // keep one ref until Present end
+
+                        // Ensure a single-sample copy for stable sampling.
+                        D3D11_TEXTURE2D_DESC srcDesc = {};
+                        pTexture->GetDesc(&srcDesc);
+                        bool srcMsaa = srcDesc.SampleDesc.Count > 1;
+
+                        D3D11_TEXTURE2D_DESC dstDesc = srcDesc;
+                        dstDesc.SampleDesc.Count = 1;
+                        dstDesc.SampleDesc.Quality = 0;
+                        dstDesc.BindFlags = 0;
+                        dstDesc.MiscFlags = 0;
+                        dstDesc.MipLevels = 1;
+                        dstDesc.ArraySize = 1;
+                        dstDesc.Usage = D3D11_USAGE_DEFAULT;
+
+                        bool needRecreate = (g_BeforeUiCopy == nullptr)
+                            || g_BeforeUiCopyDesc.Width  != dstDesc.Width
+                            || g_BeforeUiCopyDesc.Height != dstDesc.Height
+                            || g_BeforeUiCopyDesc.Format != dstDesc.Format
+                            || g_BeforeUiCopyDesc.SampleDesc.Count != dstDesc.SampleDesc.Count
+                            || g_BeforeUiCopyDesc.SampleDesc.Quality != dstDesc.SampleDesc.Quality;
+                        if (needRecreate) {
+                            if (g_BeforeUiCopy) { g_BeforeUiCopy->Release(); g_BeforeUiCopy = nullptr; }
+                            ID3D11Device* dev = g_pDevice;
+                            if (!dev && g_pImmediateContext) g_pImmediateContext->GetDevice(&dev);
+                            if (dev) {
+                                if (SUCCEEDED(dev->CreateTexture2D(&dstDesc, nullptr, &g_BeforeUiCopy)) && g_BeforeUiCopy) {
+                                    g_BeforeUiCopyDesc = dstDesc;
                                 }
-                                pRenderTargetViewResource->Release();
+                                if (!g_pDevice && dev) dev->Release();
                             }
                         }
-                        if(!pRenderPassCommands->BeforeUi2.Empty()) {
-                            pRenderPassCommands->OnBeforeUi2(pRenderTargetViews[0]); 
+                        if (g_BeforeUiCopy) {
+                            auto ChooseTyped = [](DXGI_FORMAT f)->DXGI_FORMAT {
+                                switch (f) {
+                                case DXGI_FORMAT_R8G8B8A8_TYPELESS:     return DXGI_FORMAT_R8G8B8A8_UNORM;
+                                case DXGI_FORMAT_B8G8R8A8_TYPELESS:     return DXGI_FORMAT_B8G8R8A8_UNORM;
+                                case DXGI_FORMAT_B8G8R8X8_TYPELESS:     return DXGI_FORMAT_B8G8R8X8_UNORM;
+                                case DXGI_FORMAT_R10G10B10A2_TYPELESS:  return DXGI_FORMAT_R10G10B10A2_UNORM;
+                                case DXGI_FORMAT_R16G16B16A16_TYPELESS: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+                                default: return f;
+                                }
+                            };
+                            if (srcMsaa) {
+                                DXGI_FORMAT typed = ChooseTyped(srcDesc.Format);
+                                g_pImmediateContext->ResolveSubresource(g_BeforeUiCopy, 0, pTexture, 0, typed);
+                            } else {
+                                g_pImmediateContext->CopyResource(g_BeforeUiCopy, pTexture);
+                            }
                         }
-        
+
+                        if (auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands()) {
+                            if (!pRenderPassCommands->BeforeUi.Empty()) {
+                                pRenderPassCommands->OnBeforeUi(pTexture);
+                            }
+                            if (!pRenderPassCommands->BeforeUi2.Empty()) {
+                                pRenderPassCommands->OnBeforeUi2(pRenderTargetViews[0]);
+                            }
+                        }
+                        // Do not release pTexture here, g_BeforeUiLatest owns it.
+                    } else {
+                        if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
                     }
+                    pRenderTargetViewResource->Release();
                 }
+
                 if(g_BeforeUiRT) g_BeforeUiRT->Release();
                 g_BeforeUiRT = pRenderTargetViews[0];
             }
@@ -1996,7 +2057,9 @@ HRESULT WINAPI New_D3D11CreateDevice(
     return result;
 }
 
-void Before_Present() {
+namespace advancedfx { namespace overlay { bool IsInPlatformWindowsPresent(); } }
+
+void Before_Present(void * This, UINT SyncInterval, UINT Flags) {
     g_bInOwnDraw = true;
     // Track the main swapchain only (platform windows were filtered above).
     IDXGISwapChain* sc_present = reinterpret_cast<IDXGISwapChain*>(This);
@@ -2034,7 +2097,9 @@ void Before_Present() {
 
     if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
     {
-        if(!pRenderPassCommands->BeforePresent.Empty()) {
+        if(!pRenderPassCommands->BeforePresent.Empty()
+            && !g_OverlayResizePending.load(std::memory_order_relaxed)
+            && g_OverlayQuarantineFrames.load(std::memory_order_relaxed) <= 0) {
             ID3D11Resource* pRenderTargetViewResource = nullptr;
             if(g_BeforeUiRT) {
                 g_BeforeUiRT->GetResource(&pRenderTargetViewResource);
@@ -2051,9 +2116,68 @@ void Before_Present() {
             }
         }
     }
+
+    // Render overlay just before Present if visible.
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        static bool s_loggedNoRenderer = false;
+        // Ensure WndProc hook is on the current window if we have one.
+        {
+            IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+            DXGI_SWAP_CHAIN_DESC tmp = {};
+            if (sc && sc == g_pMainSwapChain && SUCCEEDED(sc->GetDesc(&tmp))) {
+                auto router = overlay.GetInputRouter();
+                void* cur = router ? router->GetAttachedHwnd() : nullptr;
+                if (router && tmp.OutputWindow && cur && cur != tmp.OutputWindow) {
+                    // Avoid reattaching to ImGui platform windows.
+                    wchar_t cls[64] = {0};
+                    bool is_imgui_platform = false;
+                    if (GetClassNameW((HWND)tmp.OutputWindow, cls, (int)(sizeof(cls) / sizeof(cls[0])))) {
+                        if (0 == wcscmp(cls, L"ImGui Platform"))
+                            is_imgui_platform = true;
+                    }
+                    if (!is_imgui_platform) {
+                        router->Detach();
+                        router->Attach(tmp.OutputWindow);
+                        advancedfx::Message("Overlay: WndProc hook reattached hwnd=0x%p\n", tmp.OutputWindow);
+                    }
+                }
+            }
+        }
+        if (!overlay.HasRenderer()) {
+            IDXGISwapChain* sc = g_pMainSwapChain ? g_pMainSwapChain : reinterpret_cast<IDXGISwapChain*>(This);
+            if (sc) {
+                ID3D11Device* pDev = nullptr;
+                ID3D11DeviceContext* pCtx = nullptr;
+                if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D11Device), (void**)&pDev)) && pDev) {
+                    pDev->GetImmediateContext(&pCtx);
+                    DXGI_SWAP_CHAIN_DESC desc = {};
+                    if (pCtx && SUCCEEDED(sc->GetDesc(&desc))) {
+                        overlay.SetRenderer(std::unique_ptr<advancedfx::overlay::IOverlayRenderer>(
+                            new advancedfx::overlay::OverlayDx11(pDev, pCtx, sc, desc.OutputWindow))
+                        );
+                    }
+                    if (pCtx) pCtx->Release();
+                    pDev->Release();
+                }
+            }
+            if (!overlay.HasRenderer() && !s_loggedNoRenderer) {
+                advancedfx::Message("Overlay: no supported renderer detected\n");
+                s_loggedNoRenderer = true;
+            }
+        }
+
+        if (overlay.IsVisible()
+            && !g_OverlayResizePending.load(std::memory_order_relaxed)
+            && g_OverlayQuarantineFrames.load(std::memory_order_relaxed) <= 0) {
+            overlay.BeginFrame();
+            overlay.RenderFrame();
+            overlay.EndFrame();
+        }
+    }
 }
 
-void After_Present() {
+void After_Present(void * This) {
     if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands()) {
         pRenderPassCommands->OnAfterPresent();
         pRenderPassCommands->OnAfterPresentOrContextLossReliable();
@@ -2064,25 +2188,83 @@ void After_Present() {
 
 	g_ReShadeAdvancedfx.ResetHasRendered();
 
+    {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        if (overlay.IsVisible())
+            overlay.RenderPlatformWindows();
+    }
+
+    // Detect transitional swapchain states and enter short quarantine.
+    {
+        IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+        DXGI_SWAP_CHAIN_DESC d = {};
+        if (sc && SUCCEEDED(sc->GetDesc(&d))) {
+            if (d.BufferCount == 1 && d.SwapEffect == DXGI_SWAP_EFFECT_DISCARD) {
+                int q = g_OverlayQuarantineFrames.load(std::memory_order_relaxed);
+                if (q <= 0) {
+                    g_OverlayQuarantineFrames.store(15, std::memory_order_relaxed);
+                    advancedfx::Message("Overlay: quarantine enter (DISCARD+1)\n");
+                }
+            }
+        }
+        int q = g_OverlayQuarantineFrames.load(std::memory_order_relaxed);
+        if (q > 0) g_OverlayQuarantineFrames.store(q - 1, std::memory_order_relaxed);
+    }
+
+    if (g_OverlayResizePending.load(std::memory_order_relaxed)) {
+        auto &overlay = advancedfx::overlay::Overlay::Get();
+        UINT newW = 0, newH = 0;
+        IDXGISwapChain* sc = reinterpret_cast<IDXGISwapChain*>(This);
+        if (sc) {
+            ID3D11Texture2D* backbuffer = nullptr;
+            if (SUCCEEDED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&backbuffer)) && backbuffer) {
+                D3D11_TEXTURE2D_DESC bbDesc = {};
+                backbuffer->GetDesc(&bbDesc);
+                newW = bbDesc.Width;
+                newH = bbDesc.Height;
+                backbuffer->Release();
+            }
+        }
+        if (newW != 0 && newH != 0) {
+            if (overlay.HasRenderer()) {
+                overlay.OnDeviceLost();
+                overlay.OnResize(newW, newH);
+            }
+            g_OverlayResizePending.store(false, std::memory_order_relaxed);
+        } else {
+            int tries = g_OverlayResizeRetry.load(std::memory_order_relaxed);
+            if (tries > 5) {
+                g_OverlayResizePending.store(false, std::memory_order_relaxed);
+            } else {
+                g_OverlayResizeRetry.store(tries + 1, std::memory_order_relaxed);
+            }
+        }
+    }
+
     g_bInOwnDraw = false;
 
     if(g_BeforeUiRT) g_BeforeUiRT->Release();
     g_BeforeUiRT = nullptr;
+    if (g_BeforeUiLatest) { g_BeforeUiLatest->Release(); g_BeforeUiLatest = nullptr; }
+    if (g_BeforeUiCopy)   { g_BeforeUiCopy->Release();   g_BeforeUiCopy = nullptr; ZeroMemory(&g_BeforeUiCopyDesc, sizeof(g_BeforeUiCopyDesc)); }
     g_iDraw = 0;
 }
 
 HRESULT STDMETHODCALLTYPE New_Present( void * This,
             /* [in] */ UINT SyncInterval,
             /* [in] */ UINT Flags) {
+    // Skip overlay work while ImGui backend presents platform windows.
+    if (advancedfx::overlay::IsInPlatformWindowsPresent())
+        return g_OldPresent(This, SyncInterval, Flags);
 
     g_Present_LastSyncInterval = SyncInterval;
     g_Present_LastPresentFlags = Flags;
  
-    Before_Present();
+    Before_Present(This, SyncInterval, Flags);
 
     HRESULT result = g_Present_Suppress ? g_Present_LastResult : (g_Present_LastResult = g_OldPresent(This, SyncInterval, Flags));
     
-    After_Present();
+    After_Present(This);
 
     return result;
 }

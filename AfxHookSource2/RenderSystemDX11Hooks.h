@@ -6,6 +6,27 @@
 
 bool AfxStreams_IsRcording();
 const wchar_t * AfxStreams_GetTakeDir();
+const char * AfxStreams_GetRecordNameUtf8();
+
+// Mirv input camera accessors
+class MirvInput;
+MirvInput * Afx_GetMirvInput();
+float GetLastCameraFov();
+float GetLastCameraRoll();
+void Afx_GetLastCameraData(double & x, double & y, double & z, double & rX, double & rY, double & rZ, float & fov);
+void Afx_GotoDemoTick(int tick);
+
+// Recording controls for overlay
+void AfxStreams_SetRecordNameUtf8(const char * name);
+bool AfxStreams_GetRecordScreenEnabled();
+void AfxStreams_SetRecordScreenEnabled(bool enabled);
+bool AfxStreams_GetOverrideFps();
+float AfxStreams_GetOverrideFpsValue();
+void AfxStreams_SetOverrideFpsDefault();
+void AfxStreams_SetOverrideFpsValue(float value);
+void AfxStreams_RecordStart();
+void AfxStreams_RecordEnd();
+void Afx_ExecClientCmd(const char * cmd);
 
 void AfxStreams_ShutDown();
 
