@@ -70,6 +70,7 @@
 #include <string>
 #include <cstring>
 #include <cstdint>
+#include <atomic>
 #include <mutex>
 #include <chrono>
 #include <filesystem>
@@ -544,6 +545,134 @@ static CameraTransform g_ObsPreviousCameraTransform;
 static float g_ObsCurrentCameraDeltaTime = 0.0f;
 static bool g_ObsHasCurrentCameraTransform = false;
 static bool g_ObsHasPreviousCameraTransform = false;
+static std::mutex g_ObsCameraTransformMutex;
+
+struct RenderedSetupCandidate {
+	uint64_t serial = 0;
+	CameraTransform transform;
+	float deltaTime = 0.0f;
+	bool hasWorldToScreen = false;
+	SOURCESDK::VMatrix worldToScreen;
+};
+
+static const size_t RENDERED_SETUP_CANDIDATE_COUNT = 256;
+static RenderedSetupCandidate g_RenderedSetupCandidates[RENDERED_SETUP_CANDIDATE_COUNT];
+static std::mutex g_RenderedSetupCandidatesMutex;
+static std::atomic<uint64_t> g_RenderedSetupCandidateSerialCounter{ 0 };
+static std::atomic<uint64_t> g_RenderedSetupLatestCandidateSerial{ 0 };
+static std::atomic<uint64_t> g_RenderedSetupConfirmedSerial{ 0 };
+static std::atomic<uint64_t> g_RenderedSetupLastPublishedSerial{ 0 };
+static SOURCESDK::VMatrix g_RenderedSetupWorldToScreenMatrix;
+static std::atomic<uint64_t> g_RenderedSetupWorldToScreenSerial{ 0 };
+static std::mutex g_RenderedSetupWorldToScreenMutex;
+
+static void RenderedSetup_TryPublishWorldToScreenForSerial(uint64_t serial) {
+	if (0 == serial) return;
+
+	SOURCESDK::VMatrix matrix;
+	{
+		std::lock_guard<std::mutex> lock(g_RenderedSetupCandidatesMutex);
+		const RenderedSetupCandidate& entry = g_RenderedSetupCandidates[serial % RENDERED_SETUP_CANDIDATE_COUNT];
+		if (entry.serial != serial || !entry.hasWorldToScreen) return;
+		matrix = entry.worldToScreen;
+	}
+
+	std::lock_guard<std::mutex> lock(g_RenderedSetupWorldToScreenMutex);
+	if (g_RenderedSetupWorldToScreenSerial.load(std::memory_order_relaxed) < serial) {
+		g_RenderedSetupWorldToScreenMatrix = matrix;
+		g_RenderedSetupWorldToScreenSerial.store(serial, std::memory_order_release);
+	}
+}
+
+uint64_t RenderedSetup_OnSetupViewCandidate(float x, float y, float z, float pitch, float yaw, float roll, float fov, float deltaTime) {
+	CameraTransform transform;
+	transform.x = x;
+	transform.y = y;
+	transform.z = z;
+	transform.pitch = pitch;
+	transform.yaw = yaw;
+	transform.roll = roll;
+	transform.fov = fov;
+
+	const uint64_t serial = 1 + g_RenderedSetupCandidateSerialCounter.fetch_add(1, std::memory_order_relaxed);
+	{
+		std::lock_guard<std::mutex> lock(g_RenderedSetupCandidatesMutex);
+		RenderedSetupCandidate& entry = g_RenderedSetupCandidates[serial % RENDERED_SETUP_CANDIDATE_COUNT];
+		entry.serial = serial;
+		entry.transform = transform;
+		entry.deltaTime = deltaTime;
+		entry.hasWorldToScreen = false;
+	}
+	g_RenderedSetupLatestCandidateSerial.store(serial, std::memory_order_release);
+	return serial;
+}
+
+uint64_t RenderedSetup_GetLatestCandidateSerial() {
+	return g_RenderedSetupLatestCandidateSerial.load(std::memory_order_acquire);
+}
+
+void RenderedSetup_OnWorldToScreenCandidate(uint64_t setupSerial, const SOURCESDK::VMatrix& worldToScreenMatrix) {
+	if (0 == setupSerial) return;
+
+	{
+		std::lock_guard<std::mutex> lock(g_RenderedSetupCandidatesMutex);
+		RenderedSetupCandidate& entry = g_RenderedSetupCandidates[setupSerial % RENDERED_SETUP_CANDIDATE_COUNT];
+		if (entry.serial != setupSerial) return;
+		entry.worldToScreen = worldToScreenMatrix;
+		entry.hasWorldToScreen = true;
+	}
+
+	if (setupSerial <= g_RenderedSetupConfirmedSerial.load(std::memory_order_acquire)) {
+		RenderedSetup_TryPublishWorldToScreenForSerial(setupSerial);
+	}
+}
+
+bool RenderedSetup_GetPublishedWorldToScreenMatrix(SOURCESDK::VMatrix& outWorldToScreenMatrix) {
+	std::lock_guard<std::mutex> lock(g_RenderedSetupWorldToScreenMutex);
+	if (0 == g_RenderedSetupWorldToScreenSerial.load(std::memory_order_acquire)) return false;
+	outWorldToScreenMatrix = g_RenderedSetupWorldToScreenMatrix;
+	return true;
+}
+
+void RenderedSetup_OnPlayerSetupViewRendered(uint64_t setupSerial) {
+	if (0 == setupSerial) return;
+
+	uint64_t current = g_RenderedSetupConfirmedSerial.load(std::memory_order_relaxed);
+	while (current < setupSerial
+		&& !g_RenderedSetupConfirmedSerial.compare_exchange_weak(current, setupSerial, std::memory_order_release, std::memory_order_relaxed)) {
+	}
+
+	RenderedSetup_TryPublishWorldToScreenForSerial(setupSerial);
+	g_MirvImageDrawer.PublishAttachmentsForSetupSerial(setupSerial);
+}
+
+void RenderedSetup_OnBeforePresent() {
+	const uint64_t renderedSerial = g_RenderedSetupConfirmedSerial.load(std::memory_order_acquire);
+	if (0 == renderedSerial || renderedSerial == g_RenderedSetupLastPublishedSerial.load(std::memory_order_acquire)) return;
+
+	RenderedSetupCandidate candidate;
+	{
+		std::lock_guard<std::mutex> lock(g_RenderedSetupCandidatesMutex);
+		const RenderedSetupCandidate& entry = g_RenderedSetupCandidates[renderedSerial % RENDERED_SETUP_CANDIDATE_COUNT];
+		if (entry.serial != renderedSerial) return;
+		candidate = entry;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_ObsCameraTransformMutex);
+		if (g_ObsHasCurrentCameraTransform) {
+			g_ObsPreviousCameraTransform = g_ObsCurrentCameraTransform;
+			g_ObsHasPreviousCameraTransform = true;
+		}
+		g_ObsCurrentCameraTransform = candidate.transform;
+		g_ObsCurrentCameraDeltaTime = candidate.deltaTime;
+		g_ObsHasCurrentCameraTransform = true;
+	}
+
+	RenderedSetup_TryPublishWorldToScreenForSerial(renderedSerial);
+
+	g_RenderedSetupLastPublishedSerial.store(renderedSerial, std::memory_order_release);
+}
 
 CameraTransform Obs_GetLastCameraTransform() {
 	CameraTransform transform;
@@ -561,12 +690,15 @@ CameraTransformSamples Obs_GetRecentCameraTransforms() {
 	CameraTransformSamples samples;
 	samples.current = Obs_GetLastCameraTransform();
 
-	if (g_ObsHasCurrentCameraTransform) {
-		samples.current = g_ObsCurrentCameraTransform;
-		samples.deltaTime = g_ObsCurrentCameraDeltaTime;
-		if (g_ObsHasPreviousCameraTransform) {
-			samples.previous = g_ObsPreviousCameraTransform;
-			samples.hasPrevious = true;
+	{
+		std::lock_guard<std::mutex> lock(g_ObsCameraTransformMutex);
+		if (g_ObsHasCurrentCameraTransform) {
+			samples.current = g_ObsCurrentCameraTransform;
+			samples.deltaTime = g_ObsCurrentCameraDeltaTime;
+			if (g_ObsHasPreviousCameraTransform) {
+				samples.previous = g_ObsPreviousCameraTransform;
+				samples.hasPrevious = true;
+			}
 		}
 	}
 
@@ -1681,19 +1813,7 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	g_iWidth = width;
 	g_iHeight = height;
 
-	if (g_ObsHasCurrentCameraTransform) {
-		g_ObsPreviousCameraTransform = g_ObsCurrentCameraTransform;
-		g_ObsHasPreviousCameraTransform = true;
-	}
-	g_ObsCurrentCameraTransform.x = Tx;
-	g_ObsCurrentCameraTransform.y = Ty;
-	g_ObsCurrentCameraTransform.z = Tz;
-	g_ObsCurrentCameraTransform.pitch = Rx;
-	g_ObsCurrentCameraTransform.yaw = Ry;
-	g_ObsCurrentCameraTransform.roll = Rz;
-	g_ObsCurrentCameraTransform.fov = Fov;
-	g_ObsCurrentCameraDeltaTime = absTime;
-	g_ObsHasCurrentCameraTransform = true;
+	RenderedSetup_OnSetupViewCandidate(Tx, Ty, Tz, Rx, Ry, Rz, Fov, absTime);
 
 	g_MirvInputEx.LastCameraOrigin[0] = Tx;
 	g_MirvInputEx.LastCameraOrigin[1] = Ty;
@@ -1827,7 +1947,6 @@ CON_COMMAND(__mirv_o,"") {
 typedef void (__fastcall * CViewRender_UnkMakeMatrix_t)(void* This);
 CViewRender_UnkMakeMatrix_t g_Old_CViewRender_UnkMakeMatrix = nullptr;
 void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
-	
 	g_Old_CViewRender_UnkMakeMatrix(This);
 	//memcpy(g_WorldToScreenMatrix.m,(unsigned char*)This + 0x1b8,sizeof(g_WorldToScreenMatrix.m));
 
@@ -1874,25 +1993,37 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
 	RenderSystemDX11_SupplyProjectionMatrix(projectionMatrix);
 
 	proj = (float *)((unsigned char*)This + 0x298);
-	g_WorldToScreenMatrix.m[0][0] = proj[4*0+0];
-	g_WorldToScreenMatrix.m[0][1] = proj[4*0+1];
-	g_WorldToScreenMatrix.m[0][2] = proj[4*0+2];
-	g_WorldToScreenMatrix.m[0][3] = proj[4*0+3];
-	g_WorldToScreenMatrix.m[1][0] = proj[4*1+0];
-	g_WorldToScreenMatrix.m[1][1] = proj[4*1+1];
-	g_WorldToScreenMatrix.m[1][2] = proj[4*1+2];
-	g_WorldToScreenMatrix.m[1][3] = proj[4*1+3];
-	g_WorldToScreenMatrix.m[2][0] = proj[4*2+0];
-	g_WorldToScreenMatrix.m[2][1] = proj[4*2+1];
-	g_WorldToScreenMatrix.m[2][2] = proj[4*2+2];
-	g_WorldToScreenMatrix.m[2][3] = proj[4*2+3];
-	g_WorldToScreenMatrix.m[3][0] = proj[4*3+0];
-	g_WorldToScreenMatrix.m[3][1] = proj[4*3+1];
-	g_WorldToScreenMatrix.m[3][2] = proj[4*3+2];
-	g_WorldToScreenMatrix.m[3][3] = proj[4*3+3];
+	SOURCESDK::VMatrix worldToScreenMatrix;
+	worldToScreenMatrix.m[0][0] = proj[4*0+0];
+	worldToScreenMatrix.m[0][1] = proj[4*0+1];
+	worldToScreenMatrix.m[0][2] = proj[4*0+2];
+	worldToScreenMatrix.m[0][3] = proj[4*0+3];
+	worldToScreenMatrix.m[1][0] = proj[4*1+0];
+	worldToScreenMatrix.m[1][1] = proj[4*1+1];
+	worldToScreenMatrix.m[1][2] = proj[4*1+2];
+	worldToScreenMatrix.m[1][3] = proj[4*1+3];
+	worldToScreenMatrix.m[2][0] = proj[4*2+0];
+	worldToScreenMatrix.m[2][1] = proj[4*2+1];
+	worldToScreenMatrix.m[2][2] = proj[4*2+2];
+	worldToScreenMatrix.m[2][3] = proj[4*2+3];
+	worldToScreenMatrix.m[3][0] = proj[4*3+0];
+	worldToScreenMatrix.m[3][1] = proj[4*3+1];
+	worldToScreenMatrix.m[3][2] = proj[4*3+2];
+	worldToScreenMatrix.m[3][3] = proj[4*3+3];
+	g_WorldToScreenMatrix = worldToScreenMatrix;
+
+	const uint64_t setupSerial = RenderedSetup_GetLatestCandidateSerial();
+	if (setupSerial) {
+		RenderedSetup_OnWorldToScreenCandidate(setupSerial, worldToScreenMatrix);
+		g_MirvImageDrawer.UpdateAttachmentsForSetupSerial(setupSerial);
+		if (setupSerial <= g_RenderedSetupConfirmedSerial.load(std::memory_order_acquire)) {
+			g_MirvImageDrawer.PublishAttachmentsForSetupSerial(setupSerial);
+		}
+	} else {
+		g_MirvImageDrawer.UpdateAttachments();
+	}
 
 	g_CampathDrawer.OnEngineThread_SetupViewDone();
-	g_MirvImageDrawer.UpdateAttachments();
 }
 
 /*
@@ -3591,3 +3722,4 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 	}
 	return TRUE;
 }
+

@@ -7,6 +7,7 @@
 #include "hlaeFolder.h"
 #include "ClientEntitySystem.h"
 #include "ObsSpectatorBindings.h"
+#include "RenderSystemDX11Hooks.h"
 
 #include "../shared/StringTools.h"
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
@@ -311,25 +312,72 @@ void CMirvImageDrawer::SetAttachment(const char* name, int slot, bool useYaw, bo
 	entry->attachUseRoll = useRoll;
 	entry->attachAttachmentName = attachmentName ? attachmentName : "";
 	entry->attachValid = false;
+	entry->attachSampleSerial = 0;
+	entry->attachSampleValid = false;
 }
 
 void CMirvImageDrawer::UpdateAttachments() {
+	UpdateAttachmentsForSetupSerial(0);
+}
+
+void CMirvImageDrawer::UpdateAttachmentsForSetupSerial(uint64_t setupSerial) {
+	std::lock_guard<std::mutex> lock(m_Mutex);
+	for (auto& entry : m_Images) {
+		if (entry.attachSlot < 0) {
+			if (0 == setupSerial) {
+				entry.attachValid = false;
+			} else {
+				entry.attachSampleSerial = setupSerial;
+				entry.attachSampleValid = false;
+			}
+			continue;
+		}
+
+		float eye[3] = {};
+		float ang[3] = {};
+		if (TryGetAttachedTransform(entry.attachSlot, entry.attachAttachmentName, eye, ang)) {
+			if (0 == setupSerial) {
+				entry.attachOrigin = Vector3(eye[0], eye[1], eye[2]);
+				entry.attachPitch = ang[0];
+				entry.attachYaw = ang[1];
+				entry.attachRoll = ang[2];
+				entry.attachValid = true;
+			} else {
+				entry.attachSampleSerial = setupSerial;
+				entry.attachSampleOrigin = Vector3(eye[0], eye[1], eye[2]);
+				entry.attachSamplePitch = ang[0];
+				entry.attachSampleYaw = ang[1];
+				entry.attachSampleRoll = ang[2];
+				entry.attachSampleValid = true;
+			}
+		} else {
+			if (0 == setupSerial) {
+				entry.attachValid = false;
+			} else {
+				entry.attachSampleSerial = setupSerial;
+				entry.attachSampleValid = false;
+			}
+		}
+	}
+}
+
+void CMirvImageDrawer::PublishAttachmentsForSetupSerial(uint64_t setupSerial) {
+	if (0 == setupSerial) return;
+
 	std::lock_guard<std::mutex> lock(m_Mutex);
 	for (auto& entry : m_Images) {
 		if (entry.attachSlot < 0) {
 			entry.attachValid = false;
 			continue;
 		}
-		float eye[3] = {};
-		float ang[3] = {};
-		if (TryGetAttachedTransform(entry.attachSlot, entry.attachAttachmentName, eye, ang)) {
-			entry.attachOrigin = Vector3(eye[0], eye[1], eye[2]);
-			entry.attachPitch = ang[0];
-			entry.attachYaw = ang[1];
-			entry.attachRoll = ang[2];
-			entry.attachValid = true;
-		} else {
-			entry.attachValid = false;
+		if (entry.attachSampleSerial != setupSerial) continue;
+
+		entry.attachValid = entry.attachSampleValid;
+		if (entry.attachSampleValid) {
+			entry.attachOrigin = entry.attachSampleOrigin;
+			entry.attachPitch = entry.attachSamplePitch;
+			entry.attachYaw = entry.attachSampleYaw;
+			entry.attachRoll = entry.attachSampleRoll;
 		}
 	}
 }
@@ -1014,15 +1062,15 @@ void CMirvImageDrawer::EnsureDeviceResources() {
 	}
 }
 
-bool CMirvImageDrawer::SetMatrixConstantBuffer() {
+bool CMirvImageDrawer::SetMatrixConstantBuffer(const SOURCESDK::VMatrix& worldToScreenMatrix) {
 	if (!m_DeviceContext || !m_ConstantBuffer) return false;
 
 	VS_CONSTANT_BUFFER constants = {};
 	constants.matrix = DirectX::XMFLOAT4X4(
-		(float)g_WorldToScreenMatrix.m[0][0], (float)g_WorldToScreenMatrix.m[0][1], (float)g_WorldToScreenMatrix.m[0][2], (float)g_WorldToScreenMatrix.m[0][3],
-		(float)g_WorldToScreenMatrix.m[1][0], (float)g_WorldToScreenMatrix.m[1][1], (float)g_WorldToScreenMatrix.m[1][2], (float)g_WorldToScreenMatrix.m[1][3],
-		(float)g_WorldToScreenMatrix.m[2][0], (float)g_WorldToScreenMatrix.m[2][1], (float)g_WorldToScreenMatrix.m[2][2], (float)g_WorldToScreenMatrix.m[2][3],
-		(float)g_WorldToScreenMatrix.m[3][0], (float)g_WorldToScreenMatrix.m[3][1], (float)g_WorldToScreenMatrix.m[3][2], (float)g_WorldToScreenMatrix.m[3][3]
+		(float)worldToScreenMatrix.m[0][0], (float)worldToScreenMatrix.m[0][1], (float)worldToScreenMatrix.m[0][2], (float)worldToScreenMatrix.m[0][3],
+		(float)worldToScreenMatrix.m[1][0], (float)worldToScreenMatrix.m[1][1], (float)worldToScreenMatrix.m[1][2], (float)worldToScreenMatrix.m[1][3],
+		(float)worldToScreenMatrix.m[2][0], (float)worldToScreenMatrix.m[2][1], (float)worldToScreenMatrix.m[2][2], (float)worldToScreenMatrix.m[2][3],
+		(float)worldToScreenMatrix.m[3][0], (float)worldToScreenMatrix.m[3][1], (float)worldToScreenMatrix.m[3][2], (float)worldToScreenMatrix.m[3][3]
 	);
 
 	D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -1042,7 +1090,12 @@ void CMirvImageDrawer::DrawImages() {
 	m_DeviceContext->OMSetRenderTargets(1, &m_Rtv, m_Dsv);
 	m_DeviceContext->RSSetViewports(1, m_pViewPort);
 
-	if (!SetMatrixConstantBuffer()) return;
+	SOURCESDK::VMatrix worldToScreenMatrix;
+	if (!RenderedSetup_GetPublishedWorldToScreenMatrix(worldToScreenMatrix)) {
+		return;
+	}
+
+	if (!SetMatrixConstantBuffer(worldToScreenMatrix)) return;
 	m_DeviceContext->VSSetConstantBuffers(0, 1, &m_ConstantBuffer);
 
 	UINT stride = sizeof(Vertex);
@@ -1161,14 +1214,14 @@ void CMirvImageDrawer::DrawImages() {
 				}
 			}
 
-			double clipZ = g_WorldToScreenMatrix.m[2][0] * renderPos.X
-				+ g_WorldToScreenMatrix.m[2][1] * renderPos.Y
-				+ g_WorldToScreenMatrix.m[2][2] * renderPos.Z
-				+ g_WorldToScreenMatrix.m[2][3];
-			double clipW = g_WorldToScreenMatrix.m[3][0] * renderPos.X
-				+ g_WorldToScreenMatrix.m[3][1] * renderPos.Y
-				+ g_WorldToScreenMatrix.m[3][2] * renderPos.Z
-				+ g_WorldToScreenMatrix.m[3][3];
+			double clipZ = worldToScreenMatrix.m[2][0] * renderPos.X
+				+ worldToScreenMatrix.m[2][1] * renderPos.Y
+				+ worldToScreenMatrix.m[2][2] * renderPos.Z
+				+ worldToScreenMatrix.m[2][3];
+			double clipW = worldToScreenMatrix.m[3][0] * renderPos.X
+				+ worldToScreenMatrix.m[3][1] * renderPos.Y
+				+ worldToScreenMatrix.m[3][2] * renderPos.Z
+				+ worldToScreenMatrix.m[3][3];
 			double depth = clipW != 0.0 ? clipZ / clipW : clipZ;
 
 			renderList.push_back({ &entry, depth, order, renderPos, renderPitch, renderYaw, renderRoll });
@@ -1377,3 +1430,4 @@ CON_COMMAND(mirv_image, "3D image drawing in world space.")
 		cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0
 	);
 }
+

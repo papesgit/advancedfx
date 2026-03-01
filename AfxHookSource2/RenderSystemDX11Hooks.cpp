@@ -2205,6 +2205,23 @@ public:
 private:
 };
 
+class CAfxRenderCallbackPlayerSetupViewRendered : public IRenderThreadCallback
+{
+public:
+    CAfxRenderCallbackPlayerSetupViewRendered(uint64_t setupSerial)
+        : m_SetupSerial(setupSerial)
+    {
+    }
+
+    virtual void OnCallback(void) {
+        RenderedSetup_OnPlayerSetupViewRendered(m_SetupSerial);
+        delete this;
+    }
+
+private:
+    uint64_t m_SetupSerial = 0;
+};
+
 /*
 typedef void (STDMETHODCALLTYPE * PSSetShaderResources_t)(ID3D11DeviceContext* This,
     _In_range_(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT - 1)  UINT StartSlot,
@@ -2384,6 +2401,8 @@ HRESULT WINAPI New_D3D11CreateDevice(
 }
 
 void Before_Present() {
+    RenderedSetup_OnBeforePresent();
+
     g_bInOwnDraw = true;
 
     g_CampathDrawer.OnRenderThread_Present();
@@ -2777,6 +2796,22 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr2(unsigned char
         if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
             auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
             fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackUpdateBuffers());
+        }
+    }
+    else if (fmt && 0 == strcmp(fmt, "#%s/SetupView")) {
+        va_list args;
+        va_start(args, fmt);
+        const char* pszArg0 = va_arg(args, const char*);
+        va_end(args);
+
+        if (pszArg0 && 0 == strncmp("Player ", pszArg0, 7)) {
+            const uint64_t setupSerial = RenderedSetup_GetLatestCandidateSerial();
+            if (setupSerial) {
+                if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
+                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
+                    fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackPlayerSetupViewRendered(setupSerial));
+                }
+            }
         }
     }
 
@@ -5551,3 +5586,4 @@ CON_COMMAND(__mirv_debug_scenesystem_rendercontexts, "")
         "Current value: %i\n"
         , cmd0, g_iRenderContextDebug);
 }
+

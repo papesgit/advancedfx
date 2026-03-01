@@ -7,8 +7,10 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 #include "../shared/AfxMath.h"
+#include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 
 struct IDXGIKeyedMutex;
 
@@ -48,6 +50,8 @@ public:
 	void SetDepthWrite(const char* name, bool value);
 	void SetAttachment(const char* name, int slot, bool useYaw, bool usePitch, bool useRoll, const char* attachmentName);
 	void UpdateAttachments();
+	void UpdateAttachmentsForSetupSerial(uint64_t setupSerial);
+	void PublishAttachmentsForSetupSerial(uint64_t setupSerial);
 
 	enum class AtlasFormat {
 		BGRA8,
@@ -148,6 +152,13 @@ private:
 		double attachYaw = 0.0;
 		double attachRoll = 0.0;
 
+		uint64_t attachSampleSerial = 0;
+		bool attachSampleValid = false;
+		Afx::Math::Vector3 attachSampleOrigin = Afx::Math::Vector3(0.0, 0.0, 0.0);
+		double attachSamplePitch = 0.0;
+		double attachSampleYaw = 0.0;
+		double attachSampleRoll = 0.0;
+
 		ID3D11Texture2D* texture = nullptr;
 		ID3D11ShaderResourceView* srv = nullptr;
 		UINT width = 0;
@@ -219,7 +230,7 @@ private:
 		UINT* outHeight
 	);
 
-	bool SetMatrixConstantBuffer();
+	bool SetMatrixConstantBuffer(const SOURCESDK::VMatrix& worldToScreenMatrix);
 	void EnsureDeviceResources();
 	void DrawImages();
 	void HandlePendingProbe();
