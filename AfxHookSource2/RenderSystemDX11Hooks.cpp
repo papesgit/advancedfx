@@ -151,11 +151,13 @@ public:
         }
         device->Release();
 
+        bool keyedMutexLocked = false;
         if (m_pKeyedMutex) {
             HRESULT hrLock = m_pKeyedMutex->AcquireSync(0, 0);
             if (FAILED(hrLock)) {
                 return;
             }
+            keyedMutexLocked = true;
         }
 
         ID3D11Texture2D* sourceForSampling = pSource;
@@ -171,6 +173,9 @@ public:
         srvDesc.Texture2D.MostDetailedMip = 0;
         srvDesc.Texture2D.MipLevels = 1;
         if (FAILED(m_pDevice->CreateShaderResourceView(sourceForSampling, &srvDesc, &srv))) {
+            if (keyedMutexLocked && m_pKeyedMutex) {
+                m_pKeyedMutex->ReleaseSync(1);
+            }
             return;
         }
 
@@ -249,7 +254,7 @@ public:
         if (oldRS) oldRS->Release();
         if (srv) srv->Release();
 
-        if (m_pKeyedMutex) {
+        if (keyedMutexLocked && m_pKeyedMutex) {
             m_pKeyedMutex->ReleaseSync(1);
         }
     }
@@ -5454,13 +5459,25 @@ CON_COMMAND(mirv_sharedtex, "Shared texture control.")
             );
             return;
         }
+        else if (0 == _stricmp(cmd1, "restart")) {
+            auto & pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
+            {
+                auto & queue = pRenderPassCommands.BeginReliable;
+                queue.Push([](IRenderPassCommands*) {
+                    g_SharedTextureHost.Reset();
+                });
+            }
+            advancedfx::Message("Shared texture restart requested.\n");
+            return;
+        }
     }
 
     advancedfx::Message(
         "%s enabled 0|1 - Disable/enable shared texture output.\n"
         "%s resolution <width> <height>|default - Override shared texture size.\n"
-        "%s fps <value|0> - Cap shared texture FPS (0 = uncapped).\n",
-        cmd0, cmd0, cmd0
+        "%s fps <value|0> - Cap shared texture FPS (0 = uncapped).\n"
+        "%s restart - Recreate shared texture resources.\n",
+        cmd0, cmd0, cmd0, cmd0
     );
 }
 
