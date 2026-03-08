@@ -1931,21 +1931,20 @@ FilmingStream::FilmingStream(
 	switch(buffer) {
 	case FB_ALPHA:
 		imageFormat = advancedfx::ImageFormat::A;
-		pixelStride = 1;
+		pixelStride = sizeof(unsigned char);
 		break;
 
 	case FB_DEPTH:
 	 	imageFormat = advancedfx::ImageFormat::ZFloat;
+		pixelStride = sizeof(float);
 		if(0 == depth_exr->value)
 		{
 			switch ((unsigned char)depth_bpp->value) {
 			case 24:
 				m_DepthBytesPP = 3;
-				pixelStride = 3;
 				break;
 			default:
 				m_DepthBytesPP = 1;
-				pixelStride = 1;
 			}
 		}
 		break;
@@ -1953,7 +1952,7 @@ FilmingStream::FilmingStream(
 	case FB_COLOR:
 	default:
 	 	imageFormat = advancedfx::ImageFormat::BGR;
-		pixelStride = 3;
+		pixelStride = sizeof(unsigned char)*3;
 		break;
 	};
 
