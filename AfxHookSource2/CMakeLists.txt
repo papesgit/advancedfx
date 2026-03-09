@@ -222,6 +222,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     ClientEntitySystem.cpp
     ClientEntitySystem.h
 
+    ClientTrace.cpp
+    ClientTrace.h
+
     ConsoleRs.cpp
 
     CVarRs.cpp

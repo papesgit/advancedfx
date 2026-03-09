@@ -3,6 +3,7 @@
 #include "../shared/StringTools.h"
 
 #include "ClientEntitySystem.h"
+#include "ClientTrace.h"
 #include "SceneSystem.h"
 #include "SchemaSystem.h"
 #include "VScript.h"
@@ -553,4 +554,165 @@ CON_COMMAND(mirv_vscript_client_exec, "Execute a vscript on the client VM.")
         "%s <sValue> - Execute the given vscript on the client VM. Requires launch paramter \"-afxVScriptModeClient 1\", add \"-dev\" too to get cl_script_help command working.\n"
         , arg0
     );
+}
+
+CON_COMMAND(mirv_trace_test_line, "Test ClientTrace::TraceLine wrapper.")
+{
+	const int argc = args->ArgC();
+	const char * arg0 = args->ArgV(0);
+
+	if (argc < 7 || 9 < argc) {
+		advancedfx::Message(
+			"%s <sx> <sy> <sz> <ex> <ey> <ez> [mask] [ignoreHandle]\n"
+			"Example: %s -779.017 1517.901 256 -779.017 1517.901 -3840\n",
+			arg0, arg0, arg0
+		);
+		return;
+	}
+
+	ClientTrace::Vec3 start = {
+		(float)atof(args->ArgV(1)),
+		(float)atof(args->ArgV(2)),
+		(float)atof(args->ArgV(3))
+	};
+	ClientTrace::Vec3 end = {
+		(float)atof(args->ArgV(4)),
+		(float)atof(args->ArgV(5)),
+		(float)atof(args->ArgV(6))
+	};
+	const bool hasMask = argc >= 8;
+	const bool hasIgnore = argc >= 9;
+	const uint32_t mask = hasMask ? (uint32_t)strtoul(args->ArgV(7), nullptr, 0) : 0x80001u;
+	const unsigned int ignoreInt = hasIgnore ? (unsigned int)strtoul(args->ArgV(8), nullptr, 0) : (unsigned int)SOURCESDK_CS2_INVALID_EHANDLE_INDEX;
+	SOURCESDK::CS2::CBaseHandle ignoreHandle(ignoreInt);
+	ClientTrace::TraceResult result = {};
+
+	const bool ok = ClientTrace::TraceLine(start, end, result, mask, ignoreHandle);
+	if (!ok) {
+		advancedfx::Warning("[trace-test] ClientTrace::TraceLine failed.\n");
+		return;
+	}
+
+	advancedfx::Message(
+		"[trace-test] called=%d hit=%d startsolid=%d fraction=%.6f pos=[%.3f %.3f %.3f] normal=[%.3f %.3f %.3f]\n",
+		result.Called ? 1 : 0,
+		result.Hit ? 1 : 0,
+		result.StartSolid ? 1 : 0,
+		result.Fraction,
+		result.Pos.X, result.Pos.Y, result.Pos.Z,
+		result.Normal.X, result.Normal.Y, result.Normal.Z
+	);
+}
+
+CON_COMMAND(mirv_trace_test_hull, "Test ClientTrace::TraceHull wrapper.")
+{
+	const int argc = args->ArgC();
+	const char * arg0 = args->ArgV(0);
+
+	if (argc < 13 || 15 < argc) {
+		advancedfx::Message(
+			"%s <sx> <sy> <sz> <ex> <ey> <ez> <minx> <miny> <minz> <maxx> <maxy> <maxz> [mask] [ignoreHandle]\n"
+			"Example: %s -779.017 1517.901 256 -779.017 1517.901 -3840 -8 -8 0 8 8 72\n",
+			arg0, arg0
+		);
+		return;
+	}
+
+	ClientTrace::Vec3 start = {
+		(float)atof(args->ArgV(1)),
+		(float)atof(args->ArgV(2)),
+		(float)atof(args->ArgV(3))
+	};
+	ClientTrace::Vec3 end = {
+		(float)atof(args->ArgV(4)),
+		(float)atof(args->ArgV(5)),
+		(float)atof(args->ArgV(6))
+	};
+	ClientTrace::Vec3 mins = {
+		(float)atof(args->ArgV(7)),
+		(float)atof(args->ArgV(8)),
+		(float)atof(args->ArgV(9))
+	};
+	ClientTrace::Vec3 maxs = {
+		(float)atof(args->ArgV(10)),
+		(float)atof(args->ArgV(11)),
+		(float)atof(args->ArgV(12))
+	};
+	const bool hasMask = argc >= 14;
+	const bool hasIgnore = argc >= 15;
+	const uint32_t mask = hasMask ? (uint32_t)strtoul(args->ArgV(13), nullptr, 0) : 0x80001u;
+	const unsigned int ignoreInt = hasIgnore ? (unsigned int)strtoul(args->ArgV(14), nullptr, 0) : (unsigned int)SOURCESDK_CS2_INVALID_EHANDLE_INDEX;
+	SOURCESDK::CS2::CBaseHandle ignoreHandle(ignoreInt);
+	ClientTrace::TraceResult result = {};
+
+	const bool ok = ClientTrace::TraceHull(start, end, mins, maxs, result, mask, ignoreHandle);
+	if (!ok) {
+		advancedfx::Warning("[trace-test] ClientTrace::TraceHull failed.\n");
+		return;
+	}
+
+	advancedfx::Message(
+		"[trace-test] called=%d hit=%d startsolid=%d fraction=%.6f pos=[%.3f %.3f %.3f] normal=[%.3f %.3f %.3f]\n",
+		result.Called ? 1 : 0,
+		result.Hit ? 1 : 0,
+		result.StartSolid ? 1 : 0,
+		result.Fraction,
+		result.Pos.X, result.Pos.Y, result.Pos.Z,
+		result.Normal.X, result.Normal.Y, result.Normal.Z
+	);
+}
+
+CON_COMMAND(mirv_trace_test_collideable, "Test ClientTrace::TraceCollideable wrapper.")
+{
+	const int argc = args->ArgC();
+	const char * arg0 = args->ArgV(0);
+
+	if (argc != 14) {
+		advancedfx::Message(
+			"%s <sx> <sy> <sz> <ex> <ey> <ez> <targetHandle> <minx> <miny> <minz> <maxx> <maxy> <maxz>\n"
+			"Example: %s 1339.0 -111.8 -103.9 1337.9 -365.6 -103.9 1048957 -8 -8 0 8 8 72\n",
+			arg0, arg0
+		);
+		return;
+	}
+
+	ClientTrace::Vec3 start = {
+		(float)atof(args->ArgV(1)),
+		(float)atof(args->ArgV(2)),
+		(float)atof(args->ArgV(3))
+	};
+	ClientTrace::Vec3 end = {
+		(float)atof(args->ArgV(4)),
+		(float)atof(args->ArgV(5)),
+		(float)atof(args->ArgV(6))
+	};
+	const unsigned int targetInt = (unsigned int)strtoul(args->ArgV(7), nullptr, 0);
+	SOURCESDK::CS2::CBaseHandle targetHandle(targetInt);
+	ClientTrace::Vec3 mins = {
+		(float)atof(args->ArgV(8)),
+		(float)atof(args->ArgV(9)),
+		(float)atof(args->ArgV(10))
+	};
+	ClientTrace::Vec3 maxs = {
+		(float)atof(args->ArgV(11)),
+		(float)atof(args->ArgV(12)),
+		(float)atof(args->ArgV(13))
+	};
+	ClientTrace::TraceResult result = {};
+
+	const bool ok = ClientTrace::TraceCollideable(start, end, targetHandle, mins, maxs, result);
+	if (!ok) {
+		advancedfx::Warning("[trace-test] ClientTrace::TraceCollideable failed.\n");
+		return;
+	}
+
+	advancedfx::Message(
+		"[trace-test] called=%d hit=%d startsolid=%d fraction=%.6f pos=[%.3f %.3f %.3f] normal=[%.3f %.3f %.3f]\n",
+		result.Called ? 1 : 0,
+		result.Hit ? 1 : 0,
+		result.StartSolid ? 1 : 0,
+		result.Fraction,
+		result.Pos.X, result.Pos.Y, result.Pos.Z,
+		result.Normal.X, result.Normal.Y, result.Normal.Z
+	);
 }

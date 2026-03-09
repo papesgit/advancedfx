@@ -7,6 +7,12 @@
 
 using namespace Afx::BinUtils;
 
+static AfxAddr DecodeRipRel32Target(AfxAddr insnAddress, size_t rel32Offset, size_t insnSize)
+{
+      const int32_t rel = *(const int32_t *)(insnAddress + rel32Offset);
+      return insnAddress + insnSize + rel;
+}
+
 AFXADDR_DEF(cs2_engine_HostStateRequest_Start)
 AFXADDR_DEF(cs2_engine_CRenderService_OnClientOutput);
 
@@ -21,6 +27,12 @@ AFXADDR_DEF(cs2_client_ClientScriptVM)
 AFXADDR_DEF(cs2_ScriptVM_CompileString_vtable_offset)
 AFXADDR_DEF(cs2_ScriptVM_RunScript_vtable_offset)
 AFXADDR_DEF(cs2_ScriptVM_FreeScript_vtable_offset)
+AFXADDR_DEF(cs2_client_TraceShape)
+AFXADDR_DEF(cs2_client_TraceCollideableShape)
+AFXADDR_DEF(cs2_client_TraceContextPtr)
+AFXADDR_DEF(cs2_client_TraceFilterVft)
+AFXADDR_DEF(cs2_client_BuildTraceHullShape)
+AFXADDR_DEF(cs2_client_TraceCollideableFilterPtr)
 
 void Addresses_InitEngine2Dll(AfxAddr engine2Dll)
 {
@@ -149,7 +161,12 @@ void Addresses_InitSceneSystemDll(AfxAddr sceneSystemDll) {
 void Addresses_InitClientDll(AfxAddr clientDll) {
 	MemRange textRange = MemRange(0, 0);
       MemRange dataRange = MemRange(0, 0);
+      MemRange moduleRange = MemRange(0, 0);
 	{
+            PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)clientDll;
+            PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(clientDll + dos->e_lfanew);
+            moduleRange = MemRange::FromSize(clientDll, nt->OptionalHeader.SizeOfImage);
+
 		ImageSectionsReader imageSectionsReader((HMODULE)clientDll);
 		if (!imageSectionsReader.Eof())
 		{
@@ -219,6 +236,127 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
                         }                 
                   }
                   else ErrorBox(MkErrStr(__FILE__, __LINE__));
+            }
+            else ErrorBox(MkErrStr(__FILE__, __LINE__));
+      }
+
+      // - TraceShape and TraceCollideableShape are resolved from their own function signatures below.
+      // - Trace context pointer is resolved from a native TraceShape callsite (most common callsite) block:
+      //     MOV RCX,[PTR_DAT_...]
+      //     ...
+      //     CALL TraceShape
+      // - Trace filter globals are resolved from native initializer:
+      //     LEA RAX,[PTR_FUN_...]
+      //     MOV [PTR_PTR_...],RAX
+      //     RET
+      //   This initializer was located by following arg#6 filter pointer references used by
+      //   Script_TraceCollideable's TraceCollideableShape call path.
+
+      // cs2_client_TraceShape
+      // Search for "Physics/TraceShape (Client)" or Script wrappers ("Didnt supply startpos...")
+      // - Starts with stack setup + __chkstk call and then:
+      //   MOV R10D,dword ptr [_tls_index]
+      {
+            MemRange result = FindPatternString(
+                  textRange,
+                  "48 89 5C 24 20 48 89 4C 24 08 55 57 41 54 41 55 41 56 48 8D AC 24 10 E0 FF FF B8 F0 20 00 00 E8 ?? ?? ?? ?? 48 2B E0 44 8B 15 ?? ?? ?? ??"
+            );
+
+            if (!result.IsEmpty()) {
+                  AFXADDR_SET(cs2_client_TraceShape, result.Start);
+            }
+            else ErrorBox(MkErrStr(__FILE__, __LINE__));
+      }
+
+      // cs2_client_TraceCollideableShape
+      // - Found easiest from Script wrapper callsite ("Didnt supply ... Script TraceCollideable")
+      // - Starts with:
+      //   MOV RAX,RSP
+      //   MOV [RAX+18],RBX
+      //   ...
+      //   TEST RBX,RBX
+      //   JZ ...
+      {
+            MemRange result = FindPatternString(
+                  textRange,
+                  "48 8B C4 48 89 58 18 55 56 57 41 54 41 56 48 8D 68 B9 48 81 EC A0 00 00 00 48 8B 5D 6F 49 8B F9 49 8B F0 4C 8B F2 4C 8B E1 48 85 DB 0F 84 ?? ?? ?? ?? 4C 89 68 08 48 8B CB 4C 89 78 10 48 8B 03 FF 90 08 02 00 00"
+            );
+
+            if (!result.IsEmpty()) {
+                  AFXADDR_SET(cs2_client_TraceCollideableShape, result.Start);
+            }
+            else ErrorBox(MkErrStr(__FILE__, __LINE__));
+      }
+
+      // cs2_client_BuildTraceHullShape
+      // - Starts with min/max equality checks then writes shape type byte at +0x28.
+      // - Also used in native TraceShape callsite right before:
+      //     MOV RCX,[PTR_DAT_...] ... CALL TraceShape.
+      {
+            MemRange result = FindPatternString(
+                  textRange,
+                  "F3 0F 10 42 0C 0F 2E 02 7A 36 75 34 F3 0F 10 42 10 0F 2E 42 04 7A 29 75 27 F3 0F 10 42 14 0F 2E 42 08 7A 1C 75 1A C6 41 28 00 F2 0F 10 02 F2 0F 11 01 8B 42 08 89 41 08 C7 41 0C 00 00 00 00 C3 C6 41 28 02 0F 10 02 0F 11 01"
+            );
+
+            if (!result.IsEmpty()) {
+                  AFXADDR_SET(cs2_client_BuildTraceHullShape, result.Start);
+            }
+            else ErrorBox(MkErrStr(__FILE__, __LINE__));
+      }
+
+      // cs2_client_TraceContextPtr
+      // From native TraceShape callsite:
+      //   MOV RCX,[PTR_DAT_...]
+      //   ...
+      //   CALL TraceShape
+      {
+            MemRange result = FindPatternString(
+                  textRange,
+                  "48 8B 0D ?? ?? ?? ?? 4C 8D 4C 24 30 4C 8D 44 24 40 4C 89 6C 24 28 48 8D 54 24 70 48 89 74 24 20 E8 ?? ?? ?? ??"
+            );
+
+            if (!result.IsEmpty()) {
+                  const AfxAddr movContextInsn = result.Start + 0; // 48 8B 0D rel32
+                  const AfxAddr callInsn = result.Start + 32;      // E8 rel32
+
+                  const AfxAddr traceContextPtr = DecodeRipRel32Target(movContextInsn, 3, 7);
+                  const AfxAddr callTarget = DecodeRipRel32Target(callInsn, 1, 5);
+
+                  if (callTarget != AFXADDR_GET(cs2_client_TraceShape)
+                        || traceContextPtr < moduleRange.Start || traceContextPtr >= moduleRange.End)
+                        ErrorBox(MkErrStr(__FILE__, __LINE__));
+                  else
+                        AFXADDR_SET(cs2_client_TraceContextPtr, traceContextPtr);
+            }
+            else ErrorBox(MkErrStr(__FILE__, __LINE__));
+      }
+
+      // cs2_client_TraceFilterVft
+      // cs2_client_TraceCollideableFilterPtr
+      // From native initializer:
+      //   LEA RAX,[PTR_FUN_...]
+      //   MOV [PTR_PTR_...],RAX
+      //   RET
+      {
+            MemRange result = FindPatternString(
+                  textRange,
+                  "48 8D 05 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? C3 CC 48 83 EC 28 48 8B 15 ?? ?? ?? ?? 48 83 FA 0F 76 30"
+            );
+
+            if (!result.IsEmpty()) {
+                  const AfxAddr leaFilterVftInsn = result.Start + 0; // 48 8D 05 rel32
+                  const AfxAddr movFilterPtrInsn = result.Start + 7; // 48 89 05 rel32
+
+                  const AfxAddr filterVftAddress = DecodeRipRel32Target(leaFilterVftInsn, 3, 7);
+                  const AfxAddr filterPtrAddress = DecodeRipRel32Target(movFilterPtrInsn, 3, 7);
+
+                  if (filterVftAddress < moduleRange.Start || filterVftAddress >= moduleRange.End
+                        || filterPtrAddress < moduleRange.Start || filterPtrAddress >= moduleRange.End)
+                        ErrorBox(MkErrStr(__FILE__, __LINE__));
+                  else {
+                        AFXADDR_SET(cs2_client_TraceFilterVft, filterVftAddress);
+                        AFXADDR_SET(cs2_client_TraceCollideableFilterPtr, filterPtrAddress);
+                  }
             }
             else ErrorBox(MkErrStr(__FILE__, __LINE__));
       }
