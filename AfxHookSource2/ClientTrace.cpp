@@ -19,6 +19,14 @@ typedef unsigned __int64 (__fastcall * cs2_client_TraceShape_t)(
     long long param_6
 );
 
+typedef void * (__fastcall * cs2_client_InitTraceFilter_t)(
+    void * outFilter,
+    const void * ignoreEnt,
+    uint64_t mask,
+    uint8_t mode,
+    uint8_t groupByte
+);
+
 typedef void (__fastcall * cs2_client_BuildTraceHullShape_t)(
     void * dstShape,
     const void * minsMaxs
@@ -52,37 +60,12 @@ static CEntityInstance * ResolveEntityFromHandle(SOURCESDK::CS2::CBaseHandle han
     return ent;
 }
 
-static uint32_t GetIgnoreIndexFromEntity(const CEntityInstance * ent) {
-    if (!ent) return 0xffffffffU;
-
-    const uint8_t * pEnt = (const uint8_t *)ent;
-    const uint8_t * pIdentity = *(const uint8_t * const *)(pEnt + 0x10);
-    if (!pIdentity) return 0xffffffffU;
-
-    const uint32_t packedHandle = *(const uint32_t *)(pIdentity + 0x10);
-    uint32_t lower = 0x7fffU;
-    if (0xffffffffU != packedHandle) lower = packedHandle & 0x7fffU;
-
-    const uint32_t serial = packedHandle >> 15;
-    const uint32_t lowFlag = (*(const uint32_t *)(pIdentity + 0x30)) & 1U;
-    return ((serial - lowFlag) * 0x8000U) | lower;
-}
-
-static uint16_t GetIgnoreGroupFromEntity(const CEntityInstance * ent) {
-    if (!ent) return 0;
-
-    auto pVtable = *(void ***)ent;
-    if (!pVtable) return 0;
-
-    auto getCollisionObj = (long long(__fastcall *)(const void *))pVtable[0x208 / sizeof(void *)];
-    if (!getCollisionObj) return 0;
-
-    long long collisionObj = getCollisionObj(ent);
-    if (!collisionObj) return 0;
-    return *(const uint16_t *)(collisionObj + 0x38);
-}
-
 #pragma pack(push, 1)
+// stack/object blobs used by native trace paths.
+// Sizes/offsets come from native callsites and result readers:
+// - TraceRayBlob:   line type byte read/write at +0x28.
+// - TraceFilterBlob: arg5 filter struct initialized before TraceShape call.
+// - TraceResultBlob: fields read after call (normal +0x90, fraction +0xAC, startsolid +0xB7).
 struct TraceRayBlob {
     uint8_t Data[0x29];
 };
@@ -104,7 +87,7 @@ struct TraceHullBuildInput {
 bool IsAvailable() {
     return 0 != AFXADDR_GET(cs2_client_TraceShape)
         && 0 != AFXADDR_GET(cs2_client_TraceContextPtr)
-        && 0 != AFXADDR_GET(cs2_client_TraceFilterVft);
+        && 0 != AFXADDR_GET(cs2_client_InitTraceFilter);
 }
 
 bool TraceLine(
@@ -119,9 +102,9 @@ bool TraceLine(
 
     auto fn = (cs2_client_TraceShape_t)AFXADDR_GET(cs2_client_TraceShape);
     auto ppTraceContext = (long long **)AFXADDR_GET(cs2_client_TraceContextPtr);
-    const uint64_t filterVft = (uint64_t)AFXADDR_GET(cs2_client_TraceFilterVft);
+    auto initFilter = (cs2_client_InitTraceFilter_t)AFXADDR_GET(cs2_client_InitTraceFilter);
 
-    if (!fn || !ppTraceContext || !*ppTraceContext || !filterVft) return false;
+    if (!fn || !ppTraceContext || !*ppTraceContext || !initFilter) return false;
 
     long long * traceContext = *ppTraceContext;
 
@@ -133,24 +116,10 @@ bool TraceLine(
     ray.Data[0x28] = 0;
 
     CEntityInstance * ignoreEnt = ResolveEntityFromHandle(ignoreHandle);
-    const uint32_t ignoreIndex = GetIgnoreIndexFromEntity(ignoreEnt);
-    const uint16_t ignoreGroup = GetIgnoreGroupFromEntity(ignoreEnt);
-
-    // Recreate native TraceShape filter layout used by line/hull callers.
-    *(uint64_t *)&filter.Data[0x00] = filterVft;           // filter vft / callback table
-    *(uint64_t *)&filter.Data[0x08] = (uint64_t)mask;      // trace mask
-    *(uint64_t *)&filter.Data[0x10] = 0;                   // reserved
-    *(uint64_t *)&filter.Data[0x18] = 0;                   // reserved
-    *(uint32_t *)&filter.Data[0x20] = ignoreIndex;         // ignore entity index/id
-    *(uint32_t *)&filter.Data[0x24] = 0xffffffffU;         // default include/all
-    *(uint32_t *)&filter.Data[0x28] = 0xffffffffU;         // default include/all
-    *(uint32_t *)&filter.Data[0x2C] = 0xffffffffU;         // default include/all
-    *(uint16_t *)&filter.Data[0x30] = ignoreGroup;         // ignore collision group
-    *(uint32_t *)&filter.Data[0x32] = 0xffff0000U;         // default flags
-    *(uint16_t *)&filter.Data[0x36] = 0x0f00U;             // default flags
-    filter.Data[0x38] = 4;                                 // query mode
-    filter.Data[0x39] = 0x49;                              // query flags
-    filter.Data[0x3A] = 0;                                 // single-hit mode disabled
+    // Native filter initializer/helper:
+    // (outFilter, ignoreEnt, mask, mode, groupByte). For line/hull callsites:
+    // mode=4 and groupByte=0x0f.
+    initFilter(&filter, ignoreEnt, (uint64_t)mask, 4, 0x0f);
 
     Vec3 startPacked = start;
     Vec3 endPacked = end;
@@ -164,6 +133,7 @@ bool TraceLine(
         (long long)&traceResult
     );
 
+    // Result offsets from native trace result struct reads.
     const float fraction = *(float *)&traceResult.Data[0xAC];
     const bool startSolid = 0 != traceResult.Data[0xB7];
     const bool hit = fraction < 1.0f || startSolid;
@@ -200,9 +170,9 @@ bool TraceHull(
     auto fn = (cs2_client_TraceShape_t)AFXADDR_GET(cs2_client_TraceShape);
     auto buildHull = (cs2_client_BuildTraceHullShape_t)AFXADDR_GET(cs2_client_BuildTraceHullShape);
     auto ppTraceContext = (long long **)AFXADDR_GET(cs2_client_TraceContextPtr);
-    const uint64_t filterVft = (uint64_t)AFXADDR_GET(cs2_client_TraceFilterVft);
+    auto initFilter = (cs2_client_InitTraceFilter_t)AFXADDR_GET(cs2_client_InitTraceFilter);
 
-    if (!fn || !buildHull || !ppTraceContext || !*ppTraceContext || !filterVft) return false;
+    if (!fn || !buildHull || !ppTraceContext || !*ppTraceContext || !initFilter) return false;
 
     long long * traceContext = *ppTraceContext;
 
@@ -214,23 +184,7 @@ bool TraceHull(
     TraceResultBlob traceResult = {};
 
     CEntityInstance * ignoreEnt = ResolveEntityFromHandle(ignoreHandle);
-    const uint32_t ignoreIndex = GetIgnoreIndexFromEntity(ignoreEnt);
-    const uint16_t ignoreGroup = GetIgnoreGroupFromEntity(ignoreEnt);
-
-    *(uint64_t *)&filter.Data[0x00] = filterVft;
-    *(uint64_t *)&filter.Data[0x08] = (uint64_t)mask;
-    *(uint64_t *)&filter.Data[0x10] = 0;
-    *(uint64_t *)&filter.Data[0x18] = 0;
-    *(uint32_t *)&filter.Data[0x20] = ignoreIndex;
-    *(uint32_t *)&filter.Data[0x24] = 0xffffffffU;
-    *(uint32_t *)&filter.Data[0x28] = 0xffffffffU;
-    *(uint32_t *)&filter.Data[0x2C] = 0xffffffffU;
-    *(uint16_t *)&filter.Data[0x30] = ignoreGroup;
-    *(uint32_t *)&filter.Data[0x32] = 0xffff0000U;
-    *(uint16_t *)&filter.Data[0x36] = 0x0f00U;
-    filter.Data[0x38] = 4;
-    filter.Data[0x39] = 0x49;
-    filter.Data[0x3A] = 0;
+    initFilter(&filter, ignoreEnt, (uint64_t)mask, 4, 0x0f);
 
     Vec3 startPacked = start;
     Vec3 endPacked = end;

@@ -31,6 +31,7 @@ AFXADDR_DEF(cs2_client_TraceShape)
 AFXADDR_DEF(cs2_client_TraceCollideableShape)
 AFXADDR_DEF(cs2_client_TraceContextPtr)
 AFXADDR_DEF(cs2_client_TraceFilterVft)
+AFXADDR_DEF(cs2_client_InitTraceFilter)
 AFXADDR_DEF(cs2_client_BuildTraceHullShape)
 AFXADDR_DEF(cs2_client_TraceCollideableFilterPtr)
 
@@ -300,6 +301,42 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
 
             if (!result.IsEmpty()) {
                   AFXADDR_SET(cs2_client_BuildTraceHullShape, result.Start);
+            }
+            else ErrorBox(MkErrStr(__FILE__, __LINE__));
+      }
+
+      // cs2_client_InitTraceFilter
+      // Native filter initializer/helper used by many TraceShape callsites.
+      // Common callsite form:
+      //   FUN_180319690(local_618, uVar5, 4, 3, 0x0f);
+      // Then local_618 is passed as TraceShape arg5 or TraceShapeWrapper arg4 (filter):
+      //   TraceShape(PTR_DAT_18203a928, local_5c8, &local_728, &local_734, local_618, local_6e8)
+      
+      //  180319690 48 89 5c        MOV        qword ptr [RSP + local_res8],RBX
+      //            24 08
+      //  180319695 48 89 74        MOV        qword ptr [RSP + local_res10],RSI
+      //            24 10
+      //  18031969a 57              PUSH       RDI
+      //  18031969b 48 83 ec 20     SUB        RSP,0x20
+      //  18031969f 0f b6 41 39     MOVZX      EAX,byte ptr [RCX + 0x39]
+      //  1803196a3 33 ff           XOR        EDI,EDI
+      //  1803196a5 24 c9           AND        AL,0xc9
+      //  1803196a7 c7 41 34        MOV        dword ptr [RCX + 0x34],0xf00ffff
+      //            ff ff 00 0f
+      //  1803196ae 0c 49           OR         AL,0x49
+      //  1803196b0 c6 41 38 03     MOV        byte ptr [RCX + 0x38],0x3
+      //  1803196b4 88 41 39        MOV        byte ptr [RCX + 0x39],AL
+      //  1803196b7 48 8b d9        MOV        RBX,RCX
+      //  1803196ba 48 8d 05        LEA        RAX,[PTR_FUN_181927fa8]                          = 1801e6ad0
+      //            e7 e8 60 01
+      {
+            MemRange result = FindPatternString(
+                  textRange,
+                  "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 0F B6 41 39 33 FF 24 C9 C7 41 34 FF FF 00 0F 0C 49 C6 41 38 03 88 41 39 48 8B D9 48 8D 05 ?? ?? ?? ?? 48 89 79 10 48 89 01 48 8B F2 0F B6 44 24 50"
+            );
+
+            if (!result.IsEmpty()) {
+                  AFXADDR_SET(cs2_client_InitTraceFilter, result.Start);
             }
             else ErrorBox(MkErrStr(__FILE__, __LINE__));
       }

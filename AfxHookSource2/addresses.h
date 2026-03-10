@@ -21,6 +21,7 @@ AFXADDR_DECL(cs2_client_TraceShape)
 AFXADDR_DECL(cs2_client_TraceCollideableShape)
 AFXADDR_DECL(cs2_client_TraceContextPtr)
 AFXADDR_DECL(cs2_client_TraceFilterVft)
+AFXADDR_DECL(cs2_client_InitTraceFilter)
 AFXADDR_DECL(cs2_client_BuildTraceHullShape)
 AFXADDR_DECL(cs2_client_TraceCollideableFilterPtr)
 
