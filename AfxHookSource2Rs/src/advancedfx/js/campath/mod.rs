@@ -1159,7 +1159,7 @@ impl Class for Campath {
                 NativeFunction::from_fn_ptr(Campath::set_position)
             ) 
             .method(
-                js_string!("setAngels"),
+                js_string!("setAngles"),
                 3,
                 NativeFunction::from_fn_ptr(Campath::set_angles)
             )
