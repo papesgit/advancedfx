@@ -32,8 +32,9 @@ interface BaseSubCommandConfig<T extends SubCommandType> {
 	onSet?: (value: SubCommandValue<T>) => void;
 }
 
-interface SingleValueConfig<T extends 'int' | 'float' | 'string' | 'boolean'>
-	extends BaseSubCommandConfig<T> {
+interface SingleValueConfig<
+	T extends 'int' | 'float' | 'string' | 'boolean'
+> extends BaseSubCommandConfig<T> {
 	type: T;
 }
 
