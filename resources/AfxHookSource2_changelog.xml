@@ -6,6 +6,19 @@
 
 <release>
 <name>AfxHookSource2</name>
+<version>0.38.7</version>
+<time>2026-03-13T12:46Z</time>
+<changes>
+<change type="fixed">Fixed missing smoke in depth stream</change>
+<change type="fixed">mirv-script: fixed typo in campath setAngles binding</change>
+<change type="updated">mirv-script: updated BoaJS to v0.21</change>
+<change type="updated">mirv-script: added mirv_script_spec_lock snippet</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
 <version>0.38.6</version>
 <time>2026-02-24T09:58Z</time>
 <changes>

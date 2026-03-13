@@ -6,6 +6,16 @@
 
 <release>
 <name>AfxHookGoldSrc</name>
+<version>2.25.1</version>
+<time>2026-03-13T12:46Z</time>
+<changes>
+<change type="fixed">Fixed depth recording crashes the game introduced in HLAE 2.188.0</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookGoldSrc</name>
 <version>2.25.0</version>
 <time>2026-01-07T14:13Z</time>
 <changes>
