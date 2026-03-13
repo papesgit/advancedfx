@@ -1787,9 +1787,9 @@ void STDMETHODCALLTYPE New_PSSetShader(ID3D11DeviceContext* This,
         }
 
         if (g_bDetectSmoke && pPixelShader && nullptr == ppClassInstances && NumClassInstances == 0) {
-            const char* pKey = "write_smoke_depth_water_reflect";
-            const size_t keyLen = 31;
-            char buffer[31];
+            const char* pKey = "write_smoke_depth_water_reflection.vfx_ps";
+            const size_t keyLen = 41;
+            char buffer[41];
             UINT dataSize = keyLen;
             if (SUCCEEDED(pPixelShader->GetPrivateData(WKPDID_D3DDebugObjectName, &dataSize, &buffer))
                 && dataSize == keyLen) {
