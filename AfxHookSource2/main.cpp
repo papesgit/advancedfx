@@ -30,6 +30,7 @@
 #include "ObsWebSocketActions.h"
 #include "FreecamController.h"
 #include "NadeCam.h"
+#include "PlayerPathDrawer.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/AfxHookSource/SourceInterfaces.h"
@@ -974,6 +975,11 @@ CON_COMMAND(mirv_campath, "camera paths")
 	}
 
 	MirvCampath_ConCommand(args, advancedfx::Message, advancedfx::Warning, &g_CamPath, &g_MirvCampath_Time, &g_MirvCampath_Camera, &g_MirvCampath_Drawer);
+}
+
+CON_COMMAND(mirv_playerpath, "player path visualization")
+{
+	g_PlayerPathDrawer.Console_Command(args);
 }
 
 double MirvCamIO_GetTimeFn(void) {
@@ -2024,6 +2030,7 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
 	}
 
 	g_CampathDrawer.OnEngineThread_SetupViewDone();
+	g_PlayerPathDrawer.OnEngineThread_SetupViewDone();
 }
 
 /*
@@ -3645,6 +3652,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 			g_ConsolePrinter = new CConsolePrinter();
 
 			g_CampathDrawer.Begin();
+			g_PlayerPathDrawer.Begin();
 
 			if (int idx = g_CommandLine->FindParam(L"-afxFixNetCon")) {
 				// https://github.com/ValveSoftware/csgo-osx-linux/issues/3603#issuecomment-2163695087
@@ -3673,6 +3681,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 			// actually this gets called now.
 
 			g_CampathDrawer.End();
+			g_PlayerPathDrawer.End();
 
 			g_S2CamIO.ShutDown();
 

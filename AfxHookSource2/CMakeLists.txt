@@ -226,6 +226,8 @@ target_sources(${PROJECT_NAME} PRIVATE
 
     CampathDrawer.cpp
     CampathDrawer.h
+    PlayerPathDrawer.cpp
+    PlayerPathDrawer.h
 
     ClientEntitySystem.cpp
     ClientEntitySystem.h

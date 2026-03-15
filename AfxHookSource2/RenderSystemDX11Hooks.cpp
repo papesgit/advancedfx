@@ -4,6 +4,7 @@
 #include "RenderSystemDX11Hooks.h"
 
 #include "CampathDrawer.h"
+#include "PlayerPathDrawer.h"
 #include "MirvImage.h"
 #include "RenderServiceHooks.h"
 #include "ReShadeAdvancedfx.h"
@@ -1886,6 +1887,7 @@ HRESULT STDMETHODCALLTYPE New_CreateRenderTargetView(  ID3D11Device * This,
                     g_DepthCompositor.OnTargetEnd();
                     //CAfxShaderResourceViews::Clear();
                     g_CampathDrawer.EndDevice();
+                    g_PlayerPathDrawer.EndDevice();
                     g_MirvImageDrawer.EndDevice();
                     g_SharedTextureHost.Reset();
                     g_pDevice->Release();
@@ -1904,6 +1906,7 @@ HRESULT STDMETHODCALLTYPE New_CreateRenderTargetView(  ID3D11Device * This,
                 g_pDevice = This;
                 g_pDevice->AddRef();
                 g_CampathDrawer.BeginDevice(This);
+                g_PlayerPathDrawer.BeginDevice(This);
                 g_MirvImageDrawer.BeginDevice(This);
             }
             pTexture->Release();
@@ -2032,6 +2035,7 @@ void STDMETHODCALLTYPE New_OMSetRenderTargets( ID3D11DeviceContext * This,
                 g_pImmediateContext->RSGetViewports(&numViewPorts, &g_ViewPort);
 
                 g_CampathDrawer.OnRenderThread_Draw(g_pImmediateContext, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
+                g_PlayerPathDrawer.OnRenderThread_Draw(g_pImmediateContext, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
                 g_MirvImageDrawer.OnRenderThread_Draw(g_pImmediateContext, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
 
                 g_bInOwnDraw = false;
@@ -2411,6 +2415,7 @@ void Before_Present() {
     g_bInOwnDraw = true;
 
     g_CampathDrawer.OnRenderThread_Present();
+    g_PlayerPathDrawer.OnRenderThread_Present();
 
     if (g_ReShadeAdvancedfx.IsConnected() && !g_ReShadeAdvancedfx.HasRendered()) {
         g_ReShadeAdvancedfx.AdvancedfxRenderEffects(nullptr, nullptr);
@@ -4817,6 +4822,7 @@ void RenderSystemDX11_EngineThread_Prepare() {
 void RenderSystemDX11_EngineThread_BeforeRender() {
     g_RenderCommands.EngineThread_EndFrame();
     g_CampathDrawer.OnEngineThread_EndFrame();
+    g_PlayerPathDrawer.OnEngineThread_EndFrame();
 }
 
 bool RenderSystemDX11_EngineThread_HasNextRenderPass() {
