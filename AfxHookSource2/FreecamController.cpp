@@ -282,9 +282,14 @@ void CFreecamController::ResetWithInheritedMotion(const CameraTransform& previou
             m_RawQuat = targetQuat;
             UpdateAnglesFromQuat(m_RawQuat, m_Transform, current);
             UpdateAnglesFromQuat(m_SmoothedQuat, m_SmoothedTransform, current);
+            // Keep scalar roll state aligned with the quaternion-based inherit reset.
+            m_TargetRoll = m_CurrentRoll = m_Transform.roll;
+            m_RollVelocity = 0.0f;
         } else {
             m_RawQuat = currQuat;
             m_SmoothedQuat = currQuat;
+            m_TargetRoll = m_CurrentRoll = current.roll;
+            m_RollVelocity = 0.0f;
         }
     }
 }
