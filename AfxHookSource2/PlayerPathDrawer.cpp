@@ -78,6 +78,7 @@ void CPlayerPathDrawer::ResetState_NoLock() {
     m_SamplesByController.clear();
     m_TeamByController.clear();
     m_PaletteSlotByController.clear();
+    m_AliveSnapshotControllers.clear();
     m_NextSampleTime = 0.0;
 }
 
@@ -85,6 +86,7 @@ void CPlayerPathDrawer::HandleRoundStart_NoLock(double now) {
     m_SamplesByController.clear();
     m_TeamByController.clear();
     m_PaletteSlotByController.clear();
+    m_AliveSnapshotControllers.clear();
     m_RoundState = RoundState::Collecting;
     m_RoundStartTime = now;
     m_RoundEndTime = now;
@@ -109,6 +111,24 @@ bool CPlayerPathDrawer::ShouldTrackController(CEntityInstance* controller, int t
     if (IsCoachName(name)) return false;
 
     return true;
+}
+
+bool CPlayerPathDrawer::IsControllerAlive(int controllerIndex) const {
+    if (!g_pEntityList || !g_GetEntityFromIndex) return false;
+
+    CEntityInstance* controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, controllerIndex);
+    if (!controller || !controller->IsPlayerController()) return false;
+
+    const auto pawnHandle = controller->GetPlayerPawnHandle();
+    if (!pawnHandle.IsValid()) return false;
+
+    const int pawnIndex = pawnHandle.GetEntryIndex();
+    if (pawnIndex < 0) return false;
+
+    CEntityInstance* pawn = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, pawnIndex);
+    if (!pawn) return false;
+
+    return 0 < (int)pawn->GetHealth();
 }
 
 void CPlayerPathDrawer::SamplePlayers_NoLock(double now) {
@@ -165,6 +185,7 @@ void CPlayerPathDrawer::SamplePlayers_NoLock(double now) {
 void CPlayerPathDrawer::RefreshRenderData_NoLock(double now) {
     m_RenderData.Enabled = m_Enabled;
     m_RenderData.ShowAll = m_ShowAll;
+    m_RenderData.ShowAliveSnapshot = m_ShowAliveSnapshot;
     std::memcpy(m_RenderData.ShowSlots, m_ShowSlots, sizeof(m_ShowSlots));
     m_RenderData.Mode = m_DrawMode;
     m_RenderData.Depth = m_DepthMode;
@@ -180,6 +201,7 @@ void CPlayerPathDrawer::RefreshRenderData_NoLock(double now) {
     m_RenderData.SamplesByController = m_SamplesByController;
     m_RenderData.TeamByController = m_TeamByController;
     m_RenderData.PaletteSlotByController = m_PaletteSlotByController;
+    m_RenderData.AliveSnapshotControllers = m_AliveSnapshotControllers;
 }
 
 void CPlayerPathDrawer::OnEngineThread_SetupViewDone() {
@@ -275,6 +297,24 @@ void CPlayerPathDrawer::OnGameEvent(const char* eventName) {
 void CPlayerPathDrawer::Console_Command(advancedfx::ICommandArgs* args) {
     const int argC = args->ArgC();
     const char* cmd0 = args->ArgV(0);
+    auto parseSlotLabel = [](const char* text, int& outIndex) -> bool {
+        if (!text || !text[0] || text[1]) return false;
+        if (text[0] == '0') {
+            outIndex = 9;
+            return true;
+        }
+        if ('1' <= text[0] && text[0] <= '9') {
+            outIndex = text[0] - '1';
+            return true;
+        }
+        return false;
+    };
+    auto hasAnyShownSlot = [](const bool (&slots)[10]) -> bool {
+        for (bool value : slots) {
+            if (value) return true;
+        }
+        return false;
+    };
 
     if (argC >= 2) {
         const char* cmd1 = args->ArgV(1);
@@ -298,29 +338,47 @@ void CPlayerPathDrawer::Console_Command(advancedfx::ICommandArgs* args) {
                 const char* cmd2 = args->ArgV(2);
                 if (0 == _stricmp(cmd2, "all")) {
                     m_ShowAll = true;
+                    m_ShowAliveSnapshot = false;
+                    m_AliveSnapshotControllers.clear();
                     return;
                 }
                 if (0 == _stricmp(cmd2, "none")) {
                     m_ShowAll = false;
+                    m_ShowAliveSnapshot = false;
+                    m_AliveSnapshotControllers.clear();
                     std::memset(m_ShowSlots, 0, sizeof(m_ShowSlots));
                     return;
                 }
-                if (0 == _stricmp(cmd2, "slot") && argC >= 5) {
-                    const int slot = atoi(args->ArgV(3));
-                    if (slot < 1 || slot > 10) {
-                        advancedfx::Warning("slot must be in 1..10\n");
+                if (0 == _stricmp(cmd2, "alive")) {
+                    m_ShowAll = true;
+                    m_ShowAliveSnapshot = true;
+                    m_AliveSnapshotControllers.clear();
+                    for (const auto& kv : m_SamplesByController) {
+                        if (IsControllerAlive(kv.first)) {
+                            m_AliveSnapshotControllers.insert(kv.first);
+                        }
+                    }
+                    std::memset(m_ShowSlots, 0, sizeof(m_ShowSlots));
+                    return;
+                }
+                if (argC >= 4) {
+                    int slotIndex = -1;
+                    if (!parseSlotLabel(cmd2, slotIndex)) {
+                        advancedfx::Warning("show slot must be one of 0-9\n");
                         return;
                     }
                     m_ShowAll = false;
-                    m_ShowSlots[slot - 1] = 0 != atoi(args->ArgV(4));
+                    m_ShowAliveSnapshot = false;
+                    m_AliveSnapshotControllers.clear();
+                    m_ShowSlots[slotIndex] = 0 != atoi(args->ArgV(3));
                     return;
                 }
             }
             advancedfx::Message(
-                "%s show all|none|slot <1..10> <0|1>\n"
+                "%s show all|none|alive|<0-9> <0|1>\n"
                 "Current value: %s\n",
                 cmd0,
-                m_ShowAll ? "all" : "slots"
+                m_ShowAliveSnapshot ? "alive" : (m_ShowAll ? "all" : (hasAnyShownSlot(m_ShowSlots) ? "slots" : "none"))
             );
             return;
         }
@@ -405,6 +463,7 @@ void CPlayerPathDrawer::Console_Command(advancedfx::ICommandArgs* args) {
 
             bool showAll = false;
             bool showSlots[10] = { false, false, false, false, false, false, false, false, false, false };
+            std::set<int> aliveSnapshotControllers;
             const char* direction = nullptr;
             const char* speedArg = nullptr;
 
@@ -413,18 +472,28 @@ void CPlayerPathDrawer::Console_Command(advancedfx::ICommandArgs* args) {
                 direction = args->ArgV(3);
                 speedArg = args->ArgV(4);
             }
-            else if (argC >= 6 && 0 == _stricmp(args->ArgV(2), "slot")) {
-                int slot = atoi(args->ArgV(3));
-                if (slot < 1 || slot > 10) {
-                    advancedfx::Warning("play slot must be in 1..10\n");
+            else if (argC >= 5 && 0 == _stricmp(args->ArgV(2), "alive")) {
+                showAll = true;
+                for (const auto& kv : m_SamplesByController) {
+                    if (IsControllerAlive(kv.first)) {
+                        aliveSnapshotControllers.insert(kv.first);
+                    }
+                }
+                direction = args->ArgV(3);
+                speedArg = args->ArgV(4);
+            }
+            else if (argC >= 5) {
+                int slotIndex = -1;
+                if (!parseSlotLabel(args->ArgV(2), slotIndex)) {
+                    advancedfx::Warning("play target must be all, alive, or one of 0-9\n");
                     return;
                 }
-                showSlots[slot - 1] = true;
-                direction = args->ArgV(4);
-                speedArg = args->ArgV(5);
+                showSlots[slotIndex] = true;
+                direction = args->ArgV(3);
+                speedArg = args->ArgV(4);
             }
             else {
-                advancedfx::Message("%s play all|slot <1..10> forwards|backwards <speed>\n%s play stop\n", cmd0, cmd0);
+                advancedfx::Message("%s play all|alive|<0-9> forwards|backwards <speed>\n%s play stop\n", cmd0, cmd0);
                 return;
             }
 
@@ -464,6 +533,8 @@ void CPlayerPathDrawer::Console_Command(advancedfx::ICommandArgs* args) {
             }
 
             m_ShowAll = showAll;
+            m_ShowAliveSnapshot = !aliveSnapshotControllers.empty();
+            m_AliveSnapshotControllers = aliveSnapshotControllers;
             std::memcpy(m_ShowSlots, showSlots, sizeof(showSlots));
             m_DrawMode = playMode;
             m_PlaybackSpeed = speed;
@@ -502,7 +573,7 @@ void CPlayerPathDrawer::Console_Command(advancedfx::ICommandArgs* args) {
             advancedfx::Message(
                 "enabled: %i\nshow: %s\nplayDirection: %s\ndepth: %s\nalpha: %s\ncolors: %s\nsampleInterval: %.3f\nplayback: %s speed=%.3f cursor=%.3f upper=%.3f\nround: %s\ntrackedPlayers: %zu\nsamples: %zu\n",
                 m_Enabled ? 1 : 0,
-                m_ShowAll ? "all" : "slots",
+                m_ShowAliveSnapshot ? "alive" : (m_ShowAll ? "all" : (hasAnyShownSlot(m_ShowSlots) ? "slots" : "none")),
                 m_DrawMode == DrawMode::Forward ? "forward" : "backward",
                 m_DepthMode == DepthMode::Test ? "test" : "overlay",
                 m_AlphaMode == AlphaMode::Dynamic ? "dynamic" : "opaque",
@@ -522,8 +593,8 @@ void CPlayerPathDrawer::Console_Command(advancedfx::ICommandArgs* args) {
 
     advancedfx::Message(
         "%s enabled [0|1]\n"
-        "%s show all|none|slot <1..10> <0|1>\n"
-        "%s play all|slot <1..10> forwards|backwards <speed>\n"
+        "%s show all|none|alive|<0-9> <0|1>\n"
+        "%s play all|alive|<0-9> forwards|backwards <speed>\n"
         "%s play stop\n"
         "%s depth test|overlay\n"
         "%s alpha dynamic|opaque\n"
@@ -772,14 +843,25 @@ void CPlayerPathDrawer::OnRenderThread_Draw(ID3D11DeviceContext* pImmediateConte
     if (!renderData.Enabled || renderData.SamplesByController.empty()) return;
 
     std::set<int> visibleControllers;
-    if (renderData.ShowAll) {
-        for (const auto& kv : renderData.SamplesByController) visibleControllers.insert(kv.first);
+    if (renderData.ShowAliveSnapshot) {
+        for (const int controllerIndex : renderData.AliveSnapshotControllers) {
+            if (renderData.SamplesByController.find(controllerIndex) != renderData.SamplesByController.end()) {
+                visibleControllers.insert(controllerIndex);
+            }
+        }
+    }
+    else if (renderData.ShowAll) {
+        for (const auto& kv : renderData.SamplesByController) {
+            visibleControllers.insert(kv.first);
+        }
     }
     else {
         for (int i = 0; i < 10; ++i) {
             if (!renderData.ShowSlots[i]) continue;
             const int controllerIndex = g_SpectatorBindings[i];
-            if (controllerIndex >= 0) visibleControllers.insert(controllerIndex);
+            if (controllerIndex >= 0) {
+                visibleControllers.insert(controllerIndex);
+            }
         }
     }
     if (visibleControllers.empty()) return;

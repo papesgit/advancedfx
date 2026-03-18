@@ -91,7 +91,8 @@ private:
 
     struct RenderData {
         bool Enabled = false;
-        bool ShowAll = true;
+        bool ShowAll = false;
+        bool ShowAliveSnapshot = false;
         bool ShowSlots[10] = { false, false, false, false, false, false, false, false, false, false };
         DrawMode Mode = DrawMode::Backward;
         DepthMode Depth = DepthMode::Test;
@@ -107,6 +108,7 @@ private:
         std::map<int, std::deque<Sample>> SamplesByController;
         std::map<int, int> TeamByController;
         std::map<int, int> PaletteSlotByController;
+        std::set<int> AliveSnapshotControllers;
     };
 
     void ResetState_NoLock();
@@ -116,6 +118,7 @@ private:
     void RefreshRenderData_NoLock(double now);
 
     bool ShouldTrackController(CEntityInstance* controller, int team) const;
+    bool IsControllerAlive(int controllerIndex) const;
     DWORD MakeColorForController(int controllerIndex, int team, int paletteSlot, float alpha01, ColorMode colorMode) const;
     float CalcAlphaForTime(double segmentTime, double focusTime, double fromTime, double toTime) const;
     void GetViewPlaneFromWorldToScreen(const SOURCESDK::VMatrix& worldToScreenMatrix, Afx::Math::Vector3& outPlaneOrigin, Afx::Math::Vector3& outPlaneNormal) const;
@@ -134,7 +137,8 @@ private:
     RenderData m_RenderData;
 
     bool m_Enabled = false;
-    bool m_ShowAll = true;
+    bool m_ShowAll = false;
+    bool m_ShowAliveSnapshot = false;
     bool m_ShowSlots[10] = { false, false, false, false, false, false, false, false, false, false };
     DrawMode m_DrawMode = DrawMode::Backward;
     DepthMode m_DepthMode = DepthMode::Test;
@@ -158,6 +162,7 @@ private:
     std::map<int, std::deque<Sample>> m_SamplesByController;
     std::map<int, int> m_TeamByController;
     std::map<int, int> m_PaletteSlotByController;
+    std::set<int> m_AliveSnapshotControllers;
 
     ID3D11Device* m_Device = nullptr;
     ID3D11DeviceContext* m_DeviceContext = nullptr;
