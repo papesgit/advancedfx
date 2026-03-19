@@ -229,6 +229,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     PlayerPathDrawer.cpp
     PlayerPathDrawer.h
 
+    ClientTrace.cpp
+    ClientTrace.h
+
     ClientEntitySystem.cpp
     ClientEntitySystem.h
 
