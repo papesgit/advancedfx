@@ -14,6 +14,7 @@ int g_SpectatorBindings[10] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 bool g_LastSpectatorKeyState[10] = {false};
 bool g_UseAltSpectatorBindings = false;
 bool g_PendingSpectatorSwitch = false;
+bool g_pendingSpectatorBindingsRefresh = false;
 int g_SpectatorSwitchTimeout = 0; // Safety timeout
 
 static bool StartsWithIgnoreCaseAscii(const char* s, const char* lit)
@@ -144,6 +145,22 @@ void RefreshSpectatorBindings() {
 	}
 
 	advancedfx::Message("Spectator bindings refreshed: %zu CT, %zu T\n", ctControllers.size(), tControllers.size());
+}
+
+void SpectatorBindings_OnGameEvent(const char* eventName) {
+    if (!eventName) return;
+
+    if (0 == _stricmp(eventName, "player_team")) {
+        g_pendingSpectatorBindingsRefresh = true;
+		return;
+    }
+    if (0 == _stricmp(eventName, "player_spawn")) {
+        if (g_pendingSpectatorBindingsRefresh) {
+            g_pendingSpectatorBindingsRefresh = false;
+            RefreshSpectatorBindings();
+        }
+        return;
+    }
 }
 
 void SetAltSpectatorBindings(bool enabled) {

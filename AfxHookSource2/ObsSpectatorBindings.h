@@ -8,3 +8,4 @@ extern int g_SpectatorSwitchTimeout;
 
 void RefreshSpectatorBindings();
 void SetAltSpectatorBindings(bool enabled);
+void SpectatorBindings_OnGameEvent(const char* eventName);

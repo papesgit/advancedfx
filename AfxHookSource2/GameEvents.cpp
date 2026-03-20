@@ -11,6 +11,7 @@
 
 #include "AfxHookSource2Rs.h"
 #include "PlayerPathDrawer.h"
+#include "ObsSpectatorBindings.h"
 
 #include <Windows.h>
 #include "../deps/release/Detours/src/detours.h"
@@ -70,10 +71,19 @@ void SendGameEvent(SOURCESDK::CS2::CGameEvent *event) {
     else advancedfx::Warning("Event: \"%s\" (%i): SaveKV3AsJSON failed: \"%s\"\n", event->GetName(), event->GetID(),error.Get() ? error.Get() : "[nullptr]");
 }
 
+void HandleGameEvent(SOURCESDK::CS2::CGameEvent* event) {
+    if (!event) return;
+
+    const char* eventName = event->GetName();
+
+    g_PlayerPathDrawer.OnGameEvent(eventName);
+    SpectatorBindings_OnGameEvent(eventName);
+}
+
 bool New_CGameEventManager_FireEvent( void * This, SOURCESDK::CS2::CGameEvent *event, bool bDontBroadcast /*= false*/ ) {
     g_pGameEventManager = This;
 
-    g_PlayerPathDrawer.OnGameEvent(event ? event->GetName() : nullptr);
+    HandleGameEvent(event);
 
     //advancedfx::Message("Server Event: %s\n", event->GetName());
 
@@ -85,7 +95,7 @@ extern bool g_b_on_game_event;
 bool New_CGameEventManager_FireEventClientSide( void * This, SOURCESDK::CS2::CGameEvent *event ) {
     g_pGameEventManager = This;
 
-    g_PlayerPathDrawer.OnGameEvent(event ? event->GetName() : nullptr);
+    HandleGameEvent(event);
 
     if(g_b_on_game_event) SendGameEvent(event);
 
