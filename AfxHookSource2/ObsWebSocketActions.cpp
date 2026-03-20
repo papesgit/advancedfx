@@ -102,6 +102,35 @@ namespace {
 		if (delta.hasHalfFov) config.halfFov = delta.halfFov;
 		if (delta.hasRotCriticalDamping) config.rotCriticalDamping = delta.rotCriticalDamping;
 		if (delta.hasRotDampingRatio) config.rotDampingRatio = delta.rotDampingRatio;
+		if (delta.hasWalkMoveSpeed) config.walkMoveSpeed = delta.walkMoveSpeed;
+		if (delta.hasWalkMoveAcceleration) config.walkMoveAcceleration = delta.walkMoveAcceleration;
+		if (delta.hasWalkMoveDeceleration) config.walkMoveDeceleration = delta.walkMoveDeceleration;
+		if (delta.hasWalkRunMultiplier) config.walkRunMultiplier = delta.walkRunMultiplier;
+		if (delta.hasWalkCrouchSpeedMultiplier) config.walkCrouchSpeedMultiplier = delta.walkCrouchSpeedMultiplier;
+		if (delta.hasWalkLookHalfTime) config.walkLookHalfTime = delta.walkLookHalfTime;
+		if (delta.hasWalkFovHalfTime) config.walkFovHalfTime = delta.walkFovHalfTime;
+		if (delta.hasWalkGravity) config.walkGravity = delta.walkGravity;
+		if (delta.hasWalkJumpSpeed) config.walkJumpSpeed = delta.walkJumpSpeed;
+		if (delta.hasWalkHullRadius) config.walkHullRadius = delta.walkHullRadius;
+		if (delta.hasWalkHullHalfHeight) config.walkHullHalfHeight = delta.walkHullHalfHeight;
+		if (delta.hasWalkCrouchHullHalfHeight) config.walkCrouchHullHalfHeight = delta.walkCrouchHullHalfHeight;
+		if (delta.hasWalkCameraTopInset) config.walkCameraTopInset = delta.walkCameraTopInset;
+		if (delta.hasWalkStepHeight) config.walkStepHeight = delta.walkStepHeight;
+		if (delta.hasWalkGroundProbe) config.walkGroundProbe = delta.walkGroundProbe;
+		if (delta.hasWalkMinGroundNormalZ) config.walkMinGroundNormalZ = delta.walkMinGroundNormalZ;
+		if (delta.hasWalkTraceMask) config.walkTraceMask = delta.walkTraceMask;
+		if (delta.hasWalkModeDefaultEnabled) config.walkModeDefaultEnabled = delta.walkModeDefaultEnabled;
+		if (delta.hasHandheldDefaultEnabled) config.handheldDefaultEnabled = delta.handheldDefaultEnabled;
+		if (delta.hasWalkBobAmplitudeZ) config.walkBobAmplitudeZ = delta.walkBobAmplitudeZ;
+		if (delta.hasWalkBobAmplitudeSide) config.walkBobAmplitudeSide = delta.walkBobAmplitudeSide;
+		if (delta.hasWalkBobAmplitudeRoll) config.walkBobAmplitudeRoll = delta.walkBobAmplitudeRoll;
+		if (delta.hasWalkBobFrequency) config.walkBobFrequency = delta.walkBobFrequency;
+		if (delta.hasHandheldShakePosAmplitude) config.handheldShakePosAmplitude = delta.handheldShakePosAmplitude;
+		if (delta.hasHandheldShakeAngAmplitude) config.handheldShakeAngAmplitude = delta.handheldShakeAngAmplitude;
+		if (delta.hasHandheldShakeFrequency) config.handheldShakeFrequency = delta.handheldShakeFrequency;
+		if (delta.hasHandheldDriftPosAmplitude) config.handheldDriftPosAmplitude = delta.handheldDriftPosAmplitude;
+		if (delta.hasHandheldDriftAngAmplitude) config.handheldDriftAngAmplitude = delta.handheldDriftAngAmplitude;
+		if (delta.hasHandheldDriftFrequency) config.handheldDriftFrequency = delta.handheldDriftFrequency;
 	}
 }
 
@@ -274,6 +303,9 @@ void ObsWebSocket_ProcessActions() {
 			g_pFreecam->SetInputEnabled(true);
 			if (action.handoff.hasSpeedScalar) {
 				g_pFreecam->SetSpeedScalar(action.handoff.speedScalar);
+			}
+			if (action.handoff.hasWalkRuntimeState) {
+				g_pFreecam->ApplyWalkRuntimeState(action.handoff.walkRuntimeState);
 			}
 			if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
 			if (g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);

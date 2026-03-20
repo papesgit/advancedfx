@@ -19,6 +19,8 @@ constexpr uint8_t kVkRightShift = 0xA1;
 constexpr uint8_t kVkAlt        = 0x12;  // VK_MENU
 constexpr uint8_t kVkLeftAlt    = 0xA4;  // VK_LMENU
 constexpr uint8_t kVkRightAlt   = 0xA5;  // VK_RMENU
+constexpr uint8_t kVkG          = 0x47;
+constexpr uint8_t kVkH          = 0x48;
 constexpr uint8_t kVkV          = 0x56;
 
 bool IsCtrlDown(const InputState& input) {
@@ -62,6 +64,8 @@ CFreecamController::CFreecamController()
     , m_bInputEnabled(false)
     , m_bInputHold(false)
     , m_bInitialized(false)
+    , m_bWalkModeEnabled(false)
+    , m_bHandheldEffectsEnabled(false)
     , m_VelocityX(0), m_VelocityY(0), m_VelocityZ(0)
     , m_MouseVelocityX(0), m_MouseVelocityY(0)
     , m_HoldYawVelocity(0), m_HoldPitchVelocity(0)
@@ -77,6 +81,12 @@ CFreecamController::CFreecamController()
     , m_SmoothedQuat(1.0, 0.0, 0.0, 0.0)
     , m_RotVelocity(0.0, 0.0, 0.0)
     , m_HoldRotVelocity(0.0, 0.0, 0.0)
+    , m_WalkVelocityX(0.0f), m_WalkVelocityY(0.0f), m_WalkVelocityZ(0.0f)
+    , m_WalkTargetPitch(0.0f), m_WalkTargetYaw(0.0f), m_WalkTargetFov(90.0f)
+    , m_WalkOnGround(false), m_WalkJumpLatch(false), m_WalkCrouchAmount(0.0f)
+    , m_WalkBobPhase(0.0f), m_WalkEffectTime(0.0f)
+    , m_HandheldMotionNorm(0.0f)
+    , m_LastKeyGDown(false), m_LastKeyHDown(false)
     , m_PlayerLockActive(false)
     , m_LastKeyVDown(false)
     , m_PlayerLockHandle(-1)
@@ -125,6 +135,7 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_LastSmoothedZ = 0.0f;
         m_RawQuat = BuildQuat(m_Transform);
         m_SmoothedQuat = m_RawQuat;
+        m_OutputTransform = m_Transform;
         m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
         m_HoldRotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
         m_PlayerLockActive = false;
@@ -134,6 +145,11 @@ void CFreecamController::SetEnabled(bool enabled) {
         m_CurrentHalfRot = m_Config.halfRot;
         m_HalfRotTransitionActive = false;
         m_HalfRotTransitionElapsed = 0.0f;
+        m_bWalkModeEnabled = m_Config.walkModeDefaultEnabled;
+        m_bHandheldEffectsEnabled = m_Config.handheldDefaultEnabled;
+        m_LastKeyGDown = false;
+        m_LastKeyHDown = false;
+        ResetWalkState(true);
         ResetSpeed();
         m_LastUpdateTime = std::chrono::steady_clock::now();
     } else {
@@ -198,9 +214,39 @@ void CFreecamController::SetHoldMovementMode(HoldMovementMode mode) {
     }
 }
 
+void CFreecamController::SetWalkModeEnabled(bool enabled) {
+    if (m_bWalkModeEnabled == enabled) {
+        return;
+    }
+
+    m_bWalkModeEnabled = enabled;
+    ResetWalkState(true);
+}
+
+void CFreecamController::SetHandheldEffectsEnabled(bool enabled) {
+    m_bHandheldEffectsEnabled = enabled;
+}
+
+void CFreecamController::ApplyWalkRuntimeState(const WalkCameraRuntimeState& state) {
+    m_bWalkModeEnabled = state.walkModeEnabled;
+    m_bHandheldEffectsEnabled = state.handheldEffectsEnabled;
+    m_WalkVelocityX = state.velocityX;
+    m_WalkVelocityY = state.velocityY;
+    m_WalkVelocityZ = state.velocityZ;
+    m_WalkOnGround = state.onGround;
+    m_WalkJumpLatch = false;
+    m_WalkCrouchAmount = Clamp(state.crouchAmount, 0.0f, 1.0f);
+    m_WalkBobPhase = state.bobPhase;
+    m_WalkEffectTime = state.effectTime;
+    m_WalkTargetPitch = state.targetPitch;
+    m_WalkTargetYaw = state.targetYaw;
+    m_WalkTargetFov = state.targetFov;
+}
+
 void CFreecamController::Reset(const CameraTransform& transform) {
     m_Transform = transform;
     m_SmoothedTransform = transform;
+    m_OutputTransform = transform;
     m_RawQuat = BuildQuat(transform);
     m_SmoothedQuat = m_RawQuat;
     m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
@@ -225,6 +271,7 @@ void CFreecamController::Reset(const CameraTransform& transform) {
     m_PlayerLockReturnHalfRot = m_Config.halfRot;
     m_HalfRotTransitionActive = false;
     m_HalfRotTransitionElapsed = 0.0f;
+    ResetWalkState(true);
     ResetSpeed();
     m_bInitialized = true;
 }
@@ -292,10 +339,13 @@ void CFreecamController::ResetWithInheritedMotion(const CameraTransform& previou
             m_RollVelocity = 0.0f;
         }
     }
+
+    m_OutputTransform = m_SmoothedTransform;
 }
 
 void CFreecamController::SetSmoothedTransform(const CameraTransform& transform) {
     m_SmoothedTransform = transform;
+    m_OutputTransform = transform;
     m_SmoothedQuat = BuildQuat(transform);
     m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
     m_bInitialized = true;
@@ -303,6 +353,7 @@ void CFreecamController::SetSmoothedTransform(const CameraTransform& transform) 
 
 void CFreecamController::SetSmoothedTransformWithQuat(const CameraTransform& transform, const Afx::Math::Quaternion& smoothQuat) {
     m_SmoothedTransform = transform;
+    m_OutputTransform = transform;
     m_SmoothedQuat = smoothQuat.Normalized();
     UpdateAnglesFromQuat(m_SmoothedQuat, m_SmoothedTransform, transform);
     m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
@@ -314,6 +365,336 @@ void CFreecamController::Reset() {
     Reset(origin);
 }
 
+void CFreecamController::ResetWalkState(bool reinitializeTargets) {
+    m_WalkVelocityX = 0.0f;
+    m_WalkVelocityY = 0.0f;
+    m_WalkVelocityZ = 0.0f;
+    m_WalkOnGround = false;
+    m_WalkJumpLatch = false;
+    m_WalkCrouchAmount = 0.0f;
+    m_WalkBobPhase = 0.0f;
+    m_WalkEffectTime = 0.0f;
+    m_HandheldMotionNorm = 0.0f;
+    if (reinitializeTargets) {
+        m_WalkTargetPitch = m_Transform.pitch;
+        m_WalkTargetYaw = m_Transform.yaw;
+        m_WalkTargetFov = m_Transform.fov;
+    }
+}
+
+float CFreecamController::GetWalkHalfHeight(float crouchAmount) const {
+    const float clamped = (crouchAmount < 0.0f) ? 0.0f : ((crouchAmount > 1.0f) ? 1.0f : crouchAmount);
+    return m_Config.walkHullHalfHeight + (m_Config.walkCrouchHullHalfHeight - m_Config.walkHullHalfHeight) * clamped;
+}
+
+float CFreecamController::GetWalkCameraHeight(float crouchAmount) const {
+    return (std::max)(0.0f, GetWalkHalfHeight(crouchAmount) - m_Config.walkCameraTopInset);
+}
+
+bool CFreecamController::TraceWalkHullMove(float fromX, float fromY, float fromZ, float toX, float toY, float toZ, float halfHeight, ClientTrace::TraceResult& outTrace) const {
+    ClientTrace::Vec3 mins = { -m_Config.walkHullRadius, -m_Config.walkHullRadius, -halfHeight };
+    ClientTrace::Vec3 maxs = {  m_Config.walkHullRadius,  m_Config.walkHullRadius,  halfHeight };
+    ClientTrace::Vec3 start = { fromX, fromY, fromZ };
+    ClientTrace::Vec3 end = { toX, toY, toZ };
+    return ClientTrace::TraceHull(start, end, mins, maxs, outTrace, m_Config.walkTraceMask);
+}
+
+bool CFreecamController::ProbeWalkGround(float fromX, float fromY, float fromZ, float probeDistance, float halfHeight, ClientTrace::TraceResult& outTrace) const {
+    return TraceWalkHullMove(fromX, fromY, fromZ, fromX, fromY, fromZ - probeDistance, halfHeight, outTrace);
+}
+
+bool CFreecamController::TryWalkHorizontalMove(float fromX, float fromY, float fromZ, float deltaX, float deltaY, bool allowStep, float halfHeight, float& outX, float& outY, float& outZ) const {
+    ClientTrace::TraceResult directTrace = {};
+    const float directToX = fromX + deltaX;
+    const float directToY = fromY + deltaY;
+    if (!TraceWalkHullMove(fromX, fromY, fromZ, directToX, directToY, fromZ, halfHeight, directTrace)) {
+        return false;
+    }
+
+    if (!directTrace.Hit) {
+        outX = directTrace.Pos.X;
+        outY = directTrace.Pos.Y;
+        outZ = directTrace.Pos.Z;
+        return true;
+    }
+
+    if (!allowStep || m_Config.walkStepHeight <= 0.0f) {
+        outX = directTrace.Pos.X;
+        outY = directTrace.Pos.Y;
+        outZ = directTrace.Pos.Z;
+        return true;
+    }
+
+    ClientTrace::TraceResult upTrace = {};
+    if (!TraceWalkHullMove(fromX, fromY, fromZ, fromX, fromY, fromZ + m_Config.walkStepHeight, halfHeight, upTrace)) {
+        return false;
+    }
+    if (upTrace.Hit) {
+        outX = directTrace.Pos.X;
+        outY = directTrace.Pos.Y;
+        outZ = directTrace.Pos.Z;
+        return true;
+    }
+
+    ClientTrace::TraceResult forwardTrace = {};
+    if (!TraceWalkHullMove(upTrace.Pos.X, upTrace.Pos.Y, upTrace.Pos.Z, upTrace.Pos.X + deltaX, upTrace.Pos.Y + deltaY, upTrace.Pos.Z, halfHeight, forwardTrace)) {
+        return false;
+    }
+
+    ClientTrace::TraceResult downTrace = {};
+    if (!TraceWalkHullMove(forwardTrace.Pos.X, forwardTrace.Pos.Y, forwardTrace.Pos.Z, forwardTrace.Pos.X, forwardTrace.Pos.Y, forwardTrace.Pos.Z - (m_Config.walkStepHeight + m_Config.walkGroundProbe), halfHeight, downTrace)) {
+        return false;
+    }
+
+    if (downTrace.Hit) {
+        outX = downTrace.Pos.X;
+        outY = downTrace.Pos.Y;
+        outZ = downTrace.Pos.Z;
+    } else {
+        outX = forwardTrace.Pos.X;
+        outY = forwardTrace.Pos.Y;
+        outZ = forwardTrace.Pos.Z;
+    }
+    return true;
+}
+
+void CFreecamController::UpdateWalkModeToggles(const InputState& input) {
+    const bool gDown = input.IsKeyDown(kVkG);
+    if (gDown && !m_LastKeyGDown) {
+        SetWalkModeEnabled(!m_bWalkModeEnabled);
+    }
+    m_LastKeyGDown = gDown;
+
+    const bool hDown = input.IsKeyDown(kVkH);
+    if (!m_bWalkModeEnabled && hDown && !m_LastKeyHDown) {
+        m_bHandheldEffectsEnabled = !m_bHandheldEffectsEnabled;
+    }
+    m_LastKeyHDown = hDown;
+}
+
+void CFreecamController::UpdateWalkLook(const InputState& input, float deltaTime) {
+    const float deltaYaw = -input.mouseDx * m_Config.mouseSensitivity;
+    const float deltaPitch = input.mouseDy * m_Config.mouseSensitivity;
+
+    m_WalkTargetYaw += deltaYaw;
+    m_WalkTargetPitch = Clamp(m_WalkTargetPitch + deltaPitch, -89.0f, 89.0f);
+    m_MouseVelocityX = deltaTime > 0.0f ? deltaYaw / deltaTime : 0.0f;
+    m_MouseVelocityY = deltaTime > 0.0f ? deltaPitch / deltaTime : 0.0f;
+
+    m_Transform.pitch = Clamp((float)CalcDeltaExpSmooth(deltaTime / (std::max)(m_Config.walkLookHalfTime, 1.0e-4f), m_WalkTargetPitch - m_Transform.pitch) + m_Transform.pitch, -89.0f, 89.0f);
+    m_Transform.yaw = (float)CalcDeltaExpSmooth(deltaTime / (std::max)(m_Config.walkLookHalfTime, 1.0e-4f), m_WalkTargetYaw - m_Transform.yaw) + m_Transform.yaw;
+
+    if (input.mouseWheel != 0 && !IsAltDown(input)) {
+        m_WalkTargetFov += input.mouseWheel * m_Config.fovStep;
+        m_WalkTargetFov = Clamp(m_WalkTargetFov, m_Config.fovMin, m_Config.fovMax);
+    }
+    m_Transform.fov = (float)CalcDeltaExpSmooth(deltaTime / (std::max)(m_Config.walkFovHalfTime, 1.0e-4f), m_WalkTargetFov - m_Transform.fov) + m_Transform.fov;
+}
+
+void CFreecamController::UpdateWalkMovement(const InputState& input, float deltaTime) {
+    const bool analogEnabled = input.analogEnabled;
+    float analogX = analogEnabled ? Clamp(input.analogLX, -1.0f, 1.0f) : 0.0f;
+    float analogY = analogEnabled ? Clamp(input.analogLY, -1.0f, 1.0f) : 0.0f;
+    float analogDown = analogEnabled ? Clamp(-input.analogRY, 0.0f, 1.0f) : 0.0f;
+    float analogSprint = analogEnabled ? Clamp(input.analogRX, 0.0f, 1.0f) : 0.0f;
+
+    if (!analogEnabled) {
+        analogY = (input.IsKeyDown('W') ? 1.0f : 0.0f) - (input.IsKeyDown('S') ? 1.0f : 0.0f);
+        analogX = (input.IsKeyDown('D') ? 1.0f : 0.0f) - (input.IsKeyDown('A') ? 1.0f : 0.0f);
+    }
+
+    const bool digitalCrouch = IsCtrlDown(input);
+    const float targetCrouch = analogEnabled
+        ? (analogDown > 0.0f ? analogDown : (digitalCrouch ? 1.0f : 0.0f))
+        : (digitalCrouch ? 1.0f : 0.0f);
+    const float crouchBlend = ComputeExpSmoothingBlend(deltaTime, 0.08f);
+    m_WalkCrouchAmount = Lerp(m_WalkCrouchAmount, Clamp(targetCrouch, 0.0f, 1.0f), crouchBlend);
+
+    if (analogSprint <= 0.0f && IsShiftDown(input)) {
+        analogSprint = 1.0f;
+    }
+
+    const float moveMag = sqrtf(analogX * analogX + analogY * analogY);
+    float wishX = analogX;
+    float wishY = analogY;
+    if (moveMag > 1.0f) {
+        wishX /= moveMag;
+        wishY /= moveMag;
+    }
+
+    const float yawRad = m_Transform.yaw * (float)(M_PI / 180.0);
+    const float forwardX = cosf(yawRad);
+    const float forwardY = sinf(yawRad);
+    const float leftX = -sinf(yawRad);
+    const float leftY = cosf(yawRad);
+
+    const float crouchScale = 1.0f + m_WalkCrouchAmount * (m_Config.walkCrouchSpeedMultiplier - 1.0f);
+    const float runScale = 1.0f + analogSprint * (m_Config.walkRunMultiplier - 1.0f);
+    const float moveSpeed = m_Config.walkMoveSpeed * runScale * crouchScale;
+
+    const float desiredVelX = (forwardX * wishY + leftX * (-wishX)) * moveSpeed;
+    const float desiredVelY = (forwardY * wishY + leftY * (-wishX)) * moveSpeed;
+
+    const float deltaVelX = desiredVelX - m_WalkVelocityX;
+    const float deltaVelY = desiredVelY - m_WalkVelocityY;
+    const float deltaVelLen = sqrtf(deltaVelX * deltaVelX + deltaVelY * deltaVelY);
+    const float currentPlanar = sqrtf(m_WalkVelocityX * m_WalkVelocityX + m_WalkVelocityY * m_WalkVelocityY);
+    const float desiredPlanar = sqrtf(desiredVelX * desiredVelX + desiredVelY * desiredVelY);
+    const float accel = desiredPlanar > currentPlanar ? m_Config.walkMoveAcceleration : m_Config.walkMoveDeceleration;
+    const float maxDelta = (std::max)(0.0f, accel) * deltaTime;
+    if (deltaVelLen > maxDelta && deltaVelLen > 0.0001f) {
+        const float scale = maxDelta / deltaVelLen;
+        m_WalkVelocityX += deltaVelX * scale;
+        m_WalkVelocityY += deltaVelY * scale;
+    } else {
+        m_WalkVelocityX = desiredVelX;
+        m_WalkVelocityY = desiredVelY;
+    }
+
+    if (!ClientTrace::IsAvailable()) {
+        float upX, upY, upZ;
+        GetUpVector(m_Transform.pitch, m_Transform.yaw, upX, upY, upZ);
+        float vertical = 0.0f;
+        if (input.IsKeyDown(' ')) vertical += m_Config.verticalSpeed;
+        if (IsCtrlDown(input)) vertical -= m_Config.verticalSpeed;
+        m_Transform.x += (m_WalkVelocityX + upX * vertical) * deltaTime;
+        m_Transform.y += (m_WalkVelocityY + upY * vertical) * deltaTime;
+        m_Transform.z += (upZ * vertical) * deltaTime;
+        m_WalkVelocityZ = 0.0f;
+        m_WalkOnGround = false;
+        return;
+    }
+
+    const float physicsHalfHeight = m_Config.walkHullHalfHeight;
+    const float physicsCameraHeight = (std::max)(0.0f, m_Config.walkHullHalfHeight - m_Config.walkCameraTopInset);
+    float hullX = m_Transform.x;
+    float hullY = m_Transform.y;
+    float hullZ = m_Transform.z - physicsCameraHeight;
+
+    float movedX = hullX, movedY = hullY, movedZ = hullZ;
+    TryWalkHorizontalMove(hullX, hullY, hullZ, m_WalkVelocityX * deltaTime, 0.0f, m_WalkOnGround, physicsHalfHeight, movedX, movedY, movedZ);
+    hullX = movedX; hullY = movedY; hullZ = movedZ;
+    TryWalkHorizontalMove(hullX, hullY, hullZ, 0.0f, m_WalkVelocityY * deltaTime, m_WalkOnGround, physicsHalfHeight, movedX, movedY, movedZ);
+    hullX = movedX; hullY = movedY; hullZ = movedZ;
+
+    ClientTrace::TraceResult groundTrace = {};
+    if (m_WalkVelocityZ <= 0.0f
+        && ProbeWalkGround(hullX, hullY, hullZ, m_Config.walkGroundProbe, physicsHalfHeight, groundTrace)
+        && groundTrace.Hit
+        && groundTrace.HasNormal
+        && groundTrace.Normal.Z >= m_Config.walkMinGroundNormalZ) {
+        m_WalkOnGround = true;
+        hullZ = groundTrace.Pos.Z;
+        if (m_WalkVelocityZ < 0.0f) {
+            m_WalkVelocityZ = 0.0f;
+        }
+    } else {
+        m_WalkOnGround = false;
+    }
+
+    const bool jumpPressed = input.IsKeyDown(' ');
+    if (jumpPressed && !m_WalkJumpLatch && m_WalkOnGround) {
+        m_WalkVelocityZ = m_Config.walkJumpSpeed;
+        m_WalkOnGround = false;
+    }
+    m_WalkJumpLatch = jumpPressed;
+
+    m_WalkVelocityZ -= m_Config.walkGravity * deltaTime;
+
+    ClientTrace::TraceResult verticalTrace = {};
+    if (TraceWalkHullMove(hullX, hullY, hullZ, hullX, hullY, hullZ + m_WalkVelocityZ * deltaTime, physicsHalfHeight, verticalTrace)) {
+        hullX = verticalTrace.Pos.X;
+        hullY = verticalTrace.Pos.Y;
+        hullZ = verticalTrace.Pos.Z;
+        if (verticalTrace.Hit) {
+            if (m_WalkVelocityZ < 0.0f) {
+                m_WalkOnGround = true;
+            }
+            m_WalkVelocityZ = 0.0f;
+        }
+    }
+
+    m_Transform.x = hullX;
+    m_Transform.y = hullY;
+    m_Transform.z = hullZ + physicsCameraHeight;
+}
+
+void CFreecamController::UpdateWalkCamera(const InputState& input, float deltaTime) {
+    UpdateWalkLook(input, deltaTime);
+    UpdateWalkMovement(input, deltaTime);
+    m_Transform.roll = 0.0f;
+}
+
+void CFreecamController::ApplyWalkHandheldEffects(float deltaTime) {
+    m_OutputTransform = m_SmoothedTransform;
+
+    if (m_bWalkModeEnabled) {
+        const float physicsCameraHeight = (std::max)(0.0f, m_Config.walkHullHalfHeight - m_Config.walkCameraTopInset);
+        const float visualCameraHeight = GetWalkCameraHeight(m_WalkCrouchAmount);
+        m_OutputTransform.z += visualCameraHeight - physicsCameraHeight;
+    }
+
+    const bool applyHandheld = m_bWalkModeEnabled || m_bHandheldEffectsEnabled;
+    if (!applyHandheld) {
+        return;
+    }
+
+    m_WalkEffectTime += deltaTime;
+
+    float speedNorm = 1.0f;
+    if (m_bWalkModeEnabled) {
+        const float speed = sqrtf(m_WalkVelocityX * m_WalkVelocityX + m_WalkVelocityY * m_WalkVelocityY);
+        const float baseSpeed = m_Config.walkMoveSpeed * (std::max)(1.0f, m_Config.walkRunMultiplier);
+        const float targetSpeedNorm = Clamp(speed / baseSpeed, 0.0f, 1.0f);
+        const float motionBlend = ComputeExpSmoothingBlend(deltaTime, 0.06f);
+        m_HandheldMotionNorm = Lerp(m_HandheldMotionNorm, targetSpeedNorm, motionBlend);
+        speedNorm = m_HandheldMotionNorm;
+
+        if (m_WalkOnGround && speed > 1.0f) {
+            m_WalkBobPhase += deltaTime * m_Config.walkBobFrequency * (0.5f + 1.5f * speedNorm) * 2.0f * (float)M_PI;
+        }
+    } else {
+        m_HandheldMotionNorm = 1.0f;
+    }
+
+    const float bobSin = sinf(m_WalkBobPhase);
+    const float bobCos = cosf(m_WalkBobPhase);
+    const float bobZ = m_bWalkModeEnabled ? bobSin * m_Config.walkBobAmplitudeZ * speedNorm : 0.0f;
+    const float bobSide = m_bWalkModeEnabled ? bobCos * m_Config.walkBobAmplitudeSide * speedNorm : 0.0f;
+    const float bobRoll = m_bWalkModeEnabled ? bobSin * m_Config.walkBobAmplitudeRoll * speedNorm : 0.0f;
+
+    const float t = m_WalkEffectTime;
+    const float shakeT = t * m_Config.handheldShakeFrequency;
+    const float shakeBaseA = sinf(shakeT * 9.73f) + 0.6f * sinf(shakeT * 17.11f + 1.31f);
+    const float shakeBaseB = sinf(shakeT * 11.41f + 0.77f) + 0.5f * sinf(shakeT * 21.37f + 2.03f);
+    const float shakeGain = m_bWalkModeEnabled
+        ? Clamp(0.2f + 0.8f * speedNorm, 0.0f, 1.5f)
+        : 0.2f;
+
+    const float shakeSide = shakeBaseA * m_Config.handheldShakePosAmplitude * shakeGain;
+    const float shakeUp = shakeBaseB * m_Config.handheldShakePosAmplitude * 0.75f * shakeGain;
+    const float shakePitch = shakeBaseB * m_Config.handheldShakeAngAmplitude * 0.6f * shakeGain;
+    const float shakeYaw = shakeBaseA * m_Config.handheldShakeAngAmplitude * 0.4f * shakeGain;
+    const float shakeRoll = shakeBaseA * m_Config.handheldShakeAngAmplitude * 1.0f * shakeGain;
+
+    const float driftT = t * m_Config.handheldDriftFrequency * 2.0f * (float)M_PI;
+    const float driftSide = (sinf(driftT + 0.4f) + 0.4f * sinf(driftT * 0.47f + 1.1f)) * m_Config.handheldDriftPosAmplitude;
+    const float driftUp = sinf(driftT * 0.63f + 2.3f) * m_Config.handheldDriftPosAmplitude * 0.7f;
+    const float driftPitch = sinf(driftT * 0.71f + 0.9f) * m_Config.handheldDriftAngAmplitude * 0.7f;
+    const float driftYaw = sinf(driftT * 0.53f + 1.7f) * m_Config.handheldDriftAngAmplitude * 0.6f;
+    const float driftRoll = sinf(driftT * 0.81f + 0.2f) * m_Config.handheldDriftAngAmplitude * 0.8f;
+
+    float rightX, rightY, rightZ;
+    GetRightVector(m_OutputTransform.yaw, rightX, rightY, rightZ);
+
+    m_OutputTransform.x += rightX * -(bobSide + shakeSide + driftSide);
+    m_OutputTransform.y += rightY * -(bobSide + shakeSide + driftSide);
+    m_OutputTransform.z += bobZ + shakeUp + driftUp;
+    m_OutputTransform.pitch += shakePitch + driftPitch;
+    m_OutputTransform.yaw += shakeYaw + driftYaw;
+    m_OutputTransform.roll += bobRoll + shakeRoll + driftRoll;
+}
+
 void CFreecamController::Update(const InputState& input, float deltaTime) {
     if (!m_bEnabled) {
         return;
@@ -321,6 +702,20 @@ void CFreecamController::Update(const InputState& input, float deltaTime) {
 
     // Clamp deltaTime to prevent large jumps
     deltaTime = (std::min)(deltaTime, 0.1f);
+
+    if (m_bInputEnabled) {
+        UpdateWalkModeToggles(input);
+    }
+
+    if (m_bWalkModeEnabled) {
+        UpdateWalkCamera(m_bInputEnabled ? input : InputState{}, deltaTime);
+        m_RawQuat = BuildQuat(m_Transform);
+        m_SmoothedTransform = m_Transform;
+        m_SmoothedQuat = m_RawQuat;
+        m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
+        ApplyWalkHandheldEffects(deltaTime);
+        return;
+    }
 
     if (m_bInputHold) {
         ApplyHoldRotation(deltaTime);
@@ -359,6 +754,8 @@ void CFreecamController::Update(const InputState& input, float deltaTime) {
         m_SmoothedQuat = m_RawQuat;
         m_RotVelocity = Afx::Math::Vector3(0.0, 0.0, 0.0);
     }
+
+    ApplyWalkHandheldEffects(deltaTime);
 }
 
 void CFreecamController::UpdateMouseLook(const InputState& input, float deltaTime) {
@@ -650,9 +1047,10 @@ void CFreecamController::UpdateRoll(const InputState& input, float deltaTime) {
         }
     } else {
         m_LastLateralVelocity = 0.0f;
-        m_LastSmoothedX = m_Transform.x;
-        m_LastSmoothedY = m_Transform.y;
-        m_LastSmoothedZ = m_Transform.z;
+        const CameraTransform& view = m_Config.smoothEnabled ? m_SmoothedTransform : m_Transform;
+        m_LastSmoothedX = view.x;
+        m_LastSmoothedY = view.y;
+        m_LastSmoothedZ = view.z;
     }
 
     // Combine manual and dynamic roll

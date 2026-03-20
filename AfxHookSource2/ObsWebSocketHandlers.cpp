@@ -238,6 +238,181 @@ namespace {
 			updated = true;
 		}
 
+		if (args.contains("walkMoveSpeed")) {
+			delta.hasWalkMoveSpeed = true;
+			delta.walkMoveSpeed = args["walkMoveSpeed"].get<float>();
+			message += "walkMoveSpeed=" + std::to_string(delta.walkMoveSpeed) + " ";
+			updated = true;
+		}
+		if (args.contains("walkMoveAcceleration")) {
+			delta.hasWalkMoveAcceleration = true;
+			delta.walkMoveAcceleration = args["walkMoveAcceleration"].get<float>();
+			message += "walkMoveAcceleration=" + std::to_string(delta.walkMoveAcceleration) + " ";
+			updated = true;
+		}
+		if (args.contains("walkMoveDeceleration")) {
+			delta.hasWalkMoveDeceleration = true;
+			delta.walkMoveDeceleration = args["walkMoveDeceleration"].get<float>();
+			message += "walkMoveDeceleration=" + std::to_string(delta.walkMoveDeceleration) + " ";
+			updated = true;
+		}
+		if (args.contains("walkRunMultiplier")) {
+			delta.hasWalkRunMultiplier = true;
+			delta.walkRunMultiplier = args["walkRunMultiplier"].get<float>();
+			message += "walkRunMultiplier=" + std::to_string(delta.walkRunMultiplier) + " ";
+			updated = true;
+		}
+		if (args.contains("walkCrouchSpeedMultiplier")) {
+			delta.hasWalkCrouchSpeedMultiplier = true;
+			delta.walkCrouchSpeedMultiplier = args["walkCrouchSpeedMultiplier"].get<float>();
+			message += "walkCrouchSpeedMultiplier=" + std::to_string(delta.walkCrouchSpeedMultiplier) + " ";
+			updated = true;
+		}
+		if (args.contains("walkLookHalfTime")) {
+			delta.hasWalkLookHalfTime = true;
+			delta.walkLookHalfTime = args["walkLookHalfTime"].get<float>();
+			message += "walkLookHalfTime=" + std::to_string(delta.walkLookHalfTime) + " ";
+			updated = true;
+		}
+		if (args.contains("walkFovHalfTime")) {
+			delta.hasWalkFovHalfTime = true;
+			delta.walkFovHalfTime = args["walkFovHalfTime"].get<float>();
+			message += "walkFovHalfTime=" + std::to_string(delta.walkFovHalfTime) + " ";
+			updated = true;
+		}
+		if (args.contains("walkGravity")) {
+			delta.hasWalkGravity = true;
+			delta.walkGravity = args["walkGravity"].get<float>();
+			message += "walkGravity=" + std::to_string(delta.walkGravity) + " ";
+			updated = true;
+		}
+		if (args.contains("walkJumpSpeed")) {
+			delta.hasWalkJumpSpeed = true;
+			delta.walkJumpSpeed = args["walkJumpSpeed"].get<float>();
+			message += "walkJumpSpeed=" + std::to_string(delta.walkJumpSpeed) + " ";
+			updated = true;
+		}
+		if (args.contains("walkHullRadius")) {
+			delta.hasWalkHullRadius = true;
+			delta.walkHullRadius = args["walkHullRadius"].get<float>();
+			message += "walkHullRadius=" + std::to_string(delta.walkHullRadius) + " ";
+			updated = true;
+		}
+		if (args.contains("walkHullHalfHeight")) {
+			delta.hasWalkHullHalfHeight = true;
+			delta.walkHullHalfHeight = args["walkHullHalfHeight"].get<float>();
+			message += "walkHullHalfHeight=" + std::to_string(delta.walkHullHalfHeight) + " ";
+			updated = true;
+		}
+		if (args.contains("walkCrouchHullHalfHeight")) {
+			delta.hasWalkCrouchHullHalfHeight = true;
+			delta.walkCrouchHullHalfHeight = args["walkCrouchHullHalfHeight"].get<float>();
+			message += "walkCrouchHullHalfHeight=" + std::to_string(delta.walkCrouchHullHalfHeight) + " ";
+			updated = true;
+		}
+		if (args.contains("walkCameraTopInset")) {
+			delta.hasWalkCameraTopInset = true;
+			delta.walkCameraTopInset = args["walkCameraTopInset"].get<float>();
+			message += "walkCameraTopInset=" + std::to_string(delta.walkCameraTopInset) + " ";
+			updated = true;
+		}
+		if (args.contains("walkStepHeight")) {
+			delta.hasWalkStepHeight = true;
+			delta.walkStepHeight = args["walkStepHeight"].get<float>();
+			message += "walkStepHeight=" + std::to_string(delta.walkStepHeight) + " ";
+			updated = true;
+		}
+		if (args.contains("walkGroundProbe")) {
+			delta.hasWalkGroundProbe = true;
+			delta.walkGroundProbe = args["walkGroundProbe"].get<float>();
+			message += "walkGroundProbe=" + std::to_string(delta.walkGroundProbe) + " ";
+			updated = true;
+		}
+		if (args.contains("walkMinGroundNormalZ")) {
+			delta.hasWalkMinGroundNormalZ = true;
+			delta.walkMinGroundNormalZ = args["walkMinGroundNormalZ"].get<float>();
+			message += "walkMinGroundNormalZ=" + std::to_string(delta.walkMinGroundNormalZ) + " ";
+			updated = true;
+		}
+		if (args.contains("walkTraceMask")) {
+			delta.hasWalkTraceMask = true;
+			delta.walkTraceMask = args["walkTraceMask"].get<uint32_t>();
+			message += "walkTraceMask=" + std::to_string(delta.walkTraceMask) + " ";
+			updated = true;
+		}
+		if (args.contains("walkModeDefaultEnabled")) {
+			delta.hasWalkModeDefaultEnabled = true;
+			delta.walkModeDefaultEnabled = args["walkModeDefaultEnabled"].get<bool>();
+			message += "walkModeDefaultEnabled=" + std::string(delta.walkModeDefaultEnabled ? "true" : "false") + " ";
+			updated = true;
+		}
+		if (args.contains("handheldDefaultEnabled")) {
+			delta.hasHandheldDefaultEnabled = true;
+			delta.handheldDefaultEnabled = args["handheldDefaultEnabled"].get<bool>();
+			message += "handheldDefaultEnabled=" + std::string(delta.handheldDefaultEnabled ? "true" : "false") + " ";
+			updated = true;
+		}
+		if (args.contains("walkBobAmplitudeZ")) {
+			delta.hasWalkBobAmplitudeZ = true;
+			delta.walkBobAmplitudeZ = args["walkBobAmplitudeZ"].get<float>();
+			message += "walkBobAmplitudeZ=" + std::to_string(delta.walkBobAmplitudeZ) + " ";
+			updated = true;
+		}
+		if (args.contains("walkBobAmplitudeSide")) {
+			delta.hasWalkBobAmplitudeSide = true;
+			delta.walkBobAmplitudeSide = args["walkBobAmplitudeSide"].get<float>();
+			message += "walkBobAmplitudeSide=" + std::to_string(delta.walkBobAmplitudeSide) + " ";
+			updated = true;
+		}
+		if (args.contains("walkBobAmplitudeRoll")) {
+			delta.hasWalkBobAmplitudeRoll = true;
+			delta.walkBobAmplitudeRoll = args["walkBobAmplitudeRoll"].get<float>();
+			message += "walkBobAmplitudeRoll=" + std::to_string(delta.walkBobAmplitudeRoll) + " ";
+			updated = true;
+		}
+		if (args.contains("walkBobFrequency")) {
+			delta.hasWalkBobFrequency = true;
+			delta.walkBobFrequency = args["walkBobFrequency"].get<float>();
+			message += "walkBobFrequency=" + std::to_string(delta.walkBobFrequency) + " ";
+			updated = true;
+		}
+		if (args.contains("handheldShakePosAmplitude")) {
+			delta.hasHandheldShakePosAmplitude = true;
+			delta.handheldShakePosAmplitude = args["handheldShakePosAmplitude"].get<float>();
+			message += "handheldShakePosAmplitude=" + std::to_string(delta.handheldShakePosAmplitude) + " ";
+			updated = true;
+		}
+		if (args.contains("handheldShakeAngAmplitude")) {
+			delta.hasHandheldShakeAngAmplitude = true;
+			delta.handheldShakeAngAmplitude = args["handheldShakeAngAmplitude"].get<float>();
+			message += "handheldShakeAngAmplitude=" + std::to_string(delta.handheldShakeAngAmplitude) + " ";
+			updated = true;
+		}
+		if (args.contains("handheldShakeFrequency")) {
+			delta.hasHandheldShakeFrequency = true;
+			delta.handheldShakeFrequency = args["handheldShakeFrequency"].get<float>();
+			message += "handheldShakeFrequency=" + std::to_string(delta.handheldShakeFrequency) + " ";
+			updated = true;
+		}
+		if (args.contains("handheldDriftPosAmplitude")) {
+			delta.hasHandheldDriftPosAmplitude = true;
+			delta.handheldDriftPosAmplitude = args["handheldDriftPosAmplitude"].get<float>();
+			message += "handheldDriftPosAmplitude=" + std::to_string(delta.handheldDriftPosAmplitude) + " ";
+			updated = true;
+		}
+		if (args.contains("handheldDriftAngAmplitude")) {
+			delta.hasHandheldDriftAngAmplitude = true;
+			delta.handheldDriftAngAmplitude = args["handheldDriftAngAmplitude"].get<float>();
+			message += "handheldDriftAngAmplitude=" + std::to_string(delta.handheldDriftAngAmplitude) + " ";
+			updated = true;
+		}
+		if (args.contains("handheldDriftFrequency")) {
+			delta.hasHandheldDriftFrequency = true;
+			delta.handheldDriftFrequency = args["handheldDriftFrequency"].get<float>();
+			message += "handheldDriftFrequency=" + std::to_string(delta.handheldDriftFrequency) + " ";
+			updated = true;
+		}
+
 		return updated;
 	}
 }
@@ -388,6 +563,54 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		if (args.contains("speedScalar")) {
 			payload.hasSpeedScalar = true;
 			payload.speedScalar = args["speedScalar"].get<float>();
+		}
+		if (args.contains("walkModeEnabled")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.walkModeEnabled = args["walkModeEnabled"].get<bool>();
+		}
+		if (args.contains("handheldEffectsEnabled")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.handheldEffectsEnabled = args["handheldEffectsEnabled"].get<bool>();
+		}
+		if (args.contains("walkVelocityX")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.velocityX = args["walkVelocityX"].get<float>();
+		}
+		if (args.contains("walkVelocityY")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.velocityY = args["walkVelocityY"].get<float>();
+		}
+		if (args.contains("walkVerticalVelocity")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.velocityZ = args["walkVerticalVelocity"].get<float>();
+		}
+		if (args.contains("walkOnGround")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.onGround = args["walkOnGround"].get<bool>();
+		}
+		if (args.contains("walkCrouchAmount")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.crouchAmount = args["walkCrouchAmount"].get<float>();
+		}
+		if (args.contains("walkBobPhase")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.bobPhase = args["walkBobPhase"].get<float>();
+		}
+		if (args.contains("walkEffectTime")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.effectTime = args["walkEffectTime"].get<float>();
+		}
+		if (args.contains("walkTargetPitch")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.targetPitch = args["walkTargetPitch"].get<float>();
+		}
+		if (args.contains("walkTargetYaw")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.targetYaw = args["walkTargetYaw"].get<float>();
+		}
+		if (args.contains("walkTargetFov")) {
+			payload.hasWalkRuntimeState = true;
+			payload.walkRuntimeState.targetFov = args["walkTargetFov"].get<float>();
 		}
 		
 		g_pFreecam->m_PlayerLockActive = false;

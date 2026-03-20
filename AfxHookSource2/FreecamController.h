@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ObsInputReceiver.h"
+#include "ClientTrace.h"
 #include "../shared/AfxMath.h"
 #include <chrono>
 
@@ -56,6 +57,39 @@ struct FreecamConfig {
     bool rotCriticalDamping;  // Use critically damped rotation smoothing (vs long-path slerp)
     float rotDampingRatio;  // Damping ratio for critical damping (>= 1.0)
 
+    // Walk
+    float walkMoveSpeed;
+    float walkMoveAcceleration;
+    float walkMoveDeceleration;
+    float walkRunMultiplier;
+    float walkCrouchSpeedMultiplier;
+    float walkLookHalfTime;
+    float walkFovHalfTime;
+    float walkGravity;
+    float walkJumpSpeed;
+    float walkHullRadius;
+    float walkHullHalfHeight;
+    float walkCrouchHullHalfHeight;
+    float walkCameraTopInset;
+    float walkStepHeight;
+    float walkGroundProbe;
+    float walkMinGroundNormalZ;
+    uint32_t walkTraceMask;
+    bool walkModeDefaultEnabled;
+    bool handheldDefaultEnabled;
+
+    // Handheld / walk visuals
+    float walkBobAmplitudeZ;
+    float walkBobAmplitudeSide;
+    float walkBobAmplitudeRoll;
+    float walkBobFrequency;
+    float handheldShakePosAmplitude;
+    float handheldShakeAngAmplitude;
+    float handheldShakeFrequency;
+    float handheldDriftPosAmplitude;
+    float handheldDriftAngAmplitude;
+    float handheldDriftFrequency;
+
     FreecamConfig()
         : mouseSensitivity(0.12f)
         , moveSpeed(200.0f)         // Increased from 320 for faster movement
@@ -84,7 +118,51 @@ struct FreecamConfig {
         , halfFov(0.8f)             // Exponential half-time for FOV
         , rotCriticalDamping(false)
         , rotDampingRatio(1.0f)
+        , walkMoveSpeed(160.0f)
+        , walkMoveAcceleration(800.0f)
+        , walkMoveDeceleration(800.0f)
+        , walkRunMultiplier(1.8f)
+        , walkCrouchSpeedMultiplier(0.6f)
+        , walkLookHalfTime(0.150f)
+        , walkFovHalfTime(0.40f)
+        , walkGravity(800.0f)
+        , walkJumpSpeed(280.0f)
+        , walkHullRadius(12.0f)
+        , walkHullHalfHeight(35.0f)
+        , walkCrouchHullHalfHeight(12.0f)
+        , walkCameraTopInset(6.0f)
+        , walkStepHeight(18.0f)
+        , walkGroundProbe(2.0f)
+        , walkMinGroundNormalZ(0.55f)
+        , walkTraceMask(0x80011u)
+        , walkModeDefaultEnabled(false)
+        , handheldDefaultEnabled(false)
+        , walkBobAmplitudeZ(2.15f)
+        , walkBobAmplitudeSide(2.70f)
+        , walkBobAmplitudeRoll(1.20f)
+        , walkBobFrequency(0.8f)
+        , handheldShakePosAmplitude(0.45f)
+        , handheldShakeAngAmplitude(0.65f)
+        , handheldShakeFrequency(0.4f)
+        , handheldDriftPosAmplitude(3.30f)
+        , handheldDriftAngAmplitude(2.36f)
+        , handheldDriftFrequency(0.15f)
     {}
+};
+
+struct WalkCameraRuntimeState {
+    bool walkModeEnabled = false;
+    bool handheldEffectsEnabled = false;
+    float velocityX = 0.0f;
+    float velocityY = 0.0f;
+    float velocityZ = 0.0f;
+    bool onGround = false;
+    float crouchAmount = 0.0f;
+    float bobPhase = 0.0f;
+    float effectTime = 0.0f;
+    float targetPitch = 0.0f;
+    float targetYaw = 0.0f;
+    float targetFov = 90.0f;
 };
 
 /// Freecam controller for professional eSports observing
@@ -112,6 +190,11 @@ public:
     bool IsInputHold() const { return m_bInputHold; }
     void SetHoldMovementMode(HoldMovementMode mode);
     HoldMovementMode GetHoldMovementMode() const { return m_HoldMovementMode; }
+    void SetWalkModeEnabled(bool enabled);
+    bool IsWalkModeEnabled() const { return m_bWalkModeEnabled; }
+    void SetHandheldEffectsEnabled(bool enabled);
+    bool IsHandheldEffectsEnabled() const { return m_bHandheldEffectsEnabled; }
+    void ApplyWalkRuntimeState(const WalkCameraRuntimeState& state);
 
     bool m_PlayerLockActive;
 
@@ -124,7 +207,7 @@ public:
     void Update(const InputState& input, float deltaTime);
 
     /// Get current camera transform
-    const CameraTransform& GetTransform() const { return m_SmoothedTransform; }
+    const CameraTransform& GetTransform() const { return m_OutputTransform; }
 
     float GetCurrentMoveSpeed() const { return m_Config.moveSpeed * m_SpeedScalar; }
     float GetCurrentVerticalSpeed() const { return m_Config.verticalSpeed * m_SpeedScalar; }
@@ -164,6 +247,17 @@ private:
     void ApplyHoldRotation(float deltaTime);
     void ComputeHoldMovementBasis();
     void ApplyHoldMovement(float deltaTime);
+    void UpdateWalkModeToggles(const InputState& input);
+    void UpdateWalkCamera(const InputState& input, float deltaTime);
+    void UpdateWalkLook(const InputState& input, float deltaTime);
+    void UpdateWalkMovement(const InputState& input, float deltaTime);
+    void ApplyWalkHandheldEffects(float deltaTime);
+    void ResetWalkState(bool reinitializeTargets);
+    bool TraceWalkHullMove(float fromX, float fromY, float fromZ, float toX, float toY, float toZ, float halfHeight, ClientTrace::TraceResult& outTrace) const;
+    bool ProbeWalkGround(float fromX, float fromY, float fromZ, float probeDistance, float halfHeight, ClientTrace::TraceResult& outTrace) const;
+    bool TryWalkHorizontalMove(float fromX, float fromY, float fromZ, float deltaX, float deltaY, bool allowStep, float halfHeight, float& outX, float& outY, float& outZ) const;
+    float GetWalkCameraHeight(float crouchAmount) const;
+    float GetWalkHalfHeight(float crouchAmount) const;
     Afx::Math::Quaternion BuildQuat(const CameraTransform& transform) const;
     void UpdateAnglesFromQuat(const Afx::Math::Quaternion& q, CameraTransform& out, const CameraTransform& hint) const;
     Afx::Math::Vector3 GetWorldAngularVelocity(float yawRateDeg, float pitchRateDeg, float rollRateDeg, const CameraTransform& transform) const;
@@ -181,11 +275,14 @@ private:
     bool m_bInputEnabled;  // Gates input processing without disabling camera
     bool m_bInputHold;     // Keeps last input motion while ignoring new input
     bool m_bInitialized;
+    bool m_bWalkModeEnabled;
+    bool m_bHandheldEffectsEnabled;
     FreecamConfig m_Config;
 
     // Camera state
     CameraTransform m_Transform;
     CameraTransform m_SmoothedTransform;
+    CameraTransform m_OutputTransform;
 
     // Velocity
     float m_VelocityX, m_VelocityY, m_VelocityZ;
@@ -221,6 +318,20 @@ private:
     Afx::Math::Quaternion m_SmoothedQuat;
     Afx::Math::Vector3 m_RotVelocity;
     Afx::Math::Vector3 m_HoldRotVelocity;
+    float m_WalkVelocityX;
+    float m_WalkVelocityY;
+    float m_WalkVelocityZ;
+    float m_WalkTargetPitch;
+    float m_WalkTargetYaw;
+    float m_WalkTargetFov;
+    bool m_WalkOnGround;
+    bool m_WalkJumpLatch;
+    float m_WalkCrouchAmount;
+    float m_WalkBobPhase;
+    float m_WalkEffectTime;
+    float m_HandheldMotionNorm;
+    bool m_LastKeyGDown;
+    bool m_LastKeyHDown;
 
     // Player lock state
     bool m_LastKeyVDown;
