@@ -6,6 +6,7 @@
 #include "MirvImage.h"
 #include "MirvTime.h"
 #include "hlaeFolder.h"
+#include "DeathMsg.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
@@ -952,6 +953,21 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 			{"ok", true},
 			{"value", curTime}
 		});
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.camera.get", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		json result{
+			{"type", "gfx.camera.get"},
+			{"ok", true},
+			{"pos", { g_CurrentGameCamera.origin[0], g_CurrentGameCamera.origin[1], g_CurrentGameCamera.origin[2] }},
+			{"ang", { g_CurrentGameCamera.angles[0], g_CurrentGameCamera.angles[1], g_CurrentGameCamera.angles[2] }}
+		};
+
+		if (args.contains("requestId") && args["requestId"].is_string()) {
+			result["requestId"] = args["requestId"].get<std::string>();
+		}
+
+		respond(result);
 	});
 
 	g_ObsWebSocketProtocol.RegisterCommandHandler("spectator_bindings_mode", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
