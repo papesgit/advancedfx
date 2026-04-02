@@ -5,13 +5,17 @@
 #include "RenderSystemDX11Hooks.h"
 #include "MirvImage.h"
 #include "MirvTime.h"
+#include "hlaeFolder.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
 #include "../shared/AfxConsole.h"
 
 #include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <sstream>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -64,6 +68,52 @@ namespace {
 			else result["error"] = message;
 		}
 
+		return result;
+	}
+
+	bool IsSupportedMirvImageFileExtension(const std::filesystem::path& path) {
+		std::string ext = path.extension().string();
+		std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+
+		return ext == ".png"
+			|| ext == ".jpg"
+			|| ext == ".jpeg"
+			|| ext == ".bmp"
+			|| ext == ".gif"
+			|| ext == ".tif"
+			|| ext == ".tiff"
+			|| ext == ".webp";
+	}
+
+	std::vector<std::string> ListMirvImageFiles() {
+		std::vector<std::string> result;
+
+		std::filesystem::path root = std::filesystem::path(GetHlaeFolderW()) / L"resources" / L"AfxHookSource2" / L"images";
+		std::error_code ec;
+		if (!std::filesystem::exists(root, ec) || ec) {
+			return result;
+		}
+
+		for (std::filesystem::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+			if (ec) break;
+			if (!it->is_regular_file(ec) || ec) continue;
+
+			const auto& path = it->path();
+			if (!IsSupportedMirvImageFileExtension(path)) continue;
+
+			auto relative = std::filesystem::relative(path, root, ec);
+			if (ec) {
+				ec.clear();
+				continue;
+			}
+
+			std::string value = relative.generic_string();
+			if (!value.empty()) {
+				result.push_back(std::move(value));
+			}
+		}
+
+		std::sort(result.begin(), result.end());
 		return result;
 	}
 
@@ -1099,6 +1149,20 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		respond(result);
 	});
 
+	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.image.list", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		json result{
+			{"type", "gfx.image.list"},
+			{"ok", true},
+			{"images", ListMirvImageFiles()}
+		};
+
+		if (args.contains("requestId") && args["requestId"].is_string()) {
+			result["requestId"] = args["requestId"].get<std::string>();
+		}
+
+		respond(result);
+	});
+
 	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.atlas.region.set", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
 		if (!args.contains("atlas") || !args["atlas"].is_string()) {
 			respond(MakeCommandResult("gfx.atlas.region.set", false, "Missing or invalid atlas"));
@@ -1205,20 +1269,25 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 			respond(MakeCommandResult("gfx.instance.create", false, "Missing or invalid name"));
 			return;
 		}
-		if (!args.contains("atlas") || !args["atlas"].is_string()) {
-			respond(MakeCommandResult("gfx.instance.create", false, "Missing or invalid atlas"));
-			return;
-		}
-		if (!args.contains("region") || !args["region"].is_string()) {
-			respond(MakeCommandResult("gfx.instance.create", false, "Missing or invalid region"));
-			return;
-		}
 
 		const std::string name = args["name"].get<std::string>();
-		const std::string atlas = args["atlas"].get<std::string>();
-		const std::string region = args["region"].get<std::string>();
+		if (args.contains("imageFile") && args["imageFile"].is_string()) {
+			g_MirvImageDrawer.LoadImage(name.c_str(), args["imageFile"].get<std::string>().c_str());
+		}
+		else {
+			if (!args.contains("atlas") || !args["atlas"].is_string()) {
+				respond(MakeCommandResult("gfx.instance.create", false, "Missing or invalid atlas"));
+				return;
+			}
+			if (!args.contains("region") || !args["region"].is_string()) {
+				respond(MakeCommandResult("gfx.instance.create", false, "Missing or invalid region"));
+				return;
+			}
 
-		g_MirvImageDrawer.UseAtlasRegion(name.c_str(), atlas.c_str(), region.c_str());
+			const std::string atlas = args["atlas"].get<std::string>();
+			const std::string region = args["region"].get<std::string>();
+			g_MirvImageDrawer.UseAtlasRegion(name.c_str(), atlas.c_str(), region.c_str());
+		}
 
 		if (args.contains("attach") && args["attach"].is_object()) {
 			const auto& attach = args["attach"];
@@ -1276,7 +1345,10 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		}
 		const std::string name = args["name"].get<std::string>();
 
-		if (args.contains("atlas") && args["atlas"].is_string() && args.contains("region") && args["region"].is_string()) {
+		if (args.contains("imageFile") && args["imageFile"].is_string()) {
+			g_MirvImageDrawer.LoadImage(name.c_str(), args["imageFile"].get<std::string>().c_str());
+		}
+		else if (args.contains("atlas") && args["atlas"].is_string() && args.contains("region") && args["region"].is_string()) {
 			g_MirvImageDrawer.UseAtlasRegion(
 				name.c_str(),
 				args["atlas"].get<std::string>().c_str(),
