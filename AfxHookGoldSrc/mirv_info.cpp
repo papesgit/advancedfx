@@ -6,6 +6,7 @@
 #include <hlsdk.h>
 
 // Own includes:
+#include "AfxSteamLegacy.h"
 #include "cmdregister.h"
 #include "hl_addresses.h"
 
@@ -68,6 +69,7 @@ REGISTER_DEBUGCMD_FUNC(info)
 	GLint gi;
 	pEngfuncs->Con_Printf(">>>> >>>> >>>> >>>>\n");
 	pEngfuncs->Con_Printf("MDT_DLL_VERSION: %s\n", __DATE__);
+	pEngfuncs->Con_Printf("STEAM_LEGACY_VERSION: %s\n", AfxSteamLegacy()?"YES":"NO");
 	pEngfuncs->Con_Printf("GL_VENDOR: %s\n",glGetString(GL_VENDOR));
 	pEngfuncs->Con_Printf("GL_RENDERER: %s\n",glGetString(GL_RENDERER));
 	pEngfuncs->Con_Printf("GL_VERSION: %s\n",glGetString(GL_VERSION));

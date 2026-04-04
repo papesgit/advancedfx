@@ -2,7 +2,9 @@
 
 #include "R_DrawSkyBoxEx.h"
 
-#include <hl_addresses.h>
+#include "../../AfxSteamLegacy.h"
+#include "../../hl_addresses.h"
+
 #include <shared/AfxDetours.h>
 
 #include <Windows.h>
@@ -18,7 +20,6 @@ bool g_bReplacedSkyTextures = false;
 
 void * g_Old_R_DrawSkyBox_Begin = nullptr;
 void * g_Old_R_DrawSkyBox_End = nullptr;
-
 
 void __cdecl On_R_DrawSkyBox_Begin() {
 	if(g_R_DrawSkyBoxEx_NewTextures)
@@ -75,6 +76,18 @@ void __declspec(naked) Touring_R_DrawSkyBox_End() {
 }
 
 
+// BEGIN SteamLegacy only
+void New_R_DrawSkyBoxEx (void)
+{
+	On_R_DrawSkyBox_Begin();
+
+	g_Old_R_DrawSkyBoxEx();
+
+	On_R_DrawSkyBox_End();
+}
+// END SteamLegacy only
+
+
 bool Hook_R_DrawSkyBoxEx()
 {
 	static bool firstRun = true;
@@ -82,53 +95,76 @@ bool Hook_R_DrawSkyBoxEx()
 	if (!firstRun) return firstResult;
 	firstRun = false;
 
-	if (AFXADDR_GET(R_DrawSkyBox_Begin)
-		&& AFXADDR_GET(R_DrawSkyBox_End)
-		&& AFXADDR_GET(skytextures)
-	) {
-		LONG error = NO_ERROR;
+	if(AfxSteamLegacy()) {
+		if ( AFXADDR_GET(R_DrawSkyBoxEx)
+			&& AFXADDR_GET(skytextures)
+		) {
+			LONG error = NO_ERROR;
 
-		void * R_DrawSkyBox_Begin_Continue = (void *)(AFXADDR_GET(R_DrawSkyBox_Begin)+8);
+			g_Old_R_DrawSkyBoxEx = (R_DrawSkyBoxEx_t)AFXADDR_GET(R_DrawSkyBoxEx);
 
-		g_Old_R_DrawSkyBox_Begin = MdtAllocExecuteableMemory(
-			8 // for the original code
-			+ 5 // for or JMP back into original code
-		);
+			DetourTransactionBegin();
+			DetourUpdateThread(GetCurrentThread());
+			DetourAttach(&(PVOID&)g_Old_R_DrawSkyBoxEx, New_R_DrawSkyBoxEx);
+			error = DetourTransactionCommit();
 
-		Asm32ReplaceWithJmp(&((unsigned char *)g_Old_R_DrawSkyBox_Begin)[8],5,R_DrawSkyBox_Begin_Continue);
+			if (NO_ERROR != error)
+			{
+				firstResult = false;
+				ErrorBox("Interception failed:\nHook_R_DrawSkyBoxEx");
+			}
+		}
+		else
+			firstResult = false;
+	} else {
+		if (AFXADDR_GET(R_DrawSkyBox_Begin)
+			&& AFXADDR_GET(R_DrawSkyBox_End)
+			&& AFXADDR_GET(skytextures)
+		) {
+			LONG error = NO_ERROR;
 
-		MdtMemBlockInfos mbis;
-		MdtMemAccessBegin((LPVOID)AFXADDR_GET(R_DrawSkyBox_Begin),7,&mbis);
-		memcpy(g_Old_R_DrawSkyBox_Begin,(LPCVOID)AFXADDR_GET(R_DrawSkyBox_Begin),8);
-		MdtMemAccessEnd(&mbis);
+			void * R_DrawSkyBox_Begin_Continue = (void *)(AFXADDR_GET(R_DrawSkyBox_Begin)+8);
 
-		void * R_DrawSkyBox_End_Continue = (void *)(AFXADDR_GET(R_DrawSkyBox_End)+6);
-		void * R_DrawSkyBox_End_JZ_Continue = (void *)(AFXADDR_GET(R_DrawSkyBox_End)+6+10);
+			g_Old_R_DrawSkyBox_Begin = MdtAllocExecuteableMemory(
+				8 // for the original code
+				+ 5 // for or JMP back into original code
+			);
 
-		g_Old_R_DrawSkyBox_End = MdtAllocExecuteableMemory(
-			4 // for the original code (TEST, POP, POP)
-			+ 2 // for the new JZ to other JMP
-			+ 5 // for or JMP back into original code
-			+ 5 // for or JMP back into original code after JZ
-		);
+			Asm32ReplaceWithJmp(&((unsigned char *)g_Old_R_DrawSkyBox_Begin)[8],5,R_DrawSkyBox_Begin_Continue);
 
-		((unsigned char *)g_Old_R_DrawSkyBox_End)[4] = 0x74 ; // JZ
-		((unsigned char *)g_Old_R_DrawSkyBox_End)[5] = 5 ; // JUMP 5 bytes
+			MdtMemBlockInfos mbis;
+			MdtMemAccessBegin((LPVOID)AFXADDR_GET(R_DrawSkyBox_Begin),7,&mbis);
+			memcpy(g_Old_R_DrawSkyBox_Begin,(LPCVOID)AFXADDR_GET(R_DrawSkyBox_Begin),8);
+			MdtMemAccessEnd(&mbis);
 
-		Asm32ReplaceWithJmp(&((unsigned char *)g_Old_R_DrawSkyBox_End)[6],5,R_DrawSkyBox_End_Continue);
-		Asm32ReplaceWithJmp(&((unsigned char *)g_Old_R_DrawSkyBox_End)[11],5,R_DrawSkyBox_End_JZ_Continue);
+			void * R_DrawSkyBox_End_Continue = (void *)(AFXADDR_GET(R_DrawSkyBox_End)+6);
+			void * R_DrawSkyBox_End_JZ_Continue = (void *)(AFXADDR_GET(R_DrawSkyBox_End)+6+10);
 
-		MdtMemAccessBegin((LPVOID)AFXADDR_GET(R_DrawSkyBox_End),4,&mbis);
-		memcpy(g_Old_R_DrawSkyBox_End,(LPCVOID)AFXADDR_GET(R_DrawSkyBox_End),4);
-		MdtMemAccessEnd(&mbis);
+			g_Old_R_DrawSkyBox_End = MdtAllocExecuteableMemory(
+				4 // for the original code (TEST, POP, POP)
+				+ 2 // for the new JZ to other JMP
+				+ 5 // for or JMP back into original code
+				+ 5 // for or JMP back into original code after JZ
+			);
 
-		Asm32ReplaceWithJmp((void*)AFXADDR_GET(R_DrawSkyBox_Begin),8,Touring_R_DrawSkyBox_Begin);
-		Asm32ReplaceWithJmp((void*)AFXADDR_GET(R_DrawSkyBox_End),4+2,Touring_R_DrawSkyBox_End);
+			((unsigned char *)g_Old_R_DrawSkyBox_End)[4] = 0x74 ; // JZ
+			((unsigned char *)g_Old_R_DrawSkyBox_End)[5] = 5 ; // JUMP 5 bytes
 
-		firstResult = true;
+			Asm32ReplaceWithJmp(&((unsigned char *)g_Old_R_DrawSkyBox_End)[6],5,R_DrawSkyBox_End_Continue);
+			Asm32ReplaceWithJmp(&((unsigned char *)g_Old_R_DrawSkyBox_End)[11],5,R_DrawSkyBox_End_JZ_Continue);
+
+			MdtMemAccessBegin((LPVOID)AFXADDR_GET(R_DrawSkyBox_End),4,&mbis);
+			memcpy(g_Old_R_DrawSkyBox_End,(LPCVOID)AFXADDR_GET(R_DrawSkyBox_End),4);
+			MdtMemAccessEnd(&mbis);
+
+			Asm32ReplaceWithJmp((void*)AFXADDR_GET(R_DrawSkyBox_Begin),8,Touring_R_DrawSkyBox_Begin);
+			Asm32ReplaceWithJmp((void*)AFXADDR_GET(R_DrawSkyBox_End),4+2,Touring_R_DrawSkyBox_End);
+
+			firstResult = true;
+		}
+		else
+			firstResult = false;
 	}
-	else
-		firstResult = false;
 
 	return firstResult;
 }
