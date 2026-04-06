@@ -34,7 +34,19 @@ cl_ent_viewoffset 192
 // CEntityInstance: Root class for all entities
 // Retrieved from script function.
 const char * CEntityInstance::GetName() {
-	const char * pszName = (const char*)*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x20);
+    /*
+        undefined8 * FUN_1814beac0(void) {
+            puVar6[2] = "CEntityInstance: Root class for all entities";
+            ...
+            puVar4[2] = "Get the entity name";
+            ...
+            *puVar4 = "GetName";
+            ...
+            puVar4[8] = FUN_18094f290; // <-  VSCRIPT entity.GetName function.
+            ...            
+        }        
+    */
+	const char * pszName = (const char*)*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x18);
 	if(pszName) return pszName;
 	return "";
 }
@@ -42,14 +54,35 @@ const char * CEntityInstance::GetName() {
 // Retrieved from script function.
 // can return nullptr!
 const char * CEntityInstance::GetDebugName() {
-	const char * pszName = (const char*)*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x20);
+    /*
+        undefined8 * FUN_1814beac0(void) {
+            puVar6[2] = "CEntityInstance: Root class for all entities";
+            ...
+            puVar4[2] = "Get the entity name w/help if not defined (i.e. classname/etc)";
+            ...
+            *puVar4 = "GetDebugName";
+            ...
+           puVar4[8] = &LAB_1814c1b90; // <-  VSCRIPT entity.GetDebugName function.
+            ...            
+        }        
+    */    
+	const char * pszName = (const char*)*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x18);
 	if(pszName) return pszName;
 	return **(const char***)(*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x8)+0x50);
 }
 
 // Retrieved from script function.
 const char * CEntityInstance::GetClassName() {
-	// TODO: Needs check.
+    /*
+        undefined8 * FUN_1814beac0(void) {
+            puVar6[2] = "CEntityInstance: Root class for all entities";
+            ...
+            *puVar4 = "GetClassname";
+            ...
+            puVar4[8] = &LAB_1814c1b60; // <-  VSCRIPT entity.GetClassName function.
+            ...            
+        }        
+    */     
 	const char * pszName = (const char*)*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x20);
 	if(pszName) return pszName;
 	return "";
