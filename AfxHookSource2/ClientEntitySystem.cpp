@@ -34,7 +34,7 @@ cl_ent_viewoffset 192
 // CEntityInstance: Root class for all entities
 // Retrieved from script function.
 const char * CEntityInstance::GetName() {
-	const char * pszName = (const char*)*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x18);
+	const char * pszName = (const char*)*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x20);
 	if(pszName) return pszName;
 	return "";
 }
@@ -42,13 +42,14 @@ const char * CEntityInstance::GetName() {
 // Retrieved from script function.
 // can return nullptr!
 const char * CEntityInstance::GetDebugName() {
-	const char * pszName = (const char*)*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x18);
+	const char * pszName = (const char*)*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x20);
 	if(pszName) return pszName;
-	return **(const char***)(*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x8)+0x78);
+	return **(const char***)(*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x8)+0x50);
 }
 
 // Retrieved from script function.
 const char * CEntityInstance::GetClassName() {
+	// TODO: Needs check.
 	const char * pszName = (const char*)*(unsigned char**)(*(unsigned char**)((unsigned char*)this + 0x10) + 0x20);
 	if(pszName) return pszName;
 	return "";
@@ -61,7 +62,7 @@ const char * CEntityInstance::GetClientClassName() {
     // GetClientClass function.
     // find it by searching for 4th full-ptr ref to "C_PlantedC4" subtract sizeof(void*) (0x8) and search function that references this struct.
     // you need to search for raw bytes, GiHidra doesn't seem to find the reference.
-    void * pClientClass = ((void * (__fastcall *)(void *)) (*(void***)this)[42]) (this);
+    void * pClientClass = ((void * (__fastcall *)(void *)) (*(void***)this)[43]) (this);
 
     if(pClientClass) {
         return *(const char**)((unsigned char*)pClientClass + 0x10);
@@ -74,7 +75,7 @@ const char * CEntityInstance::GetClientClassName() {
 
 bool CEntityInstance::IsPlayerPawn() {
 	// See cl_ent_text drawing function.
-	return ((bool (__fastcall *)(void *)) (*(void***)this)[151]) (this);
+	return ((bool (__fastcall *)(void *)) (*(void***)this)[153]) (this);
 }
 
 SOURCESDK::CS2::CBaseHandle CEntityInstance::GetPlayerPawnHandle() {
@@ -85,7 +86,7 @@ SOURCESDK::CS2::CBaseHandle CEntityInstance::GetPlayerPawnHandle() {
 
 bool CEntityInstance::IsPlayerController() {
 	// See cl_ent_text drawing function. Near "Pawn: (%d) Name: %s".
-	return ((bool (__fastcall *)(void *)) (*(void***)this)[152]) (this);    
+	return ((bool (__fastcall *)(void *)) (*(void***)this)[154]) (this);    
 }
 
 SOURCESDK::CS2::CBaseHandle CEntityInstance::GetPlayerControllerHandle() {
@@ -117,13 +118,13 @@ void CEntityInstance::GetOrigin(float & x, float & y, float & z) {
 }
 
 void CEntityInstance::GetRenderEyeOrigin(float outOrigin[3]) {
-	// GetRenderEyeAngles vtable offset minus 2
-	((void (__fastcall *)(void *,float outOrigin[3])) (*(void***)this)[166]) (this,outOrigin);
+	// GetRenderEyeAngles vtable offset minus 1
+	((void (__fastcall *)(void *,float outOrigin[3])) (*(void***)this)[168]) (this,outOrigin);
 }
 
 void CEntityInstance::GetRenderEyeAngles(float outAngles[3]) {
 	// See cl_track_render_eye_angles. Near "Render eye angles: %.7f, %.7f, %.7f\n".
-	((void (__fastcall *)(void *,float outAngles[3])) (*(void***)this)[167]) (this,outAngles);
+	((void (__fastcall *)(void *,float outAngles[3])) (*(void***)this)[169]) (this,outAngles);
 }
 
 SOURCESDK::CS2::CBaseHandle CEntityInstance::GetViewEntityHandle() {
@@ -348,29 +349,32 @@ bool Hook_ClientEntitySystem2() {
 void Hook_ClientEntitySystem3(HMODULE clientDll) {
 	// these two called one after each other
 	//
-	// 1808ce654 e8  d7  50       CALL       FUN_180623730
-	//           d5  ff
-	// 1808ce659 80  bd  e0       CMP        byte ptr [RBP + local_res8], 0x0
-	//           04  00  00  00
-	// 1808ce660 0f  84  c5       JZ         LAB_1808cf52b
-	//           0e  00  00
-	// 1808ce666 0f  b6  95       MOVZX      EDX, byte ptr [RBP + local_res10]
-	//           e8  04  00  00
-	// 1808ce66d 84  d2           TEST       DL,DL
-	// 1808ce66f 0f  84  b6       JZ         LAB_1808cf52b
-	//           0e  00  00
-	// 1808ce675 4c  8d  45  40   LEA        R8=>local_498, [RBP + 0x40]
-	// 1808ce679 48  8b  cf       MOV        RCX, RDI
-	// 1808ce67c e8  5f  67       CALL       FUN_180614de0
-	//           d4  ff
+    //                       LAB_1807b3a68                                   XREF[3]:     1807b3a1e (j) , 1807b3a2a (j) , 
+    //                                                                                    1807b3a63 (j)   
+    // 1807b3a68 48  85  db       TEST       RBX ,RBX
+    // 1807b3a6b 0f  84  82       JZ         LAB_1807b3af3
+    //           00  00  00
+    // 1807b3a71 4c  8d  05       LEA        R8,[s_muzzle_flash_181a3eab8 ]                   = "muzzle_flash"
+    //           40  b0  28  01
+    // 1807b3a78 48  8b  cb       MOV        RCX ,RBX
+    // 1807b3a7b 48  8d  95       LEA        RDX =>local_res8 ,[RBP  + 0x300 ]
+    //           00  03  00  00
+    // 1807b3a82 e8  99  d2       CALL       FUN_1808c0d20                                    undefined FUN_1808c0d20()
+    //           10  00
+    // 1807b3a87 0f  b6  95       MOVZX      EDX ,byte ptr [RBP  + local_res8 ]
+    //           00  03  00  00
+    // 1807b3a8e 4c  8d  44       LEA        R8=>local_3b8 ,[RSP  + 0x40 ]
+    //           24  40
+    // 1807b3a93 48  8b  cb       MOV        RCX ,RBX
+    // 1807b3a96 e8  b5  dd       CALL       FUN_1808b1850                                    undefined FUN_1808b1850()
+    //           0f  00
 	//
-	// Function where they called has "weapon_hand_R" string
-	// also it's 2th in vtable for ".?AV?$_Func_impl_no_alloc@V<lambda_2>@?8??FrameUpdateBegin@CPlayerPawnFrameUpdateSystem@@QEAAXXZ@X$$V@std@@"
-	// vtable could be find near "AsyncFrameUpdate" where it queues it
+	// Function where they called has "muzzle_flash" string
+	// also called in other functions near strings "attachment_point", "attachment"
 
-	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 80 BD ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? 0F B6 95 ?? ?? ?? ?? 84 D2 0F 84 ?? ?? ?? ?? 4C 8D 45 ?? 48 8B CF E8 ?? ?? ?? ??")) {
+	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 0F B6 95 00 03 00 00 4C 8D 44 24 ?? 48 8B CB E8 ?? ?? ?? ??")) {
 		org_LookupAttachment = (org_LookupAttachment_t)(startAddr + 5 + *(int32_t*)(startAddr + 1));
-		org_GetAttachment = (org_GetAttachment_t)(startAddr + 40 + 5 + *(int32_t*)(startAddr + 40 + 1));
+		org_GetAttachment = (org_GetAttachment_t)(startAddr + 21 + 5 + *(int32_t*)(startAddr + 21 + 1));
 	} else ErrorBox(MkErrStr(__FILE__, __LINE__));
 }
 
