@@ -32,6 +32,7 @@ public:
 
 	void LoadImage(const char* name, const char* fileName);
 	void UnloadImage(const char* name);
+	void Clear();
 	void ListImages();
 
 	void RegisterAtlas(const char* name, const char* handleStr, UINT width, UINT height, const char* formatStr, const char* alphaStr, bool keyedMutex);

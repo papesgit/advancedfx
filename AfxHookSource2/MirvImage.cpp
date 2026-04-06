@@ -215,6 +215,25 @@ void CMirvImageDrawer::UnloadImage(const char* name) {
 	m_Images.erase(it);
 }
 
+void CMirvImageDrawer::Clear() {
+	std::lock_guard<std::mutex> lock(m_Mutex);
+
+	for (auto& entry : m_Images) {
+		ReleaseImageResources(entry);
+	}
+	m_Images.clear();
+
+	for (auto& atlas : m_Atlases) {
+		ReleaseAtlasResources(atlas);
+	}
+	m_Atlases.clear();
+
+	m_ProbePending = false;
+	m_ProbeAtlasName.clear();
+	m_ProbeX = 0;
+	m_ProbeY = 0;
+}
+
 void CMirvImageDrawer::ListImages() {
 	std::lock_guard<std::mutex> lock(m_Mutex);
 	advancedfx::Message("mirv_image: %zu image(s)\n", m_Images.size());
@@ -1326,6 +1345,9 @@ CON_COMMAND(mirv_image, "3D image drawing in world space.")
 				g_MirvImageDrawer.UnloadImage(args->ArgV(2));
 				return;
 			}
+		} else if (0 == _stricmp(cmd1, "clear")) {
+			g_MirvImageDrawer.Clear();
+			return;
 		} else if (0 == _stricmp(cmd1, "list")) {
 			g_MirvImageDrawer.ListImages();
 			return;
@@ -1412,22 +1434,21 @@ CON_COMMAND(mirv_image, "3D image drawing in world space.")
 	}
 
 	advancedfx::Message(
-		"%s load <name> <file> - Load PNG from resources\\\\AfxHookSource2\\\\images.\n"
-		"%s unload <name> - Unload image.\n"
-		"%s list - List images.\n"
-		"%s place <name> <x> <y> <z> - Set world position.\n"
-		"%s angles <name> <pitch> <yaw> <roll> - Set world angles.\n"
-		"%s scale <name> <sx> <sy> - Set world size.\n"
-		"%s show <name> 0|1 - Show or hide image.\n"
-		"%s depth <name> 0|1 - Disable or enable depth testing.\n"
-		"%s depthwrite <name> 0|1 - Disable or enable depth writing (use 0 for proper transparency).\n"
-		"%s use <name> <atlas> <regionId> - Bind image to atlas region.\n"
-		"%s atlas register <atlas> <handle> <width> <height> <format> <alphaMode> [keyedMutex]\n"
-		"%s atlas unregister <atlas>\n"
-		"%s atlas list - List atlases.\n"
-		"%s atlas probe <atlas> <x> <y> - Read back one atlas pixel.\n"
-		"%s atlas region <atlas> <regionId> <u0> <v0> <u1> <v1> [defaultW defaultH]\n",
-		cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0, cmd0
+		"mirv_image load <name> <file> - Load PNG from resources\\\\AfxHookSource2\\\\images.\n"
+		"mirv_image unload <name> - Unload image.\n"
+		"mirv_image clear - Remove all images and atlases.\n"
+		"mirv_image list - List images.\n"
+		"mirv_image place <name> <x> <y> <z> - Set world position.\n"
+		"mirv_image angles <name> <pitch> <yaw> <roll> - Set world angles.\n"
+		"mirv_image scale <name> <sx> <sy> - Set world size.\n"
+		"mirv_image show <name> 0|1 - Show or hide image.\n"
+		"mirv_image depth <name> 0|1 - Disable or enable depth testing.\n"
+		"mirv_image depthwrite <name> 0|1 - Disable or enable depth writing (use 0 for proper transparency).\n"
+		"mirv_image use <name> <atlas> <regionId> - Bind image to atlas region.\n"
+		"mirv_image atlas register <atlas> <handle> <width> <height> <format> <alphaMode> [keyedMutex]\n"
+		"mirv_image atlas unregister <atlas>\n"
+		"mirv_image atlas list - List atlases.\n"
+		"mirv_image atlas probe <atlas> <x> <y> - Read back one atlas pixel.\n"
+		"mirv_image atlas region <atlas> <regionId> <u0> <v0> <u1> <v1> [defaultW defaultH]\n"
 	);
 }
-
