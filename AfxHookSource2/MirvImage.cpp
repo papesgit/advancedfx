@@ -80,6 +80,12 @@ std::wstring BuildImagePath(const std::wstring& fileName) {
 	if (!pawn || !pawn->IsPlayerPawn() || !pawn->GetHealth() > 0) return false;
 
 	if (attachmentName.empty()) {
+		pawn->GetOrigin(outOrigin[0], outOrigin[1], outOrigin[2]);
+		pawn->GetRenderEyeAngles(outAngles);
+		return true;
+	}
+
+	if (attachmentName == "POV") {
 		pawn->GetRenderEyeOrigin(outOrigin);
 		pawn->GetRenderEyeAngles(outAngles);
 		return true;
