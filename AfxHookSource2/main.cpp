@@ -1139,15 +1139,11 @@ static AttachmentCameraKeyframeEasingCurve ToKeyframeCurve(AttachmentCameraTrans
 	}
 }
 
-static bool ComputeAttachmentCameraTransform(
+static bool ResolveAttachmentTransform(
 	const AttachmentCameraState& state,
 	int controllerIndex,
-	double animT,
 	Afx::Math::Vector3& outOrigin,
-	Afx::Math::Quaternion& outQuat,
-	float& outFov) {
-	if (!state.active) return false;
-
+	Afx::Math::Quaternion& outQuat) {
 	auto pawn = GetPawnFromControllerIndex(controllerIndex);
 	if (!pawn) return false;
 
@@ -1163,7 +1159,6 @@ static bool ComputeAttachmentCameraTransform(
 		attachmentOrigin.x = eyeOrigin[0];
 		attachmentOrigin.y = eyeOrigin[1];
 		attachmentOrigin.z = eyeOrigin[2];
-		// Convert Euler angles (pitch, yaw, roll) to quaternion
 		Afx::Math::QEulerAngles euler(eyeAngles[0], eyeAngles[1], eyeAngles[2]);
 		Afx::Math::Quaternion q = Afx::Math::Quaternion::FromQREulerAngles(
 			Afx::Math::QREulerAngles::FromQEulerAngles(euler)
@@ -1180,29 +1175,152 @@ static bool ComputeAttachmentCameraTransform(
 		if (!pawn->GetAttachment(attachmentIdx, attachmentOrigin, attachmentAngles)) return false;
 	}
 
-	Afx::Math::Quaternion baseQuat = SourceQuatToAfx(attachmentAngles).Normalized();
-	Afx::Math::Quaternion baseQuatForRotation = baseQuat;
-	if (state.rotationLockPitch || state.rotationLockYaw || state.rotationLockRoll) {
-		Afx::Math::QEulerAngles baseAngles = baseQuat.ToQREulerAngles().ToQEulerAngles();
-		if (state.rotationLockPitch) baseAngles.Pitch = 0.0;
-		if (state.rotationLockYaw) baseAngles.Yaw = 0.0;
-		if (state.rotationLockRoll) baseAngles.Roll = 0.0;
-		baseQuatForRotation = Afx::Math::Quaternion::FromQREulerAngles(
-			Afx::Math::QREulerAngles::FromQEulerAngles(baseAngles)
-		).Normalized();
+	outOrigin = Afx::Math::Vector3(attachmentOrigin.x, attachmentOrigin.y, attachmentOrigin.z);
+	outQuat = SourceQuatToAfx(attachmentAngles).Normalized();
+	return true;
+}
+
+static Afx::Math::Quaternion ApplyRotationLocks(
+	const Afx::Math::Quaternion& baseQuat,
+	const AttachmentCameraState& state) {
+	if (!state.rotationLockPitch && !state.rotationLockYaw && !state.rotationLockRoll) {
+		return baseQuat;
 	}
+
+	Afx::Math::QEulerAngles baseAngles = baseQuat.ToQREulerAngles().ToQEulerAngles();
+	if (state.rotationLockPitch) baseAngles.Pitch = 0.0;
+	if (state.rotationLockYaw) baseAngles.Yaw = 0.0;
+	if (state.rotationLockRoll) baseAngles.Roll = 0.0;
+	return Afx::Math::Quaternion::FromQREulerAngles(
+		Afx::Math::QREulerAngles::FromQEulerAngles(baseAngles)
+	).Normalized();
+}
+
+static Afx::Math::Quaternion FilterAttachmentAxes(
+	const Afx::Math::Quaternion& baseQuat,
+	bool followPitch,
+	bool followYaw,
+	bool followRoll) {
+	if (followPitch && followYaw && followRoll) {
+		return baseQuat;
+	}
+
+	Afx::Math::QEulerAngles baseAngles = baseQuat.ToQREulerAngles().ToQEulerAngles();
+	if (!followPitch) baseAngles.Pitch = 0.0;
+	if (!followYaw) baseAngles.Yaw = 0.0;
+	if (!followRoll) baseAngles.Roll = 0.0;
+	return Afx::Math::Quaternion::FromQREulerAngles(
+		Afx::Math::QREulerAngles::FromQEulerAngles(baseAngles)
+	).Normalized();
+}
+
+static Afx::Math::Quaternion ComposeAttachmentKeyframeRotation(
+	const Afx::Math::Quaternion& baseQuat,
+	const AttachmentCameraState& state,
+	const AttachmentCameraKeyframe& keyframe) {
+	Afx::Math::Quaternion q = FilterAttachmentAxes(
+		baseQuat,
+		keyframe.followAttachmentPitch,
+		keyframe.followAttachmentYaw,
+		keyframe.followAttachmentRoll);
+	q = ApplyEulerWithBasis(
+		q,
+		state.offsetAngles,
+		state.rotationBasisPitch,
+		state.rotationBasisYaw,
+		state.rotationBasisRoll);
+	q = ApplyEulerWithBasis(
+		q,
+		keyframe.deltaAngles,
+		state.rotationBasisPitch,
+		state.rotationBasisYaw,
+		state.rotationBasisRoll);
+	return q.Normalized();
+}
+
+static bool UsesLegacyAttachmentRotationBehavior(
+	const AttachmentCameraKeyframe& keyframe) {
+	return keyframe.rotationSampling == AttachmentCameraKeyframeRotationSampling::Live
+		&& keyframe.followAttachmentPitch
+		&& keyframe.followAttachmentYaw
+		&& keyframe.followAttachmentRoll;
+}
+
+static Afx::Math::Quaternion ResolveSegmentRotationBasis(
+	AttachmentCameraState& state,
+	int controllerIndex,
+	const AttachmentCameraKeyframe* k0,
+	const AttachmentCameraKeyframe* k1,
+	const Afx::Math::Quaternion& liveBaseQuat) {
+	if (!k0 || !k1 || k0 == k1 || k1->rotationSampling != AttachmentCameraKeyframeRotationSampling::FreezeAtSegmentStart) {
+		return liveBaseQuat;
+	}
+
+	auto& slots = state.animation.frozenRotationStates;
+	for (auto& slot : slots) {
+		if (slot.valid
+			&& slot.controllerIndex == controllerIndex
+			&& slot.segmentStartTime == k0->time
+			&& slot.segmentStartOrder == k0->order
+			&& slot.segmentEndTime == k1->time
+			&& slot.segmentEndOrder == k1->order) {
+			return slot.quat;
+		}
+	}
+
+	AttachmentCameraAnimationState::FrozenRotationState* targetSlot = nullptr;
+	for (auto& slot : slots) {
+		if (slot.controllerIndex == controllerIndex) {
+			targetSlot = &slot;
+			break;
+		}
+		if (!targetSlot && !slot.valid) {
+			targetSlot = &slot;
+		}
+	}
+	if (!targetSlot) {
+		targetSlot = &slots[0];
+	}
+
+	targetSlot->valid = true;
+	targetSlot->controllerIndex = controllerIndex;
+	targetSlot->segmentStartTime = k0->time;
+	targetSlot->segmentStartOrder = k0->order;
+	targetSlot->segmentEndTime = k1->time;
+	targetSlot->segmentEndOrder = k1->order;
+	targetSlot->quat = liveBaseQuat;
+	return targetSlot->quat;
+}
+
+static bool ComputeAttachmentCameraTransform(
+	AttachmentCameraState& state,
+	int controllerIndex,
+	double animT,
+	Afx::Math::Vector3& outOrigin,
+	Afx::Math::Quaternion& outQuat,
+	float& outFov) {
+	if (!state.active) return false;
+
+	Afx::Math::Vector3 attachmentOrigin;
+	Afx::Math::Quaternion liveBaseQuat;
+	if (!ResolveAttachmentTransform(state, controllerIndex, attachmentOrigin, liveBaseQuat)) return false;
+
+	Afx::Math::Quaternion baseQuatForRotation = ApplyRotationLocks(liveBaseQuat, state);
 
 	SOURCESDK::Vector deltaPos = { 0.0f, 0.0f, 0.0f };
 	Afx::Math::QEulerAngles deltaAngles(0.0, 0.0, 0.0);
 	float fov = state.fov;
+	const AttachmentCameraKeyframe* k0 = nullptr;
+	const AttachmentCameraKeyframe* k1 = nullptr;
+	double alpha = 0.0;
 
 	if (state.animation.enabled && !state.animation.keyframes.empty()) {
 		double t = animT;
 		if (t < 0.0) t = 0.0;
 
 		const auto& keyframes = state.animation.keyframes;
-		const AttachmentCameraKeyframe* k0 = &keyframes.front();
-		const AttachmentCameraKeyframe* k1 = &keyframes.back();
+		k0 = &keyframes.front();
+		k1 = &keyframes.back();
 
 		if (t <= keyframes.front().time) {
 			k0 = k1 = &keyframes.front();
@@ -1218,7 +1336,6 @@ static bool ComputeAttachmentCameraTransform(
 			}
 		}
 
-		double alpha = 0.0;
 		if (k0 != k1) {
 			const double dt = k1->time - k0->time;
 			alpha = dt > 1.0e-9 ? (t - k0->time) / dt : 0.0;
@@ -1262,30 +1379,72 @@ static bool ComputeAttachmentCameraTransform(
 		const float f0 = k0->hasFov ? k0->fov : state.fov;
 		const float f1 = k1->hasFov ? k1->fov : state.fov;
 		fov = lerp(f0, f1, alpha);
+	} else {
+		static const AttachmentCameraKeyframe kIdentityKeyframe;
+		k0 = &kIdentityKeyframe;
+		k1 = &kIdentityKeyframe;
 	}
 
-	Afx::Math::Quaternion combinedQuat = ApplyEulerWithBasis(
-		baseQuatForRotation,
-		state.offsetAngles,
-		state.rotationBasisPitch,
-		state.rotationBasisYaw,
-		state.rotationBasisRoll);
-	combinedQuat = ApplyEulerWithBasis(
-		combinedQuat,
-		deltaAngles,
-		state.rotationBasisPitch,
-		state.rotationBasisYaw,
-		state.rotationBasisRoll);
+	const bool useLegacyRotationInterpolation = k0
+		&& k1
+		&& UsesLegacyAttachmentRotationBehavior(*k0)
+		&& UsesLegacyAttachmentRotationBehavior(*k1);
 
-	Afx::Math::Vector3 combinedOrigin(attachmentOrigin.x, attachmentOrigin.y, attachmentOrigin.z);
+	Afx::Math::Quaternion combinedQuat;
+	Afx::Math::Quaternion positionQuat;
+	if (useLegacyRotationInterpolation) {
+		combinedQuat = ApplyEulerWithBasis(
+			baseQuatForRotation,
+			state.offsetAngles,
+			state.rotationBasisPitch,
+			state.rotationBasisYaw,
+			state.rotationBasisRoll);
+		combinedQuat = ApplyEulerWithBasis(
+			combinedQuat,
+			deltaAngles,
+			state.rotationBasisPitch,
+			state.rotationBasisYaw,
+			state.rotationBasisRoll);
+		positionQuat = state.rotationReference == AttachmentCameraRotationReference::OffsetLocal
+			? baseQuatForRotation
+			: combinedQuat;
+	} else {
+		const Afx::Math::Quaternion segmentBasisQuat = ResolveSegmentRotationBasis(
+			state,
+			controllerIndex,
+			k0,
+			k1,
+			baseQuatForRotation);
+		const Afx::Math::Quaternion startQuat = ComposeAttachmentKeyframeRotation(segmentBasisQuat, state, *k0);
+		const Afx::Math::Quaternion endQuat = ComposeAttachmentKeyframeRotation(segmentBasisQuat, state, *k1);
+		combinedQuat = (k0 != k1)
+			? startQuat.Slerp(endQuat, (float)alpha).Normalized()
+			: endQuat;
+
+		const Afx::Math::Quaternion startPositionBasis = FilterAttachmentAxes(
+			segmentBasisQuat,
+			k0->followAttachmentPitch,
+			k0->followAttachmentYaw,
+			k0->followAttachmentRoll);
+		const Afx::Math::Quaternion endPositionBasis = FilterAttachmentAxes(
+			segmentBasisQuat,
+			k1->followAttachmentPitch,
+			k1->followAttachmentYaw,
+			k1->followAttachmentRoll);
+		const Afx::Math::Quaternion interpolatedPositionBasis = (k0 != k1)
+			? startPositionBasis.Slerp(endPositionBasis, (float)alpha).Normalized()
+			: endPositionBasis;
+		positionQuat = state.rotationReference == AttachmentCameraRotationReference::OffsetLocal
+			? interpolatedPositionBasis
+			: combinedQuat;
+	}
+
+	Afx::Math::Vector3 combinedOrigin = attachmentOrigin;
 	Afx::Math::Vector3 offsetVec(
 		state.offsetPos.x + deltaPos.x,
 		state.offsetPos.y + deltaPos.y,
 		state.offsetPos.z + deltaPos.z
 	);
-	const Afx::Math::Quaternion positionQuat = state.rotationReference == AttachmentCameraRotationReference::OffsetLocal
-		? baseQuatForRotation
-		: combinedQuat;
 	combinedOrigin += RotateVectorByQuat(positionQuat, offsetVec);
 
 	outOrigin = combinedOrigin;
@@ -1295,7 +1454,7 @@ static bool ComputeAttachmentCameraTransform(
 	return true;
 }
 
-static bool TryComputeAttachmentCamera(const AttachmentCameraState& state, Afx::Math::Vector3& outOrigin, Afx::Math::QEulerAngles& outAngles, float & outFov) {
+static bool TryComputeAttachmentCamera(AttachmentCameraState& state, Afx::Math::Vector3& outOrigin, Afx::Math::QEulerAngles& outAngles, float & outFov) {
 	if (!state.active) return false;
 
 	const double now = g_MirvTime.curtime_get();

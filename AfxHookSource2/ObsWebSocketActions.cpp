@@ -320,6 +320,10 @@ void ObsWebSocket_ProcessActions() {
 				: 0.0;
 			g_AttachmentCamera.animation.transitionApplied = false;
 			g_AttachmentCamera.animation.transitionMode4Applied = false;
+			for (auto& frozenState : g_AttachmentCamera.animation.frozenRotationStates) {
+				frozenState.valid = false;
+				frozenState.controllerIndex = -1;
+			}
 			g_AttachmentCameraHadError = false;
 			if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
 			if (g_pEngineToClient) {

@@ -835,6 +835,10 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 						kf.order = order;
 						kf.easingCurve = AttachmentCameraKeyframeEasingCurve::Linear;
 						kf.easingMode = AttachmentCameraKeyframeEase::EaseInOut;
+						kf.rotationSampling = AttachmentCameraKeyframeRotationSampling::Live;
+						kf.followAttachmentPitch = true;
+						kf.followAttachmentYaw = true;
+						kf.followAttachmentRoll = true;
 
 						if (ev.contains("easing_curve") && ev["easing_curve"].is_string()) {
 							const auto curve = ev["easing_curve"].get<std::string>();
@@ -876,6 +880,23 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 						if (ev.contains("fov") && ev["fov"].is_number()) {
 							kf.hasFov = true;
 							kf.fov = (float)ev["fov"].get<double>();
+						}
+
+						if (ev.contains("rotation_sampling") && ev["rotation_sampling"].is_string()) {
+							const auto sampling = ev["rotation_sampling"].get<std::string>();
+							if (0 == _stricmp(sampling.c_str(), "freeze_at_segment_start")) {
+								kf.rotationSampling = AttachmentCameraKeyframeRotationSampling::FreezeAtSegmentStart;
+							}
+						}
+
+						if (ev.contains("follow_attachment") && ev["follow_attachment"].is_object()) {
+							const auto& follow = ev["follow_attachment"];
+							auto parseFollow = [](const json& obj, const char* key) {
+								return obj.contains(key) && obj[key].is_boolean() ? obj[key].get<bool>() : true;
+							};
+							kf.followAttachmentPitch = parseFollow(follow, "pitch");
+							kf.followAttachmentYaw = parseFollow(follow, "yaw");
+							kf.followAttachmentRoll = parseFollow(follow, "roll");
 						}
 
 						state.animation.keyframes.push_back(std::move(kf));

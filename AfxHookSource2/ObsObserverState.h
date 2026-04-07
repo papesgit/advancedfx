@@ -4,6 +4,7 @@
 #include "../shared/AfxMath.h"
 
 #include <cstdint>
+#include <array>
 #include <vector>
 #include <string>
 
@@ -25,6 +26,11 @@ enum class AttachmentCameraKeyframeEase {
 	EaseInOut
 };
 
+enum class AttachmentCameraKeyframeRotationSampling {
+	Live,
+	FreezeAtSegmentStart
+};
+
 enum class AttachmentCameraRotationReference {
 	Attachment,
 	OffsetLocal
@@ -42,11 +48,25 @@ struct AttachmentCameraKeyframe {
 	Afx::Math::QEulerAngles deltaAngles = Afx::Math::QEulerAngles(0.0, 0.0, 0.0);
 	bool hasFov = false;
 	float fov = 90.0f;
+	AttachmentCameraKeyframeRotationSampling rotationSampling = AttachmentCameraKeyframeRotationSampling::Live;
+	bool followAttachmentPitch = true;
+	bool followAttachmentYaw = true;
+	bool followAttachmentRoll = true;
 	AttachmentCameraKeyframeEasingCurve easingCurve = AttachmentCameraKeyframeEasingCurve::Linear;
 	AttachmentCameraKeyframeEase easingMode = AttachmentCameraKeyframeEase::EaseInOut;
 };
 
 struct AttachmentCameraAnimationState {
+	struct FrozenRotationState {
+		bool valid = false;
+		int controllerIndex = -1;
+		double segmentStartTime = 0.0;
+		int segmentStartOrder = 0;
+		double segmentEndTime = 0.0;
+		int segmentEndOrder = 0;
+		Afx::Math::Quaternion quat = Afx::Math::Quaternion(1.0, 0.0, 0.0, 0.0);
+	};
+
 	bool enabled = false;
 	double startTime = 0.0;
 	std::vector<AttachmentCameraKeyframe> keyframes;
@@ -57,6 +77,7 @@ struct AttachmentCameraAnimationState {
 	int targetControllerIndex = -1;
 	bool transitionApplied = false;
 	bool transitionMode4Applied = false;
+	std::array<FrozenRotationState, 2> frozenRotationStates;
 };
 
 struct AttachmentCameraState {
