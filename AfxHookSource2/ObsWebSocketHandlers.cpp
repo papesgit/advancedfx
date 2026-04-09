@@ -11,6 +11,7 @@
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
 #include "../shared/AfxConsole.h"
+#include "../shared/StringTools.h"
 
 #include <algorithm>
 #include <cctype>
@@ -108,7 +109,12 @@ namespace {
 				continue;
 			}
 
-			std::string value = relative.generic_string();
+			std::string value;
+			if (!WideStringToUTF8String(relative.generic_wstring().c_str(), value)) {
+				advancedfx::Warning("gfx.image.list: failed to convert image path to UTF-8, skipping entry.\n");
+				continue;
+			}
+
 			if (!value.empty()) {
 				result.push_back(std::move(value));
 			}
