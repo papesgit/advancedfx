@@ -1445,6 +1445,29 @@ ClearDepthStencilView_t g_Old_ClearDepthStencilView = nullptr;
 ID3D11RenderTargetView * g_pCurrentRenderTargetView = nullptr;
 ID3D11DepthStencilView * g_pCurrentDepthStencilView = nullptr;
 
+void MaybeCaptureSmokeDepth() {
+    if (g_bDetectedSmoke && g_pSmokeDepthStencilView) {
+        ID3D11DepthStencilView* pCurrentDepthStencilView = nullptr;
+        ID3D11DepthStencilView* pNullDepthStencilView = nullptr;
+        g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
+
+        if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
+            g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pNullDepthStencilView);
+        }
+
+        g_DepthCompositor.CaptureSmokeDepth(g_pImmediateContext, g_pSmokeDepthStencilView);
+
+        if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
+            g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
+        }
+
+        if (pCurrentDepthStencilView) pCurrentDepthStencilView->Release();
+
+        g_pSmokeDepthStencilView = nullptr;
+        g_bDetectedSmoke = false;
+    }
+}
+
 void STDMETHODCALLTYPE New_ClearDepthStencilView( ID3D11DeviceContext * This, 
     _In_  ID3D11DepthStencilView *pDepthStencilView,
     _In_  UINT ClearFlags,
@@ -1452,26 +1475,7 @@ void STDMETHODCALLTYPE New_ClearDepthStencilView( ID3D11DeviceContext * This,
     _In_  UINT8 Stencil) {
 
     if (This == g_pImmediateContext && g_bInOwnDraw == false) {
-        if (g_bDetectedSmoke && g_pSmokeDepthStencilView) {
-            ID3D11DepthStencilView* pCurrentDepthStencilView = nullptr;
-            ID3D11DepthStencilView* pNullDepthStencilView = nullptr;
-            g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
-
-            if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
-                g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pNullDepthStencilView);
-            }
-
-            g_DepthCompositor.CaptureSmokeDepth(g_pImmediateContext, g_pSmokeDepthStencilView);
-
-            if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
-                g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
-            }
-
-            if (pCurrentDepthStencilView) pCurrentDepthStencilView->Release();
-
-            g_pSmokeDepthStencilView = nullptr;
-            g_bDetectedSmoke = false;
-        }
+        MaybeCaptureSmokeDepth();
     }
 
     g_Old_ClearDepthStencilView(This, pDepthStencilView, ClearFlags, Depth, Stencil);
@@ -1633,6 +1637,7 @@ public:
 
     virtual void OnCallback(void) {
         if (g_pImmediateContext) {
+            MaybeCaptureSmokeDepth();
             g_bDetectSmoke = false;
         }
         delete this;
