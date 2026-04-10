@@ -4156,7 +4156,6 @@ void CAfxStreams::RecordStart()
                     g_bCompositeSmoke = true;
                 });
             }
-            m_CompositeSmoke = false;
         }
 
 		advancedfx::Message("done.\n");
