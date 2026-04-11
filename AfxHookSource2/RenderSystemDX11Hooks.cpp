@@ -110,6 +110,7 @@ public:
         m_Width = 0;
         m_Height = 0;
         m_SourceFormat = DXGI_FORMAT_UNKNOWN;
+        m_NextUpdateTime = {};
     }
 
     void Update(ID3D11DeviceContext* pContext, ID3D11Texture2D* pSource) {
@@ -135,15 +136,28 @@ public:
 
         if (g_SharedTextureFpsCap > 0.0) {
             auto now = std::chrono::steady_clock::now();
-            if (m_LastUpdateTime.time_since_epoch().count() != 0) {
-                const double minIntervalMs = 1000.0 / g_SharedTextureFpsCap;
-                auto elapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - m_LastUpdateTime).count();
-                if (elapsedMs < minIntervalMs) {
+            auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(1.0 / g_SharedTextureFpsCap)
+            );
+            if (interval.count() <= 0) {
+                interval = std::chrono::steady_clock::duration(1);
+            }
+
+            if (m_NextUpdateTime.time_since_epoch().count() != 0) {
+                if (now < m_NextUpdateTime) {
                     device->Release();
                     return;
                 }
+                do {
+                    m_NextUpdateTime += interval;
+                } while (m_NextUpdateTime <= now);
             }
-            m_LastUpdateTime = now;
+            else {
+                m_NextUpdateTime = now + interval;
+            }
+        }
+        else {
+            m_NextUpdateTime = {};
         }
 
         if (!EnsureResources(device, srcDesc, normalizedSourceFormat)) {
@@ -527,7 +541,7 @@ float4 main(PS_INPUT input) : SV_TARGET {
     UINT m_Width = 0;
     UINT m_Height = 0;
     DXGI_FORMAT m_SourceFormat = DXGI_FORMAT_UNKNOWN;
-    std::chrono::steady_clock::time_point m_LastUpdateTime{};
+    std::chrono::steady_clock::time_point m_NextUpdateTime{};
 } g_SharedTextureHost;
 
 bool AfxSharedTexture_DuplicateHandleForPid(unsigned int /*pid*/, unsigned long long & outHandleValue, std::string & outError) {
@@ -5609,4 +5623,3 @@ CON_COMMAND(__mirv_debug_scenesystem_rendercontexts, "")
         "Current value: %i\n"
         , cmd0, g_iRenderContextDebug);
 }
-
