@@ -50,6 +50,7 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <string>
 
 #include <dxgi.h>
 #include <dxgi1_4.h>
@@ -68,6 +69,22 @@ ID3D11DeviceContext * g_pImmediateContext = nullptr;
 
 CRenderCommands g_RenderCommands;
 CNvencStream g_NvencStream;
+
+enum class NvencPendingCommand
+{
+    None,
+    Start,
+    Stop
+};
+
+std::mutex g_NvencCommandMutex;
+NvencPendingCommand g_NvencPendingCommand = NvencPendingCommand::None;
+std::string g_NvencPendingOutputPath;
+
+bool RenderSystemDX11_RequestNvencIdr()
+{
+    return g_NvencStream.RequestIdr();
+}
 
 bool g_bEnableReShade = true;
 bool g_bReShadeCompositeSmoke = true;
@@ -1898,6 +1915,16 @@ HRESULT STDMETHODCALLTYPE New_CreateRenderTargetView(  ID3D11Device * This,
         if(SUCCEEDED(result2)) {
             if(pResource == pTexture/* && (g_pDevice == nullptr || This != g_pDevice)*/) {
                 if(g_pDevice) {
+                    if (g_NvencStream.IsActive()) {
+                        {
+                            std::lock_guard<std::mutex> lock(g_NvencCommandMutex);
+                            g_NvencPendingCommand = NvencPendingCommand::None;
+                            g_NvencPendingOutputPath.clear();
+                        }
+                        g_NvencStream.Stop();
+                        advancedfx::Message("NVENC stream stopped because the D3D render target changed.\n");
+                    }
+
                     g_DepthCompositor.OnTargetEnd();
                     //CAfxShaderResourceViews::Clear();
                     g_CampathDrawer.EndDevice();
@@ -2423,6 +2450,77 @@ HRESULT WINAPI New_D3D11CreateDevice(
     return result;
 }
 
+void ProcessNvencPendingCommand(ID3D11Texture2D* pBackBuffer)
+{
+    NvencPendingCommand command = NvencPendingCommand::None;
+    std::string outputPath;
+
+    {
+        std::lock_guard<std::mutex> lock(g_NvencCommandMutex);
+        command = g_NvencPendingCommand;
+        if (command == NvencPendingCommand::Start) {
+            outputPath = g_NvencPendingOutputPath;
+        }
+        g_NvencPendingCommand = NvencPendingCommand::None;
+        g_NvencPendingOutputPath.clear();
+    }
+
+    if (command == NvencPendingCommand::None) {
+        return;
+    }
+
+    if (command == NvencPendingCommand::Stop) {
+        if (g_NvencStream.IsActive()) {
+            g_NvencStream.Stop();
+            advancedfx::Message("NVENC stream stopped.\n");
+        }
+        else {
+            advancedfx::Warning("NVENC stream is not active.\n");
+        }
+        return;
+    }
+
+    if (command == NvencPendingCommand::Start) {
+        if (g_NvencStream.IsActive()) {
+            advancedfx::Warning("NVENC stream is already active.\n");
+            return;
+        }
+
+        if (!g_pDevice || !pBackBuffer) {
+            advancedfx::Warning("AFXERROR: D3D11 device or backbuffer not available.\n");
+            return;
+        }
+
+        D3D11_TEXTURE2D_DESC desc;
+        pBackBuffer->GetDesc(&desc);
+        uint32_t width = desc.Width;
+        uint32_t height = desc.Height;
+
+        if (width == 0 || height == 0) {
+            advancedfx::Warning("AFXERROR: Could not determine backbuffer dimensions.\n");
+            return;
+        }
+
+        uint32_t targetWidth = width;
+        uint32_t targetHeight = height;
+        if (g_NvencStream.GetTargetWidth() > 0 && g_NvencStream.GetTargetHeight() > 0) {
+            targetWidth = g_NvencStream.GetTargetWidth();
+            targetHeight = g_NvencStream.GetTargetHeight();
+        }
+
+        const char* outputPathArg = outputPath.empty() ? nullptr : outputPath.c_str();
+        if (g_NvencStream.Start(g_pDevice, targetWidth, targetHeight, outputPathArg)) {
+            advancedfx::Message("NVENC stream started: %ux%u (source %ux%u)\n", targetWidth, targetHeight, width, height);
+            if (outputPathArg) {
+                advancedfx::Message("  Output file: %s\n", outputPathArg);
+            }
+        }
+        else {
+            advancedfx::Warning("AFXERROR: Failed to start NVENC stream. Make sure you have an NVIDIA GPU with NVENC support.\n");
+        }
+    }
+}
+
 void Before_Present() {
     RenderedSetup_OnBeforePresent();
 
@@ -2458,6 +2556,7 @@ void Before_Present() {
     ID3D11Texture2D* pBackBuffer = nullptr;
     if (g_pSwapChain && g_pImmediateContext) {
         if (SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer))) {
+            ProcessNvencPendingCommand(pBackBuffer);
             g_SharedTextureHost.Update(g_pImmediateContext, pBackBuffer);
             if (g_NvencStream.IsActive()) {
                 g_NvencStream.EncodeFrame(g_pImmediateContext, pBackBuffer);
@@ -5115,68 +5214,46 @@ CON_COMMAND(mirv_nvenc, "NVIDIA NVENC hardware encoding (experimental).")
 
 		if (0 == _stricmp(cmd1, "start"))
 		{
-			if (!g_pDevice) {
-				advancedfx::Warning("AFXERROR: D3D11 device not available.\n");
-				return;
-			}
-
 			if (g_NvencStream.IsActive()) {
 				advancedfx::Warning("NVENC stream is already active.\n");
 				return;
 			}
 
-			// Get backbuffer dimensions
-			uint32_t width = 0, height = 0;
-			if (g_pSwapChain) {
-				ID3D11Texture2D* pBackBuffer = nullptr;
-				if (SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer))) {
-					D3D11_TEXTURE2D_DESC desc;
-					pBackBuffer->GetDesc(&desc);
-					width = desc.Width;
-					height = desc.Height;
-					pBackBuffer->Release();
-				}
-			}
-
-			if (width == 0 || height == 0) {
-				advancedfx::Warning("AFXERROR: Could not determine backbuffer dimensions.\n");
-				return;
-			}
-
-			// Apply optional user override
-			uint32_t targetWidth = width;
-			uint32_t targetHeight = height;
-			if (g_NvencStream.GetTargetWidth() > 0 && g_NvencStream.GetTargetHeight() > 0) {
-				targetWidth = g_NvencStream.GetTargetWidth();
-				targetHeight = g_NvencStream.GetTargetHeight();
-			}
-
 			// Optional output file path for testing
-			const char* outputPath = nullptr;
+			std::string outputPath;
 			if (3 <= argc) {
 				outputPath = args->ArgV(2);
 			}
 
-			if (g_NvencStream.Start(g_pDevice, targetWidth, targetHeight, outputPath)) {
-				advancedfx::Message("NVENC stream started: %ux%u (source %ux%u)\n", targetWidth, targetHeight, width, height);
-				if (outputPath) {
-					advancedfx::Message("  Output file: %s\n", outputPath);
-				}
+			{
+				std::lock_guard<std::mutex> lock(g_NvencCommandMutex);
+				g_NvencPendingCommand = NvencPendingCommand::Start;
+				g_NvencPendingOutputPath = outputPath;
 			}
-			else {
-				advancedfx::Warning("AFXERROR: Failed to start NVENC stream. Make sure you have an NVIDIA GPU with NVENC support.\n");
-			}
+			advancedfx::Message("NVENC stream start requested.\n");
 			return;
 		}
 		else if (0 == _stricmp(cmd1, "stop"))
 		{
 			if (!g_NvencStream.IsActive()) {
+				std::lock_guard<std::mutex> lock(g_NvencCommandMutex);
+				if (g_NvencPendingCommand == NvencPendingCommand::Start) {
+					g_NvencPendingCommand = NvencPendingCommand::None;
+					g_NvencPendingOutputPath.clear();
+					advancedfx::Message("Pending NVENC stream start cancelled.\n");
+					return;
+				}
+
 				advancedfx::Warning("NVENC stream is not active.\n");
 				return;
 			}
 
-			g_NvencStream.Stop();
-			advancedfx::Message("NVENC stream stopped.\n");
+			{
+				std::lock_guard<std::mutex> lock(g_NvencCommandMutex);
+				g_NvencPendingCommand = NvencPendingCommand::Stop;
+				g_NvencPendingOutputPath.clear();
+			}
+			advancedfx::Message("NVENC stream stop requested.\n");
 			return;
 		}
 		else if (0 == _stricmp(cmd1, "status"))

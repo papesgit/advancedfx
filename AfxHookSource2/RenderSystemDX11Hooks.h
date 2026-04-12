@@ -30,6 +30,7 @@ void Hook_SceneSystem(void * hModule);
 void RenderSystemDX11_SupplyProjectionMatrix(const SOURCESDK::VMatrix & projectionMatrix);
 
 bool AfxSharedTexture_DuplicateHandleForPid(unsigned int pid, unsigned long long & outHandleValue, std::string & outError);
+bool RenderSystemDX11_RequestNvencIdr();
 
 uint64_t RenderedSetup_OnSetupViewCandidate(float x, float y, float z, float pitch, float yaw, float roll, float fov, float deltaTime);
 uint64_t RenderedSetup_GetLatestCandidateSerial();

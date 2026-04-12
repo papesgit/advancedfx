@@ -982,6 +982,15 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		});
 	});
 
+	g_ObsWebSocketProtocol.RegisterCommandHandler("rtp.request_idr", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!RenderSystemDX11_RequestNvencIdr()) {
+			respond(MakeCommandResult("rtp.request_idr", false, "NVENC stream is not active"));
+			return;
+		}
+
+		respond(MakeCommandResult("rtp.request_idr", true, "NVENC IDR requested"));
+	});
+
 	g_ObsWebSocketProtocol.RegisterCommandHandler("gfx.camera.get", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
 		json result{
 			{"type", "gfx.camera.get"},

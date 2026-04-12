@@ -116,8 +116,18 @@ CNvencStream::CNvencStream()
     , m_Socket(INVALID_SOCKET)
     , m_RtpSequence(0)
     , m_RtpTimestamp(0)
+    , m_RtpStableTimestampUs(0)
+    , m_RtpSenderStartTimestampUs(0)
     , m_RtpSsrc(0x12345678) // Random SSRC
     , m_bSentKeyframe(false)
+    , m_bForceIdrRequested(false)
+    , m_IntraRefreshPeriodFrames(60)
+    , m_ForcedIdrRequests(0)
+    , m_SentRtpFrames(0)
+    , m_SentRtpKeyframes(0)
+    , m_LastStatForcedIdrRequests(0)
+    , m_LastStatRtpFrames(0)
+    , m_LastStatRtpKeyframes(0)
     , m_TargetFrameTime(std::chrono::microseconds(16667)) // 60fps = 16.667ms per frame
     , m_TargetBitrate(8000000) // 8 Mbps default
     , m_DebugStatsEnabled(false)
@@ -249,6 +259,9 @@ bool CNvencStream::Start(ID3D11Device* pDevice, uint32_t nWidth, uint32_t nHeigh
     m_pDevice->AddRef();
     m_bSentKeyframe = false;
     m_RtpStartTime = std::chrono::steady_clock::now();
+    m_RtpStableTimestampUs = 0;
+    m_RtpSenderStartTimestampUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
     m_LastIdrTime = m_RtpStartTime;
     m_LastEncodeTime = m_RtpStartTime;
     m_NextEncodeTime = m_RtpStartTime;
@@ -263,6 +276,12 @@ bool CNvencStream::Start(ID3D11Device* pDevice, uint32_t nWidth, uint32_t nHeigh
     m_SentRtpBytes = 0;
     m_LastStatRtpPackets = 0;
     m_LastStatRtpBytes = 0;
+    m_ForcedIdrRequests = 0;
+    m_SentRtpFrames = 0;
+    m_SentRtpKeyframes = 0;
+    m_LastStatForcedIdrRequests = 0;
+    m_LastStatRtpFrames = 0;
+    m_LastStatRtpKeyframes = 0;
 
     // Create debug log file
     m_pDebugLog = std::make_unique<std::ofstream>("nvenc_debug.txt", std::ios::out | std::ios::trunc);
@@ -349,6 +368,16 @@ void CNvencStream::Stop()
     Cleanup();
 }
 
+bool CNvencStream::RequestIdr()
+{
+    if (!m_bActive || !m_bStreamingEnabled) {
+        return false;
+    }
+
+    m_bForceIdrRequested = true;
+    return true;
+}
+
 bool CNvencStream::EnableStreaming(const char* ipAddress, uint16_t port)
 {
     std::lock_guard<std::mutex> lock(m_Mutex);
@@ -374,7 +403,12 @@ bool CNvencStream::EnableStreaming(const char* ipAddress, uint16_t port)
     // Reset RTP sequence and timestamp
     m_RtpSequence = 0;
     m_RtpTimestamp = 0;
+    m_bSentKeyframe = false;
+    m_bForceIdrRequested = true;
     m_RtpStartTime = std::chrono::steady_clock::now();
+    m_RtpStableTimestampUs = 0;
+    m_RtpSenderStartTimestampUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
     m_LastIdrTime = m_RtpStartTime;
 
     m_bStreamingEnabled = true;
@@ -426,7 +460,7 @@ bool CNvencStream::InitializeEncoder(ID3D11Device* pDevice, uint32_t nWidth, uin
             &initializeParams,
             NV_ENC_CODEC_H264_GUID,
             NV_ENC_PRESET_P3_GUID,  // Low latency preset
-            NV_ENC_TUNING_INFO_LOW_LATENCY
+            NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY
         );
 
         // Customize settings for real-time streaming
@@ -435,18 +469,31 @@ bool CNvencStream::InitializeEncoder(ID3D11Device* pDevice, uint32_t nWidth, uin
         initializeParams.frameRateNum = 60;
         initializeParams.frameRateDen = 1;
 
-        // Low latency settings
-        encodeConfig.gopLength = NVENC_INFINITE_GOPLENGTH;  // All P frames for lowest latency
+        // Low latency settings. Keep one P frame between reference pictures. Use an infinite GOP
+        // with intra refresh so steady-state recovery is spread across frames instead of pulsing
+        // on a full periodic IDR.
+        encodeConfig.gopLength = NVENC_INFINITE_GOPLENGTH;
         encodeConfig.frameIntervalP = 1;
 
         // H.264 specific settings
         encodeConfig.encodeCodecConfig.h264Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+        encodeConfig.encodeCodecConfig.h264Config.enableIntraRefresh = 1;
+        encodeConfig.encodeCodecConfig.h264Config.intraRefreshPeriod = m_IntraRefreshPeriodFrames;
+        encodeConfig.encodeCodecConfig.h264Config.intraRefreshCnt = 10;
         encodeConfig.encodeCodecConfig.h264Config.repeatSPSPPS = 1;  // Repeat SPS/PPS for robustness
 
         // Rate control
         encodeConfig.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;  // Constant bitrate for streaming
         encodeConfig.rcParams.averageBitRate = m_TargetBitrate;
         encodeConfig.rcParams.maxBitRate = m_TargetBitrate;
+        // Two frames of VBV gives IDR frames a little rate-control headroom without jumping
+        // straight to a large latency-oriented buffer.
+        encodeConfig.rcParams.vbvBufferSize = (std::max)(1u, (m_TargetBitrate / initializeParams.frameRateNum) * 2);
+        encodeConfig.rcParams.vbvInitialDelay = encodeConfig.rcParams.vbvBufferSize;
+        encodeConfig.rcParams.enableLookahead = 0;
+        encodeConfig.rcParams.lookaheadDepth = 0;
+        encodeConfig.rcParams.zeroReorderDelay = 1;
+        encodeConfig.encodeCodecConfig.h264Config.maxNumRefFrames = 1;
 
         // Create the encoder
         m_pEncoder->CreateEncoder(&initializeParams);
@@ -638,7 +685,13 @@ bool CNvencStream::InitializeEncoder(ID3D11Device* pDevice, uint32_t nWidth, uin
 
 void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* pTexture)
 {
-    if (!m_bActive || !m_pEncoder || !pTexture) {
+    if (!pContext || !pTexture) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(m_Mutex);
+
+    if (!m_bActive || !m_pEncoder) {
         return;
     }
 
@@ -656,8 +709,6 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
         } while (m_NextEncodeTime <= now);
     }
     m_LastEncodeTime = now;
-
-    std::lock_guard<std::mutex> lock(m_Mutex);
 
     try {
         // Debug: Check source texture format (only log first frame)
@@ -869,6 +920,23 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
             ID3D11RasterizerState*   oldRSState = nullptr;
             pContext->RSGetState(&oldRSState);
 
+            D3D11_PRIMITIVE_TOPOLOGY oldTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+            pContext->IAGetPrimitiveTopology(&oldTopology);
+
+            ID3D11VertexShader* oldVertexShader = nullptr;
+            ID3D11PixelShader* oldPixelShader = nullptr;
+            pContext->VSGetShader(&oldVertexShader, nullptr, nullptr);
+            pContext->PSGetShader(&oldPixelShader, nullptr, nullptr);
+
+            ID3D11ShaderResourceView* oldPsSrv0 = nullptr;
+            ID3D11SamplerState* oldPsSampler0 = nullptr;
+            pContext->PSGetShaderResources(0, 1, &oldPsSrv0);
+            pContext->PSGetSamplers(0, 1, &oldPsSampler0);
+
+            UINT oldViewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+            D3D11_VIEWPORT oldViewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+            pContext->RSGetViewports(&oldViewportCount, oldViewports);
+
             // Set up our own clean render state for conversion
             pContext->OMSetRenderTargets(1, &m_pStagingRTV, nullptr);
 
@@ -907,6 +975,14 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
             pContext->OMSetBlendState(oldBlendState, oldBlendFactor, oldSampleMask);
             pContext->OMSetDepthStencilState(oldDepthState, oldStencilRef);
             pContext->RSSetState(oldRSState);
+            pContext->IASetPrimitiveTopology(oldTopology);
+            pContext->VSSetShader(oldVertexShader, nullptr, 0);
+            pContext->PSSetShader(oldPixelShader, nullptr, 0);
+            pContext->PSSetShaderResources(0, 1, &oldPsSrv0);
+            pContext->PSSetSamplers(0, 1, &oldPsSampler0);
+            if (oldViewportCount > 0) {
+                pContext->RSSetViewports(oldViewportCount, oldViewports);
+            }
 
             // Release our references
             if (oldRTV)       oldRTV->Release();
@@ -914,10 +990,10 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
             if (oldBlendState) oldBlendState->Release();
             if (oldDepthState) oldDepthState->Release();
             if (oldRSState)    oldRSState->Release();
-
-            // Unbind SRV
-            ID3D11ShaderResourceView* nullSRV[1] = { nullptr };
-            pContext->PSSetShaderResources(0, 1, nullSRV);
+            if (oldVertexShader) oldVertexShader->Release();
+            if (oldPixelShader) oldPixelShader->Release();
+            if (oldPsSrv0) oldPsSrv0->Release();
+            if (oldPsSampler0) oldPsSampler0->Release();
 
 
             // Now copy the converted staging texture (BGRA) to encoder input (BGRA) - formats match!
@@ -946,12 +1022,15 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
         NV_ENC_PIC_PARAMS picParams = {};
         NV_ENC_PIC_PARAMS* pPicParams = nullptr;
         auto nowForIdr = std::chrono::steady_clock::now();
-        bool forceIdr = !m_bSentKeyframe || (nowForIdr - m_LastIdrTime) >= std::chrono::seconds(2);
+        // Steady-state recovery uses intra refresh. Manual IDR is only for RTP startup
+        // and explicit receiver recovery requests.
+        bool forceIdr = m_bStreamingEnabled && (!m_bSentKeyframe || m_bForceIdrRequested.exchange(false));
         if (forceIdr) {
             picParams.version = NV_ENC_PIC_PARAMS_VER;
             picParams.encodePicFlags |= NV_ENC_PIC_FLAG_FORCEIDR;
             pPicParams = &picParams;
             m_LastIdrTime = nowForIdr; // remember we requested one
+            m_ForcedIdrRequests++;
         }
         m_pEncoder->EncodeFrame(vPacket, pPicParams);
 
@@ -970,17 +1049,26 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
                     uint32_t skippedDelta = m_SkippedRateLimit - m_LastStatSkipped;
                     uint64_t rtpPktDelta = m_SentRtpPackets - m_LastStatRtpPackets;
                     uint64_t rtpBytesDelta = m_SentRtpBytes - m_LastStatRtpBytes;
+                    uint64_t idrReqDelta = m_ForcedIdrRequests - m_LastStatForcedIdrRequests;
+                    uint64_t rtpFrameDelta = m_SentRtpFrames - m_LastStatRtpFrames;
+                    uint64_t rtpKeyframeDelta = m_SentRtpKeyframes - m_LastStatRtpKeyframes;
                     m_LastStatEncoded = m_nEncodedFrames;
                     m_LastStatCalls = m_TotalEncodeCalls;
                     m_LastStatSkipped = m_SkippedRateLimit;
                     m_LastStatRtpPackets = m_SentRtpPackets;
                     m_LastStatRtpBytes = m_SentRtpBytes;
+                    m_LastStatForcedIdrRequests = m_ForcedIdrRequests;
+                    m_LastStatRtpFrames = m_SentRtpFrames;
+                    m_LastStatRtpKeyframes = m_SentRtpKeyframes;
                     std::cout << "[NVENC] FPS: " << fps
                               << " reliability: " << rel << "%"
                               << " calls/s: " << callsDelta
                               << " encoded/s: " << encodedDelta
                               << " rateLimited/s: " << skippedDelta
                               << " cap: " << GetFpsCap() << "fps"
+                              << " idrReq/s: " << idrReqDelta
+                              << " rtpFrames/s: " << rtpFrameDelta
+                              << " keyframes/s: " << rtpKeyframeDelta
                               << " rtp/s: " << rtpPktDelta
                               << " bytes/s: " << rtpBytesDelta
                               << std::endl;
@@ -991,6 +1079,9 @@ void CNvencStream::EncodeFrame(ID3D11DeviceContext* pContext, ID3D11Texture2D* p
                                      << " encoded/s: " << encodedDelta
                                      << " rateLimited/s: " << skippedDelta
                                      << " cap: " << GetFpsCap() << "fps"
+                                     << " idrReq/s: " << idrReqDelta
+                                     << " rtpFrames/s: " << rtpFrameDelta
+                                     << " keyframes/s: " << rtpKeyframeDelta
                                      << " rtp/s: " << rtpPktDelta
                                      << " bytes/s: " << rtpBytesDelta
                                      << std::endl;
@@ -1158,17 +1249,44 @@ void CNvencStream::ProcessEncodedFrame(const std::vector<uint8_t>& frameData)
 
         // Send with marker on last NAL
         if (!finalNals.empty()) {
-            // Timestamp based on elapsed real time (90 kHz clock)
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed90k = std::chrono::duration_cast<std::chrono::microseconds>(now - m_RtpStartTime).count() * 90 / 1000;
-            m_RtpTimestamp = static_cast<uint32_t>(elapsed90k);
-            uint64_t senderTimestampUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count());
+            auto sendStart = std::chrono::steady_clock::now();
+            uint64_t packetsBefore = m_SentRtpPackets.load();
+            uint64_t bytesBefore = m_SentRtpBytes.load();
+
+            // Use a stable frame timeline for RTP/custom timestamps instead of send time.
+            // This prevents encode/send jitter from becoming receiver playout jitter.
+            uint64_t frameDurationUs = m_TargetFrameTime.count() > 0
+                ? static_cast<uint64_t>(m_TargetFrameTime.count())
+                : 16667ULL;
+            uint64_t stableTimestampUs = m_RtpStableTimestampUs;
+            m_RtpTimestamp = static_cast<uint32_t>((stableTimestampUs * 90ULL) / 1000ULL);
+            uint64_t senderTimestampUs = m_RtpSenderStartTimestampUs + stableTimestampUs;
+            m_RtpStableTimestampUs += frameDurationUs;
 
             for (size_t i = 0; i < finalNals.size(); ++i) {
                 const auto& nal = finalNals[i];
                 bool lastNal = (i + 1 == finalNals.size());
                 SendRtpPacket(nal.data, nal.size, lastNal, senderTimestampUs);
+            }
+
+            auto sendEnd = std::chrono::steady_clock::now();
+            uint64_t framePackets = m_SentRtpPackets.load() - packetsBefore;
+            uint64_t frameBytes = m_SentRtpBytes.load() - bytesBefore;
+            auto sendDurationUs = std::chrono::duration_cast<std::chrono::microseconds>(sendEnd - sendStart).count();
+            m_SentRtpFrames++;
+            if (hasIdr) {
+                m_SentRtpKeyframes++;
+            }
+
+            if (m_DebugStatsEnabled && m_pDebugLog && m_pDebugLog->is_open()) {
+                *m_pDebugLog << "[RTP frame] keyframe=" << (hasIdr ? 1 : 0)
+                             << " nals=" << finalNals.size()
+                             << " packets=" << framePackets
+                             << " bytes=" << frameBytes
+                             << " sendUs=" << sendDurationUs
+                             << " rtpTs=" << m_RtpTimestamp
+                             << std::endl;
+                m_pDebugLog->flush();
             }
         }
     }

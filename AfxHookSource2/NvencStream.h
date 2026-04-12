@@ -40,6 +40,9 @@ public:
     /// Stop encoding and cleanup
     void Stop();
 
+    /// Request the next encoded frame to be an IDR frame
+    bool RequestIdr();
+
     /// Check if encoder is active
     bool IsActive() const { return m_bActive; }
 
@@ -143,11 +146,21 @@ private:
     uint16_t m_DestPort = 0;
     uint32_t m_RtpSequence;
     uint32_t m_RtpTimestamp;
+    uint64_t m_RtpStableTimestampUs = 0;
+    uint64_t m_RtpSenderStartTimestampUs = 0;
     uint32_t m_RtpSsrc;
     std::string m_SdpPath;
     std::vector<uint8_t> m_Sps;
     std::vector<uint8_t> m_Pps;
     bool m_bSentKeyframe;
+    std::atomic<bool> m_bForceIdrRequested = false;
+    uint32_t m_IntraRefreshPeriodFrames = 60;
+    std::atomic<uint64_t> m_ForcedIdrRequests = 0;
+    std::atomic<uint64_t> m_SentRtpFrames = 0;
+    std::atomic<uint64_t> m_SentRtpKeyframes = 0;
+    uint64_t m_LastStatForcedIdrRequests = 0;
+    uint64_t m_LastStatRtpFrames = 0;
+    uint64_t m_LastStatRtpKeyframes = 0;
     std::chrono::steady_clock::time_point m_RtpStartTime;
     std::chrono::steady_clock::time_point m_LastIdrTime;
 
