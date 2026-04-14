@@ -1229,8 +1229,8 @@ void CNvencStream::ProcessEncodedFrame(const std::vector<uint8_t>& frameData)
             m_bSentKeyframe = true;
         }
 
-        // Debug dump: write the reconstructed access unit as Annex-B to rtp_debug.h264
-        {
+        // Debug dump: write the reconstructed access unit as Annex-B to rtp_debug.h264.
+        if (m_DebugStatsEnabled) {
             static bool s_DebugInit = false;
             static std::ofstream s_RtpDebug;
             if (!s_DebugInit) {
