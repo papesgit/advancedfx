@@ -1109,6 +1109,8 @@ void __fastcall handleDeathnotice(u_char* hudDeathNotice, SOURCESDK::CS2::IGameE
 	if (myWrapper.lifetime.use) {
 		*pDeathNoticeLifetime = orgDeathNoticeLifetime;
 	}
+
+	g_MirvDeathMsgGlobals.activeWrapper = nullptr;
 };
 
 
