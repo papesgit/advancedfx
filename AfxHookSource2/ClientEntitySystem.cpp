@@ -215,7 +215,7 @@ SOURCESDK::CS2::CBaseHandle CEntityInstance::GetHandle() {
 typedef	void (__fastcall * org_LookupAttachment_t)(void* This, uint8_t& outIdx, const char* attachmentName);
 org_LookupAttachment_t org_LookupAttachment = nullptr;
 
-typedef	bool (__fastcall * org_GetAttachment_t)(void* This, uint8_t idx, void* out);
+typedef	bool (__fastcall * org_GetAttachment_t)(void* This, void* out, uint8_t idx);
 org_GetAttachment_t org_GetAttachment = nullptr;
 
 uint8_t CEntityInstance::LookupAttachment(const char* attachmentName) {
@@ -227,7 +227,7 @@ uint8_t CEntityInstance::LookupAttachment(const char* attachmentName) {
 bool CEntityInstance::GetAttachment(uint8_t idx, SOURCESDK::Vector &origin, SOURCESDK::Quaternion &angles) {
 	alignas(16) float resData[8] = {0};
 
-	if(org_GetAttachment(this, idx, resData)) {
+	if(org_GetAttachment(this, resData, idx)) {
 		origin.x = resData[0];
 		origin.y = resData[1];
 		origin.z = resData[2];
@@ -405,10 +405,15 @@ void Hook_ClientEntitySystem3(HMODULE clientDll) {
 	// Function where they called has "muzzle_flash" string
 	// also called in other functions near strings "attachment_point", "attachment"
 
-	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 0F B6 95 00 03 00 00 4C 8D 44 24 ?? 48 8B CB E8 ?? ?? ?? ??")) {
+	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 0F B6 95 00 03 00 00")) {
 		org_LookupAttachment = (org_LookupAttachment_t)(startAddr + 5 + *(int32_t*)(startAddr + 1));
-		org_GetAttachment = (org_GetAttachment_t)(startAddr + 21 + 5 + *(int32_t*)(startAddr + 21 + 1));
 	} else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+	// near ag1_hand_r and weapon_hand_r
+	if (auto startAddr = getAddress(clientDll, "44 8B C0 E8 ?? ?? ?? ?? 0F 28 00")) {
+		org_GetAttachment = (org_GetAttachment_t)(startAddr + 3 + 5 + *(int32_t*)(startAddr + 3 + 1));
+	} else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
 }
 
 int GetHighestEntityIndex() {
