@@ -215,7 +215,7 @@ SOURCESDK::CS2::CBaseHandle CEntityInstance::GetHandle() {
 typedef	void (__fastcall * org_LookupAttachment_t)(void* This, uint8_t& outIdx, const char* attachmentName);
 org_LookupAttachment_t org_LookupAttachment = nullptr;
 
-typedef	bool (__fastcall * org_GetAttachment_t)(void* This, void* out, uint8_t idx);
+typedef	bool (__fastcall * org_GetAttachment_t)(void* This, uint8_t idx, void* out);
 org_GetAttachment_t org_GetAttachment = nullptr;
 
 uint8_t CEntityInstance::LookupAttachment(const char* attachmentName) {
@@ -227,7 +227,7 @@ uint8_t CEntityInstance::LookupAttachment(const char* attachmentName) {
 bool CEntityInstance::GetAttachment(uint8_t idx, SOURCESDK::Vector &origin, SOURCESDK::Quaternion &angles) {
 	alignas(16) float resData[8] = {0};
 
-	if(org_GetAttachment(this, resData, idx)) {
+	if(org_GetAttachment(this, idx, resData)) {
 		origin.x = resData[0];
 		origin.y = resData[1];
 		origin.z = resData[2];
@@ -381,39 +381,45 @@ bool Hook_ClientEntitySystem2() {
 
 void Hook_ClientEntitySystem3(HMODULE clientDll) {
 	// these two called one after each other
+	// there is only one placed where they are called together
 	//
-    //                       LAB_1807b3a68                                   XREF[3]:     1807b3a1e (j) , 1807b3a2a (j) , 
-    //                                                                                    1807b3a63 (j)   
-    // 1807b3a68 48  85  db       TEST       RBX ,RBX
-    // 1807b3a6b 0f  84  82       JZ         LAB_1807b3af3
-    //           00  00  00
-    // 1807b3a71 4c  8d  05       LEA        R8,[s_muzzle_flash_181a3eab8 ]                   = "muzzle_flash"
-    //           40  b0  28  01
-    // 1807b3a78 48  8b  cb       MOV        RCX ,RBX
-    // 1807b3a7b 48  8d  95       LEA        RDX =>local_res8 ,[RBP  + 0x300 ]
-    //           00  03  00  00
-    // 1807b3a82 e8  99  d2       CALL       FUN_1808c0d20                                    undefined FUN_1808c0d20()
-    //           10  00
-    // 1807b3a87 0f  b6  95       MOVZX      EDX ,byte ptr [RBP  + local_res8 ]
-    //           00  03  00  00
-    // 1807b3a8e 4c  8d  44       LEA        R8=>local_3b8 ,[RSP  + 0x40 ]
-    //           24  40
-    // 1807b3a93 48  8b  cb       MOV        RCX ,RBX
-    // 1807b3a96 e8  b5  dd       CALL       FUN_1808b1850                                    undefined FUN_1808b1850()
-    //           0f  00
+	//                             LAB_1802066cd                                   XREF[1]:     18020660b (j)   
+    // 1802066cd 8b  4f  6c       MOV        ECX ,dword ptr [RDI  + 0x6c ]
+    // 1802066d0 83  e9  01       SUB        ECX ,0x1
+    // 1802066d3 0f  84  3d       JZ         LAB_180206816
+    //           01  00  00
+    // 1802066d9 83  f9  01       CMP        ECX ,0x1
+    // 1802066dc 75  4c           JNZ        LAB_18020672a
+    // 1802066de 4c  8b  47  30    MOV        R8,qword ptr [RDI  + 0x30 ]
+    // 1802066e2 48  8d  95       LEA        RDX =>Stack [0x28 ],[RBP  + 0xc0 ]
+    //           c0  00  00  00
+    // 1802066e9 48  8b  ce       MOV        RCX ,RSI
+    // 1802066ec e8  9f  bf       CALL       FUN_1808c2690                                    undefined FUN_1808c2690()
+    //           6b  00
+    // 1802066f1 0f  b6  95       MOVZX      EDX ,byte ptr [RBP  + Stack [0x28 ]]
+    //           c0  00  00  00
+    // 1802066f8 84  d2           TEST       DL,DL
+    // 1802066fa 74  29           JZ         LAB_180206725
+    // 1802066fc 4c  8d  45  b0    LEA        R8=>local_e8 ,[RBP  + -0x50 ]
+    // 180206700 48  8b  ce       MOV        RCX ,RSI
+    // 180206703 e8  78  ca       CALL       FUN_1808b3180                                    undefined FUN_1808b3180()
 	//
-	// Function where they called has "muzzle_flash" string
-	// also called in other functions near strings "attachment_point", "attachment"
+	// to find this place find function with 5 arguments near "Unable to create non-precached breakable%s\n"
+	// then in that function find place like this
+	//
+	//   else if (((*(int *)((longlong)param_4 + 0x6c) == 2) &&
+    //          (FUN_1808c2690(param_3,&param_5,param_4[6]), (char)param_5 != '\0')) &&
+    //         (FUN_1808b3180(param_3,(char)param_5,&local_e8), cVar2 != '\0')) {
+    //   FUN_1815f22b0(param_2,(char)param_5,local_158,&local_108);
+    // }
+	//
+	// first function can be found near "attachment_point" or called with "muzzle_flash" as last arg
+	// second function in some places can be found with offset to m_nAttachmentIndex of CEffectData as 2nd arg
 
-	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 0F B6 95 00 03 00 00")) {
+	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 0F B6 95 ?? ?? ?? ?? 84 D2 74 29 4C 8D 45 B0 48 8B CE E8 ?? ?? ?? ??")) {
 		org_LookupAttachment = (org_LookupAttachment_t)(startAddr + 5 + *(int32_t*)(startAddr + 1));
+		org_GetAttachment = (org_GetAttachment_t)(startAddr + 23 + 5 + *(int32_t*)(startAddr + 23 + 1));
 	} else ErrorBox(MkErrStr(__FILE__, __LINE__));
-
-	// near ag1_hand_r and weapon_hand_r
-	if (auto startAddr = getAddress(clientDll, "44 8B C0 E8 ?? ?? ?? ?? 0F 28 00")) {
-		org_GetAttachment = (org_GetAttachment_t)(startAddr + 3 + 5 + *(int32_t*)(startAddr + 3 + 1));
-	} else ErrorBox(MkErrStr(__FILE__, __LINE__));
-
 }
 
 int GetHighestEntityIndex() {
