@@ -404,7 +404,6 @@ CAfxImportsHook g_Import_sdl2(CAfxImportsHooks({
 	&g_Import_sdl2_USER32,
 	& g_Import_sdl2_GDI32 }));
 
-
 void HookHw(HMODULE hHw)
 {
 	static bool firstRun = true;

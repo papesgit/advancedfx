@@ -1972,6 +1972,29 @@ ClearDepthStencilView_t g_Old_ClearDepthStencilView = nullptr;
 ID3D11RenderTargetView * g_pCurrentRenderTargetView = nullptr;
 ID3D11DepthStencilView * g_pCurrentDepthStencilView = nullptr;
 
+void MaybeCaptureSmokeDepth() {
+    if (g_bDetectedSmoke && g_pSmokeDepthStencilView) {
+        ID3D11DepthStencilView* pCurrentDepthStencilView = nullptr;
+        ID3D11DepthStencilView* pNullDepthStencilView = nullptr;
+        g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
+
+        if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
+            g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pNullDepthStencilView);
+        }
+
+        g_DepthCompositor.CaptureSmokeDepth(g_pImmediateContext, g_pSmokeDepthStencilView);
+
+        if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
+            g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
+        }
+
+        if (pCurrentDepthStencilView) pCurrentDepthStencilView->Release();
+
+        g_pSmokeDepthStencilView = nullptr;
+        g_bDetectedSmoke = false;
+    }
+}
+
 void STDMETHODCALLTYPE New_ClearDepthStencilView( ID3D11DeviceContext * This, 
     _In_  ID3D11DepthStencilView *pDepthStencilView,
     _In_  UINT ClearFlags,
@@ -1979,26 +2002,7 @@ void STDMETHODCALLTYPE New_ClearDepthStencilView( ID3D11DeviceContext * This,
     _In_  UINT8 Stencil) {
 
     if (This == g_pImmediateContext && g_bInOwnDraw == false) {
-        if (g_bDetectedSmoke && g_pSmokeDepthStencilView) {
-            ID3D11DepthStencilView* pCurrentDepthStencilView = nullptr;
-            ID3D11DepthStencilView* pNullDepthStencilView = nullptr;
-            g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
-
-            if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
-                g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pNullDepthStencilView);
-            }
-
-            g_DepthCompositor.CaptureSmokeDepth(g_pImmediateContext, g_pSmokeDepthStencilView);
-
-            if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
-                g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
-            }
-
-            if (pCurrentDepthStencilView) pCurrentDepthStencilView->Release();
-
-            g_pSmokeDepthStencilView = nullptr;
-            g_bDetectedSmoke = false;
-        }
+        MaybeCaptureSmokeDepth();
     }
 
     g_Old_ClearDepthStencilView(This, pDepthStencilView, ClearFlags, Depth, Stencil);
@@ -2162,6 +2166,7 @@ public:
 
     virtual void OnCallback(void) {
         if (g_pImmediateContext) {
+            MaybeCaptureSmokeDepth();
             g_bDetectSmoke = false;
         }
         delete this;
@@ -2863,7 +2868,7 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr1(unsigned char
 		//   }
 
         if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderConStextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
+            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderConStextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[140];
             va_list args;
             va_start(args, fmt);
             fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CRenderSystemConsolePrint(1, saveFmt,args));
@@ -2879,13 +2884,13 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr1(unsigned char
         if(pszArg0 && 0 == strcmp("Player 0",pszArg0) && pszArg1) {
             if (0 == strcmp("ClearSmokeTargets (4)", pszArg1)) {
                 if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
+                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[140];
                     fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackBeforeMaybeDrawSmoke());
                 }
             }
             else if (0 == strcmp("ClearSmokeTargets", pszArg1)) {
                 if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
+                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[140];
                     fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackAfterMaybeSmokeDrawn());
                 }
             }
@@ -2898,7 +2903,7 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr1(unsigned char
         const char * pszArg0 = va_arg(args, const char *);
         if(pszArg0 && 0 == strcmp("CSGOHud",pszArg0)) {
             if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-                auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
+                auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[140];
                 fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackBeforeUi());
             }
         }
@@ -2917,7 +2922,7 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr2(unsigned char
 
     if (fmt && 0 == strcmp(fmt, "UpdateBuffers")) {
         if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
+            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[140];
             fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackUpdateBuffers());
         }
     }
@@ -2942,7 +2947,7 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr2(unsigned char
         const char * saveFmt = fmt ? fmt : "[nullptr]";
 
         if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
+            auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[140];
             va_list args;
             va_start(args, fmt);
             fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CRenderSystemConsolePrint(2, saveFmt, args));
@@ -4805,7 +4810,6 @@ void CAfxStreams::RecordStart()
                     g_bCompositeSmoke = true;
                 });
             }
-            m_CompositeSmoke = false;
         }
 
 		advancedfx::Message("done.\n");

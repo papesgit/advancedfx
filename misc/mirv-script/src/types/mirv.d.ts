@@ -11,12 +11,12 @@ declare namespace mirv {
 	/*
 	 * Since HLAE 2.171.0
 	 */
-	let onRecordStart: undefined | OnRecordEnd;
+	let onRecordStart: undefined | OnRecordStart;
 
 	/*
 	 * Since HLAE 2.171.0
 	 */
-	let onRecordEnd: undefined | OnRecordStart;
+	let onRecordEnd: undefined | OnRecordEnd;
 
 	/**
 	 * Allows to handle game event system events.
