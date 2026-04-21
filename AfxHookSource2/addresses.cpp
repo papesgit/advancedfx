@@ -227,7 +227,7 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
       {
             MemRange result = FindPatternString(
                   textRange,
-                  "48 8B C4 48 89 58 18 55 56 57 41 54 41 56 48 8D 68 B9 48 81 EC A0 00 00 00 48 8B 5D 6F 49 8B F9 49 8B F0 4C 8B F2 4C 8B E1 48 85 DB 0F 84 ?? ?? ?? ?? 4C 89 68 08 48 8B CB 4C 89 78 10 48 8B 03 FF 90 08 02 00 00"
+                  "48 8B C4 48 89 58 18 48 89 68 20 56 57 41 54 48 81 EC A0 00 00 00"
             );
 
             if (!result.IsEmpty()) {
@@ -296,12 +296,12 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
       {
             MemRange result = FindPatternString(
                   textRange,
-                  "48 8B 0D ?? ?? ?? ?? 4C 8D 4C 24 30 4C 8D 44 24 40 4C 89 6C 24 28 48 8D 54 24 70 48 89 74 24 20 E8 ?? ?? ?? ??"
+                  "48 8B 0D ?? ?? ?? ?? 48 8D 54 24 50 4C 8B CE 4C 89 64 24 28 4D 8B C5 48 89 5C 24 20 E8 ?? ?? ?? ?? EB ??"
             );
 
             if (!result.IsEmpty()) {
                   const AfxAddr movContextInsn = result.Start + 0; // 48 8B 0D rel32
-                  const AfxAddr callInsn = result.Start + 32;      // E8 rel32
+                  const AfxAddr callInsn = result.Start + 28;      // E8 rel32
 
                   const AfxAddr traceContextPtr = DecodeRipRel32Target(movContextInsn, 3, 7);
                   const AfxAddr callTarget = DecodeRipRel32Target(callInsn, 1, 5);
@@ -324,12 +324,12 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
       {
             MemRange result = FindPatternString(
                   textRange,
-                  "48 8D 05 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? C3 CC 48 83 EC 28 48 8B 15 ?? ?? ?? ?? 48 83 FA 0F 76 30"
+                  "48 83 C4 28 E9 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? E9 ?? ?? ?? ?? CC CC CC CC 48 8D 05 ?? ?? ?? ?? 48 89 05 ?? ?? ?? ?? C3 CC"
             );
 
             if (!result.IsEmpty()) {
-                  const AfxAddr leaFilterVftInsn = result.Start + 0; // 48 8D 05 rel32
-                  const AfxAddr movFilterPtrInsn = result.Start + 7; // 48 89 05 rel32
+                  const AfxAddr leaFilterVftInsn = result.Start + 0x19; // 48 8D 05 rel32
+                  const AfxAddr movFilterPtrInsn = result.Start + 0x20; // 48 89 05 rel32
 
                   const AfxAddr filterVftAddress = DecodeRipRel32Target(leaFilterVftInsn, 3, 7);
                   const AfxAddr filterPtrAddress = DecodeRipRel32Target(movFilterPtrInsn, 3, 7);

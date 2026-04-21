@@ -2936,7 +2936,7 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr2(unsigned char
             const uint64_t setupSerial = RenderedSetup_GetLatestCandidateSerial();
             if (setupSerial) {
                 if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[137];
+                    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[140];
                     fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackPlayerSetupViewRendered(setupSerial));
                 }
             }
