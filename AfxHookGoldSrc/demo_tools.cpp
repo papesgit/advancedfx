@@ -131,13 +131,14 @@ void install_tour_CL_ParseServerMessage_CmdRead()
 
 	if(
 		AFXADDR_GET(CL_ParseServerMessage_CmdRead)
+		&& AFXADDR_GET(CL_ParseServerMessage_CmdRead_MsgReadByte_CallAddrOfs)
 		&& AFXADDR_GET(msg_readcount)
 		&& AFXADDR_GET(net_message)
 	) {
 		dwHL_ADDR_CL_ParseServerMessage_CmdRead_continue = (size_t)DetourApply((BYTE *)HL_ADDR_GET(CL_ParseServerMessage_CmdRead),(BYTE *)tour_CL_ParseServerMessage_CmdRead,HL_ADDR_GET(CL_ParseServerMessage_CmdRead_DSZ));
 
 		// adjust call in detoured part:
-		size_t *pdwFixAdr = (size_t *)((char *)dwHL_ADDR_CL_ParseServerMessage_CmdRead_continue + 0x07);
+		size_t *pdwFixAdr = (size_t *)((char *)dwHL_ADDR_CL_ParseServerMessage_CmdRead_continue + AFXADDR_GET(CL_ParseServerMessage_CmdRead_MsgReadByte_CallAddrOfs));
 
 		size_t dwAdr = *pdwFixAdr;
 

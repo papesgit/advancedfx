@@ -2583,8 +2583,8 @@ private:
 			}
 		}
 		if(pResult) {
-			static_cast<CRefCountedThreadSafe *>(pResult)->AddRef(); // for the caller
 			this->AddRef();
+			static_cast<IAfxD3D9CaptureBuffer *>(pResult)->AddRef(); // for the caller
 		}
 		return pResult;
 	}
@@ -2607,7 +2607,8 @@ private:
 		: m_pCapture(pCapture)
 		, m_ImageFormat()
 		, m_pData(nullptr)
-		, m_LockedCount(0)
+		, m_CaptureRefCount(0)
+		, m_LockedRefCount(0)
 		, m_pOffscreenSurface(pOffscreenSurface)
 		{
 			m_pOffscreenSurface->AddRef();
@@ -2615,9 +2616,13 @@ private:
 
 		virtual void IAfxD3D9CaptureBuffer::AddRef() override {
 			TRefCounted<true>::AddRef();
+			m_CaptureRefCount++;
 		}
 
 		virtual void IAfxD3D9CaptureBuffer::Release() override {
+			if(1 == std::atomic_fetch_sub_explicit(&m_CaptureRefCount, 1, std::memory_order_relaxed)) {
+				m_pCapture->ReturnOffscreen(this);
+			}
 			TRefCounted<true>::Release();
 		}
 
@@ -2639,12 +2644,13 @@ private:
 		CAfxD3D9Capture * m_pCapture;
 		advancedfx::CImageFormat m_ImageFormat;
 		const void * m_pData;
-		std::atomic_int m_LockedCount;
+		std::atomic_int m_LockedRefCount;
+		std::atomic_int m_CaptureRefCount;
 		IDirect3DSurface9 * m_pOffscreenSurface = nullptr;
 
 		virtual void advancedfx::IImageBufferThreadSafe::AddRef() override {
-			TRefCounted<true>::AddRef();
-			if(0 == std::atomic_fetch_add_explicit(&m_LockedCount, 1, std::memory_order_relaxed)) {
+			static_cast<IAfxD3D9CaptureBuffer *>(this)->AddRef();
+			if(0 == std::atomic_fetch_add_explicit(&m_LockedRefCount, 1, std::memory_order_relaxed)) {
 				// Buffer is about to be accessed the first time.
 				if(nullptr != m_pOffscreenSurface) {
 					D3DSURFACE_DESC desc;
@@ -2672,18 +2678,16 @@ private:
 		}
 
 		virtual void advancedfx::IImageBufferThreadSafe::Release() override {
-			if(1 == std::atomic_fetch_sub_explicit(&m_LockedCount, 1, std::memory_order_relaxed)) {
+			if(1 == std::atomic_fetch_sub_explicit(&m_LockedRefCount, 1, std::memory_order_relaxed)) {
 				// Buffer is about to be accessed the last time.
 				if(nullptr != m_pOffscreenSurface) {
 					m_pOffscreenSurface->UnlockRect();
 					
 					m_ImageFormat = advancedfx::CImageFormat();
 					m_pData = nullptr;
-
-					m_pCapture->ReturnOffscreen(this);
 				}
 			}
-			TRefCounted<true>::Release();
+			static_cast<IAfxD3D9CaptureBuffer *>(this)->Release();
 		}
 
 		virtual const advancedfx::CImageFormat * GetImageBufferFormat() const override {
@@ -6281,6 +6285,7 @@ struct NewDirect3D9
 		if (D3DCREATE_ADAPTERGROUP_DEVICE & BehaviorFlags) return D3DERR_NOTAVAILABLE; //TODO: Support this code path?
 
 		BehaviorFlags = BehaviorFlags & ~(DWORD)D3DCREATE_PUREDEVICE; // We want state tracking actually.
+		BehaviorFlags = BehaviorFlags | D3DCREATE_MULTITHREADED; // We want multi-threaded support actually (queued rendering games in queued mode such as CS:GO use this anyways)
 
 		HRESULT hRet = D3DERR_NOTAVAILABLE;
 
@@ -6366,6 +6371,7 @@ struct NewDirect3D9
 		D3DDISPLAYMODE displayMode;
 
 		BehaviorFlags = BehaviorFlags & ~(DWORD)D3DCREATE_PUREDEVICE; // We want state tracking actually.
+		BehaviorFlags = BehaviorFlags | D3DCREATE_MULTITHREADED; // We want multi-threaded support actually (queued rendering games in queued mode such as CS:GO use this anyways).
 
 		if (pPresentationParameters) FixPresentationParementers(pPresentationParameters);
 

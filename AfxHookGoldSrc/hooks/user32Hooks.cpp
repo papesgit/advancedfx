@@ -3,6 +3,7 @@
 #include "user32Hooks.h"
 
 #include "../AfxSettings.h"
+#include "../AfxSteamLegacy.h"
 #include "../supportrender.h"
 #include "../mirv_input.h"
 
@@ -102,7 +103,10 @@ CAfxImportFuncHookBase* Get_Import_USER32_CreateWindowExW() {
 }
 HWND APIENTRY NewCreateWindowExW(DWORD dwExStyle,LPCWSTR lpClassName,LPCWSTR lpWindowName,DWORD dwStyle,int x,int y,int nWidth,int nHeight,HWND hWndParent,HMENU hMenu,HINSTANCE hInstance,LPVOID lpParam)
 {
-	if (NULL != hWndParent || 0 == HIWORD(lpClassName) || 0 != lstrcmpW(L"SDL_app",lpClassName) || 0 != lstrcmpW(L"",lpWindowName))
+	if (
+		NULL != hWndParent || 0 != lstrcmpW(L"",lpWindowName)
+		|| AfxSteamLegacy() && (0 == HIWORD(lpClassName) || 0 != lstrcmpW(L"SDL_app",lpClassName))
+	)
 		// it's not the window we want.
 		return Get_Import_USER32_CreateWindowExW_Internal()->TrueFunc(dwExStyle,lpClassName,lpWindowName,dwStyle,x,y,nWidth,nHeight,hWndParent,hMenu,hInstance,lpParam);
 

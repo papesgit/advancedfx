@@ -1485,7 +1485,7 @@ void HookClientDll(HMODULE clientDll) {
 
 	*/
 	{
-		Afx::BinUtils::MemRange result = FindPatternString(textRange, "48 8b 0d ?? ?? ?? ?? 48 8b 01 ff 90 48 01 00 00 0f 57 ff 84 c0 74 63 ba ff ff ff ff");
+		Afx::BinUtils::MemRange result = FindPatternString(textRange, "48 8b 0d ?? ?? ?? ?? 48 8b 01 ff 90 50 01 00 00 0f 57 ff 84 c0 74 63 ba ff ff ff ff");
 																	  
 		if (!result.IsEmpty()) {
 			/*
@@ -1869,6 +1869,8 @@ typedef void (* CS2_Client_FrameStageNotify_t)(void* This, SOURCESDK::CS2::Clien
 CS2_Client_FrameStageNotify_t old_CS2_Client_FrameStageNotify;
 
 void  new_CS2_Client_FrameStageNotify(void* This, SOURCESDK::CS2::ClientFrameStage_t curStage) {
+	
+	AfxHookSource2Rs_Engine_RunJobQueue();
 
 	/*
 	// React to demo being paused / unpaused to work around Valve's new bandaid client time "fix":
@@ -1936,11 +1938,7 @@ void  new_CS2_Client_FrameStageNotify(void* This, SOURCESDK::CS2::ClientFrameSta
 
 	AfxHookSource2Rs_Engine_OnClientFrameStageNotify(curStage, false);
 
-	switch(curStage) {
-	case SOURCESDK::CS2::FRAME_RENDER_PASS:
-		AfxHookSource2Rs_Engine_RunJobQueue();
-		break;
-	}
+	AfxHookSource2Rs_Engine_RunJobQueue();
 }
 
 

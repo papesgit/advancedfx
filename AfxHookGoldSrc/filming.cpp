@@ -1348,7 +1348,6 @@ void GLfloatArrayToXByteArray(GLfloat *pBuffer, unsigned int width, unsigned int
 	};
 }
 
-
 Filming::DRAW_RESULT Filming::shouldDraw(GLenum mode)
 {
 	bool bMatteXray = 0 != matte_xray->value ;
@@ -1381,12 +1380,18 @@ Filming::DRAW_RESULT Filming::shouldDraw(GLenum mode)
 		return bParticleWorld | bParticleEntity ? DR_NORMAL : DR_HIDE;
 	}
 
-	// in R_DrawEntitiesOnList:
-	else if(g_In_R_DrawEntitiesOnList) {
-		cl_entity_t *ce = pEngStudio->GetCurrentEntity();
+	// in R_DrawViewModel
+	else if(g_In_R_DrawViewModel) {
+		switch(m_iMatteStage) {
+		case MS_WORLD:
+			return bViewModelWorld ? DR_NORMAL : DR_HIDE;
+		case MS_ENTITY:
+			return bViewModelEntity ? DR_NORMAL : (bMatteXray ? DR_HIDE : DR_MASK );
+		};
+		return bViewModelWorld | bViewModelEntity ? DR_NORMAL : DR_HIDE;
+	}
 
-		if(!ce)
-			return DR_NORMAL;
+	if(cl_entity_t *ce = pEngStudio->GetCurrentEntity()) {
 
 		// Apply entity Filter list:
 		if (bFilterEntities) {
@@ -1400,47 +1405,38 @@ Filming::DRAW_RESULT Filming::shouldDraw(GLenum mode)
 			return bActive ? DR_NORMAL : DR_HIDE;
 		}
 
-		// w_* models_:
-		else if(ce->model && ce->model->type == mod_brush && strncmp(ce->model->name, "maps/", 5) != 0) {
+		if(ce->index) {
+			// w_* models_:
+			if(ce->model && ce->model->type == mod_brush && strncmp(ce->model->name, "maps/", 5) != 0) {
+				switch(m_iMatteStage) {
+				case MS_WORLD:
+					return bWmodelWorld ? DR_NORMAL : DR_HIDE;
+				case MS_ENTITY:
+					return bWmodelEntity ? DR_NORMAL : (bMatteXray ? DR_HIDE : DR_MASK );
+				};
+				return bWmodelWorld | bWmodelEntity ? DR_NORMAL : DR_HIDE;
+			}
+
+			// QUADS, such as blood sprites:
+			else if(mode == GL_QUADS) {
+				switch(m_iMatteStage) {
+				case MS_WORLD:
+					return bEntityQuadWorld ? DR_NORMAL : DR_HIDE;
+				case MS_ENTITY:
+					return bEntityQuadEntity ? DR_NORMAL : DR_HIDE;
+				};
+				return bEntityQuadWorld | bEntityQuadEntity ? DR_NORMAL : DR_HIDE;
+			}
+
+			// Everything else in the entity list:
 			switch(m_iMatteStage) {
 			case MS_WORLD:
-				return bWmodelWorld ? DR_NORMAL : DR_HIDE;
+				return DR_HIDE;
 			case MS_ENTITY:
-				return bWmodelEntity ? DR_NORMAL : (bMatteXray ? DR_HIDE : DR_MASK );
+				return DR_NORMAL;
 			};
-			return bWmodelWorld | bWmodelEntity ? DR_NORMAL : DR_HIDE;
-		}
-
-		// QUADS, such as blood sprites:
-		else if(mode == GL_QUADS) {
-			switch(m_iMatteStage) {
-			case MS_WORLD:
-				return bEntityQuadWorld ? DR_NORMAL : DR_HIDE;
-			case MS_ENTITY:
-				return bEntityQuadEntity ? DR_NORMAL : DR_HIDE;
-			};
-			return bEntityQuadWorld | bEntityQuadEntity ? DR_NORMAL : DR_HIDE;
-		}
-
-		// Everything else in the entity list:
-		switch(m_iMatteStage) {
-		case MS_WORLD:
-			return DR_HIDE;
-		case MS_ENTITY:
 			return DR_NORMAL;
-		};
-		return DR_NORMAL;
-	}
-
-	// in R_DrawViewModel
-	else if(g_In_R_DrawViewModel) {
-		switch(m_iMatteStage) {
-		case MS_WORLD:
-			return bViewModelWorld ? DR_NORMAL : DR_HIDE;
-		case MS_ENTITY:
-			return bViewModelEntity ? DR_NORMAL : (bMatteXray ? DR_HIDE : DR_MASK );
-		};
-		return bViewModelWorld | bViewModelEntity ? DR_NORMAL : DR_HIDE;
+		}
 	}
 
 	// Everything else:
@@ -1931,21 +1927,20 @@ FilmingStream::FilmingStream(
 	switch(buffer) {
 	case FB_ALPHA:
 		imageFormat = advancedfx::ImageFormat::A;
-		pixelStride = 1;
+		pixelStride = sizeof(unsigned char);
 		break;
 
 	case FB_DEPTH:
 	 	imageFormat = advancedfx::ImageFormat::ZFloat;
+		pixelStride = sizeof(float);
 		if(0 == depth_exr->value)
 		{
 			switch ((unsigned char)depth_bpp->value) {
 			case 24:
 				m_DepthBytesPP = 3;
-				pixelStride = 3;
 				break;
 			default:
 				m_DepthBytesPP = 1;
-				pixelStride = 1;
 			}
 		}
 		break;
@@ -1953,7 +1948,7 @@ FilmingStream::FilmingStream(
 	case FB_COLOR:
 	default:
 	 	imageFormat = advancedfx::ImageFormat::BGR;
-		pixelStride = 3;
+		pixelStride = sizeof(unsigned char)*3;
 		break;
 	};
 
@@ -1978,7 +1973,7 @@ FilmingStream::FilmingStream(
 			sample_frame_strength->value
 		);
 
-		m_Sampler = new EasyByteSampler(
+		m_Sampler = new EasyByteSampler<false>(
 			settings,
 			static_cast<IFramePrinter<false> *>(this),
 			&Filming::ImageBufferPool
@@ -2001,7 +1996,7 @@ FilmingStream::FilmingStream(
 			sample_frame_strength->value
 		);
 
-		m_SamplerFloat = new EasyFloatSampler(
+		m_SamplerFloat = new EasyFloatSampler<false>(
 			settings,
 			static_cast<IFramePrinter<false> *>(this),
 			&Filming::ImageBufferPool
