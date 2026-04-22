@@ -6,6 +6,16 @@
 
 <release>
 <name>AfxHookSource2</name>
+<version>0.38.9</version>
+<time>2026-04-21T23:46Z</time>
+<changes>
+<change type="fixed">mirv-script: fixed Entity.getAttachment returning wrong values (thanks paper @papesgit for reporting/help)</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
 <version>0.38.8</version>
 <time>2026-04-20T23:50Z</time>
 <changes>
