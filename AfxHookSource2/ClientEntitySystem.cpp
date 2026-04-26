@@ -243,6 +243,35 @@ bool CEntityInstance::GetAttachment(uint8_t idx, SOURCESDK::Vector &origin, SOUR
 	return false;
 }
 
+typedef int (__fastcall * org_LookupBone_t)(void* This, const char* boneName);
+org_LookupBone_t org_LookupBone = nullptr;
+
+typedef void* (__fastcall * org_GetBone_t)(void* This, void* out, int idx);
+org_GetBone_t org_GetBone = nullptr;
+
+int CEntityInstance::LookupBone(const char* boneName) {
+	return org_LookupBone ? org_LookupBone(this, boneName) : -1;
+}
+
+bool CEntityInstance::GetBone(int idx, SOURCESDK::Vector &origin, SOURCESDK::Quaternion &angles) {
+	alignas(16) float resData[8] = {0};
+	if (idx < 0) return false;
+
+	if(org_GetBone && org_GetBone(this, resData, idx)) {
+		origin.x = resData[0];
+		origin.y = resData[1];
+		origin.z = resData[2];
+
+		angles.x = resData[4];
+		angles.y = resData[5];
+		angles.z = resData[6];
+		angles.w = resData[7];
+
+		return true;
+	}
+
+	return false;
+}
 class CAfxEntityInstanceRef {
 public:
     static CAfxEntityInstanceRef * Aquire(CEntityInstance * pInstance) {
@@ -419,6 +448,10 @@ void Hook_ClientEntitySystem3(HMODULE clientDll) {
 	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 0F B6 95 ?? ?? ?? ?? 84 D2 74 29 4C 8D 45 B0 48 8B CE E8 ?? ?? ?? ??")) {
 		org_LookupAttachment = (org_LookupAttachment_t)(startAddr + 5 + *(int32_t*)(startAddr + 1));
 		org_GetAttachment = (org_GetAttachment_t)(startAddr + 23 + 5 + *(int32_t*)(startAddr + 23 + 1));
+	} else ErrorBox(MkErrStr(__FILE__, __LINE__));
+	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 48 8B CF 85 C0 78 ?? 44 8B C0 48 8D 54 24 30 E8 ?? ?? ?? ??")) {
+		org_LookupBone = (org_LookupBone_t)(startAddr + 5 + *(int32_t*)(startAddr + 1));
+		org_GetBone = (org_GetBone_t)(startAddr + 20 + 5 + *(int32_t*)(startAddr + 20 + 1));
 	} else ErrorBox(MkErrStr(__FILE__, __LINE__));
 }
 

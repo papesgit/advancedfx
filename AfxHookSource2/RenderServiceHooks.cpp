@@ -2,6 +2,7 @@
 
 #include "RenderServiceHooks.h"
 
+#include "Cs2GameRecording.h"
 #include "RenderSystemDX11Hooks.h"
 
 #include "../shared/AfxDetours.h"
@@ -55,6 +56,8 @@ void __fastcall My_Engine2_RenderService_OnClientOutput(void * pUnk0, void * pUn
     RenderSystemDX11_EngineThread_BeforeRender();
 
     g_Engine2_RenderService_OnClientOutput(pUnk0,pUnk1);
+
+    Cs2Agr_OnMainRenderFrame();
 
     if(RenderSystemDX11_EngineThread_HasNextRenderPass()) {
 

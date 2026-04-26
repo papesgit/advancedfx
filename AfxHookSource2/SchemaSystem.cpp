@@ -93,10 +93,15 @@ void initSchemaSystemOffsets()
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_BaseEntity.m_iHealth, "client.dll", "C_BaseEntity", "m_iHealth");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_BaseEntity.m_hOwnerEntity, "client.dll", "C_BaseEntity", "m_hOwnerEntity");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_BaseEntity.m_iTeamNum, "client.dll", "C_BaseEntity", "m_iTeamNum");
+	bOk = bOk && getOffset(&g_clientDllOffsets.C_BaseModelEntity.m_CRenderComponent, "client.dll", "C_BaseModelEntity", "m_CRenderComponent");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_BaseModelEntity.m_Glow, "client.dll", "C_BaseModelEntity", "m_Glow");
+	bOk = bOk && getOffset(&g_clientDllOffsets.CRenderComponent.m_bEnableRendering, "client.dll", "CRenderComponent", "m_bEnableRendering");
 	bOk = bOk && getOffset(&g_clientDllOffsets.CGameSceneNode.m_pOwner, "client.dll", "CGameSceneNode", "m_pOwner");
 	bOk = bOk && getOffset(&g_clientDllOffsets.CGameSceneNode.m_pParent, "client.dll", "CGameSceneNode", "m_pParent");
+	bOk = bOk && getOffset(&g_clientDllOffsets.CGameSceneNode.m_pChild, "client.dll", "CGameSceneNode", "m_pChild");
+	bOk = bOk && getOffset(&g_clientDllOffsets.CGameSceneNode.m_pNextSibling, "client.dll", "CGameSceneNode", "m_pNextSibling");
 	bOk = bOk && getOffset(&g_clientDllOffsets.CGameSceneNode.m_vecAbsOrigin, "client.dll", "CGameSceneNode", "m_vecAbsOrigin");
+	bOk = bOk && getOffset(&g_clientDllOffsets.CGameSceneNode.m_angAbsRotation, "client.dll", "CGameSceneNode", "m_angAbsRotation");
 	bOk = bOk && getOffset(&g_clientDllOffsets.CBasePlayerController.m_iszPlayerName, "client.dll", "CBasePlayerController", "m_iszPlayerName");
 	bOk = bOk && getOffset(&g_clientDllOffsets.CBasePlayerController.m_steamID, "client.dll", "CBasePlayerController", "m_steamID");
 	bOk = bOk && getOffset(&g_clientDllOffsets.CBasePlayerController.m_hPawn, "client.dll", "CBasePlayerController", "m_hPawn");

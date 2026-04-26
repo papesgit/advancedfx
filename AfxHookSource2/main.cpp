@@ -31,6 +31,7 @@
 #include "FreecamController.h"
 #include "NadeCam.h"
 #include "PlayerPathDrawer.h"
+#include "Cs2GameRecording.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/AfxHookSource/SourceInterfaces.h"
@@ -2002,6 +2003,8 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	g_CurrentGameCamera.angles[1] = Ry;
 	g_CurrentGameCamera.angles[2] = Rz;
 	g_CurrentGameCamera.time = curTime;
+
+	Cs2Agr_OnSetupView(absTime, Tx, Ty, Tz, Rx, Ry, Rz, Fov);
 
 	return g_pEngineToClient->IsPlayingDemo();
 }
