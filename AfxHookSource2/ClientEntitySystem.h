@@ -63,6 +63,9 @@ public:
 
     uint8_t LookupAttachment(const char* attachmentName);
 	bool GetAttachment(uint8_t idx, SOURCESDK::Vector &origin, SOURCESDK::Quaternion &angles);
+
+    int LookupBone(const char* boneName);
+    bool GetBone(int idx, SOURCESDK::Vector &origin, SOURCESDK::Quaternion &angles);
 };
 
 typedef int (__fastcall * GetHighestEntityIndex_t)(void * pEntityList, bool bUnknown);
@@ -70,6 +73,7 @@ typedef void * (__fastcall * GetEntityFromIndex_t)(void * pEntityList, int index
 
 extern GetHighestEntityIndex_t  g_GetHighestEntityIndex;
 extern GetEntityFromIndex_t g_GetEntityFromIndex;
+extern CEntityInstance* (__fastcall * g_ClientDll_GetSplitScreenPlayer)(int slot);
 
 extern void ** g_pEntityList;
 

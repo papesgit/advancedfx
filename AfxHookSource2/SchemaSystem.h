@@ -30,13 +30,21 @@ struct ClientDllOffsets_t {
 	} C_BaseEntity;
 
 	struct C_BaseModelEntity {
+		ptrdiff_t m_CRenderComponent = 0; // CRenderComponent*
 		ptrdiff_t m_Glow = 0; // CGlowProperty
 	} C_BaseModelEntity;
+
+	struct CRenderComponent {
+		ptrdiff_t m_bEnableRendering = 0; // bool
+	} CRenderComponent;
 
 	struct CGameSceneNode {
 	    ptrdiff_t m_pOwner = 0; // CEntityInstance*
         ptrdiff_t m_pParent = 0; // CGameSceneNode*
+        ptrdiff_t m_pChild = 0; // CGameSceneNode*
+        ptrdiff_t m_pNextSibling = 0; // CGameSceneNode*
         ptrdiff_t m_vecAbsOrigin = 0; // VectorWS
+        ptrdiff_t m_angAbsRotation = 0; // QAngle
 	} CGameSceneNode;
 
 	struct C_BaseCSGrenadeProjectile {

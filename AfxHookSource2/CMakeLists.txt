@@ -156,6 +156,8 @@ target_sources(${PROJECT_NAME} PRIVATE
     ../shared/AfxConsole.h
     ../shared/AfxDetours.cpp
     ../shared/AfxDetours.h
+    ../shared/AfxGameRecord.cpp
+    ../shared/AfxGameRecord.h
     ../shared/AfxMath.cpp
     ../shared/AfxMath.h
     ../shared/AfxOutStreams.cpp
@@ -221,6 +223,9 @@ target_sources(${PROJECT_NAME} PRIVATE
 
     ClientEntitySystem.cpp
     ClientEntitySystem.h
+
+	Cs2GameRecording.cpp
+	Cs2GameRecording.h
 
     ConsoleRs.cpp
     CVarRs.cpp
