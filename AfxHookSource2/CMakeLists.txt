@@ -99,6 +99,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     d3dcompiler.lib
     windowscodecs.lib
     ole32.lib
+    ws2_32.lib
     bcrypt.lib # corrosion fails to detect this
     ws2_32.lib # Winsock for WebSocket and UDP
     crypt32.lib # SHA-1 hashing for WebSocket handshake

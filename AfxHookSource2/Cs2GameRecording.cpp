@@ -13,6 +13,8 @@
 #include "../shared/AfxGameRecord.h"
 #include "../shared/StringTools.h"
 
+#include <winsock.h>
+
 #define _USE_MATH_DEFINES
 #include <math.h>
 
@@ -399,6 +401,510 @@ static bool TryGetEntityRenderEnabled(CEntityInstance* entity, bool& outRenderEn
 	return ReadBoolField((unsigned char*)renderComponent, g_clientDllOffsets.CRenderComponent.m_bEnableRendering, outRenderEnabled);
 }
 
+static const char* TryGetRecordingBoneNameFromArray(unsigned char* boneNamesArray, uint32_t boneIndex) {
+	if (!boneNamesArray) return nullptr;
+	unsigned char* entry = boneNamesArray + (size_t)boneIndex * sizeof(void*);
+	if (IsBadReadPtr(entry, sizeof(const char*))) return nullptr;
+
+	const char* name = *(const char**)entry;
+	return IsLikelyPrintableAscii(name, 128) ? name : nullptr;
+}
+
+struct Cs2RecordedCamera {
+	float X = 0.0f;
+	float Y = 0.0f;
+	float Z = 0.0f;
+	float Rx = 0.0f;
+	float Ry = 0.0f;
+	float Rz = 0.0f;
+	float Fov = 0.0f;
+};
+
+struct Cs2RecordedEntity {
+	int Id = 0;
+	std::string ModelName;
+	bool Visible = true;
+	bool ViewModel = false;
+	SOURCESDK::matrix3x4_t Transform;
+	bool HasBones = false;
+	std::vector<std::string> BoneNames;
+	std::vector<int> BoneParents;
+	std::vector<SOURCESDK::matrix3x4_t> LocalBoneTransforms;
+};
+
+struct Cs2RecordedFrame {
+	float FrameTime = 0.0f;
+	bool HasCamera = false;
+	Cs2RecordedCamera Camera;
+	std::vector<Cs2RecordedEntity> Entities;
+	std::vector<int> HiddenEntityIds;
+};
+
+class ICs2FrameSink {
+public:
+	virtual ~ICs2FrameSink() {}
+	virtual void OnFrame(const Cs2RecordedFrame& frame) = 0;
+};
+
+class Cs2AgrSink : public ICs2FrameSink {
+public:
+	bool Start(const wchar_t* fileName) {
+		return m_Record.StartRecording(fileName, 6);
+	}
+
+	void Stop() {
+		m_Record.EndRecording();
+	}
+
+	bool IsRecording() {
+		return m_Record.GetRecording();
+	}
+
+	virtual void OnFrame(const Cs2RecordedFrame& frame) override {
+		if (!m_Record.GetRecording()) return;
+
+		m_Record.BeginFrame(frame.FrameTime);
+
+		for (std::vector<Cs2RecordedEntity>::const_iterator it = frame.Entities.begin(); it != frame.Entities.end(); ++it) {
+			WriteEntity(*it);
+		}
+
+		if (frame.HasCamera) {
+			m_Record.WriteDictionary("afxCam");
+			m_Record.Write(frame.Camera.X);
+			m_Record.Write(frame.Camera.Y);
+			m_Record.Write(frame.Camera.Z);
+			m_Record.Write(frame.Camera.Rx);
+			m_Record.Write(frame.Camera.Ry);
+			m_Record.Write(frame.Camera.Rz);
+			m_Record.Write(frame.Camera.Fov);
+		}
+
+		for (std::vector<int>::const_iterator it = frame.HiddenEntityIds.begin(); it != frame.HiddenEntityIds.end(); ++it) {
+			m_Record.MarkHidden(*it);
+		}
+
+		m_Record.EndFrame();
+	}
+
+private:
+	advancedfx::CAfxGameRecord m_Record;
+
+	void WriteMatrix3x4(const SOURCESDK::matrix3x4_t& value) {
+		m_Record.Write(value[0][0]);
+		m_Record.Write(value[0][1]);
+		m_Record.Write(value[0][2]);
+		m_Record.Write(value[0][3]);
+		m_Record.Write(value[1][0]);
+		m_Record.Write(value[1][1]);
+		m_Record.Write(value[1][2]);
+		m_Record.Write(value[1][3]);
+		m_Record.Write(value[2][0]);
+		m_Record.Write(value[2][1]);
+		m_Record.Write(value[2][2]);
+		m_Record.Write(value[2][3]);
+	}
+
+	void WriteEntity(const Cs2RecordedEntity& entity) {
+		m_Record.WriteDictionary("entity_state");
+		m_Record.Write(entity.Id);
+
+		m_Record.WriteDictionary("baseentity");
+		m_Record.WriteDictionary(entity.ModelName.c_str());
+		m_Record.Write(entity.Visible);
+		WriteMatrix3x4(entity.Transform);
+
+		m_Record.WriteDictionary("baseanimating");
+		m_Record.Write(entity.HasBones);
+		if (!entity.HasBones) {
+			m_Record.WriteDictionary("/");
+			m_Record.Write(entity.ViewModel);
+			return;
+		}
+
+		m_Record.Write((int)entity.LocalBoneTransforms.size());
+		for (std::vector<SOURCESDK::matrix3x4_t>::const_iterator it = entity.LocalBoneTransforms.begin(); it != entity.LocalBoneTransforms.end(); ++it) {
+			WriteMatrix3x4(*it);
+		}
+
+		m_Record.WriteDictionary("/");
+		m_Record.Write(entity.ViewModel);
+	}
+};
+
+class Cs2DebugFrameSink : public ICs2FrameSink {
+public:
+	bool IsEnabled() const {
+		return m_Enabled;
+	}
+
+	void SetEnabled(bool value) {
+		m_Enabled = value;
+		m_FrameIndex = 0;
+	}
+
+	int GetPrintInterval() const {
+		return m_PrintInterval;
+	}
+
+	void SetPrintInterval(int value) {
+		m_PrintInterval = value < 1 ? 1 : value;
+	}
+
+	virtual void OnFrame(const Cs2RecordedFrame& frame) override {
+		if (!m_Enabled) return;
+		++m_FrameIndex;
+		if (m_PrintInterval > 1 && (m_FrameIndex % m_PrintInterval) != 0) return;
+
+		advancedfx::Message(
+			"mirv_livelink debug: frame %d dt %.6f camera %d entities %zu hidden %zu\n",
+			m_FrameIndex,
+			frame.FrameTime,
+			frame.HasCamera ? 1 : 0,
+			frame.Entities.size(),
+			frame.HiddenEntityIds.size());
+
+		if (!frame.Entities.empty()) {
+			const Cs2RecordedEntity& entity = frame.Entities.front();
+			advancedfx::Message(
+				"mirv_livelink debug: first entity id %d model \"%s\" visible %d viewmodel %d bones %zu transform [%.3f %.3f %.3f]\n",
+				entity.Id,
+				entity.ModelName.c_str(),
+				entity.Visible ? 1 : 0,
+				entity.ViewModel ? 1 : 0,
+				entity.LocalBoneTransforms.size(),
+				entity.Transform[0][3],
+				entity.Transform[1][3],
+				entity.Transform[2][3]);
+		}
+	}
+
+private:
+	bool m_Enabled = false;
+	int m_FrameIndex = 0;
+	int m_PrintInterval = 60;
+};
+
+class Cs2UdpFrameSink : public ICs2FrameSink {
+public:
+	~Cs2UdpFrameSink() {
+		CloseSocket();
+	}
+
+	bool IsEnabled() const {
+		return m_Enabled;
+	}
+
+	bool SetEnabled(bool value) {
+		if (value == m_Enabled) return true;
+		if (!value) {
+			m_Enabled = false;
+			CloseSocket();
+			return true;
+		}
+
+		if (!OpenSocket()) return false;
+		m_Enabled = true;
+		m_Sequence = 0;
+		m_SentSkeletonSignatures.clear();
+		return true;
+	}
+
+	const std::string& GetTargetHost() const {
+		return m_TargetHost;
+	}
+
+	int GetTargetPort() const {
+		return m_TargetPort;
+	}
+
+	bool SetTarget(const char* host, int port) {
+		if (!host || !host[0] || port < 1 || port > 65535) return false;
+
+		unsigned long address = inet_addr(host);
+		if (address == INADDR_NONE) return false;
+
+		m_TargetHost = host;
+		m_TargetPort = port;
+		m_TargetAddress = address;
+		ConfigureTargetAddress();
+		return true;
+	}
+
+	virtual void OnFrame(const Cs2RecordedFrame& frame) override {
+		if (!m_Enabled) return;
+		if (m_Socket == INVALID_SOCKET && !OpenSocket()) return;
+
+		SendSkeletonPackets(frame);
+		SendFramePackets(frame);
+	}
+
+private:
+	enum { kMaxPacketBytes = 60000 };
+	enum { kPacketTypeFrame = 1 };
+	enum { kPacketTypeSkeleton = 2 };
+
+	bool m_Enabled = false;
+	bool m_WsaStarted = false;
+	SOCKET m_Socket = INVALID_SOCKET;
+	std::string m_TargetHost = "127.0.0.1";
+	int m_TargetPort = 31237;
+	unsigned long m_TargetAddress = 0x0100007f; // 127.0.0.1 in network byte order.
+	sockaddr_in m_TargetSockAddr = {};
+	uint32_t m_Sequence = 0;
+	uint32_t m_LastLargePacketWarningSequence = 0;
+	uint32_t m_LastSocketWarningSequence = 0;
+	std::map<int, std::string> m_SentSkeletonSignatures;
+
+	void SendSkeletonPackets(const Cs2RecordedFrame& frame) {
+		for (std::vector<Cs2RecordedEntity>::const_iterator it = frame.Entities.begin(); it != frame.Entities.end(); ++it) {
+			if (!it->HasBones) continue;
+
+			std::string signature = BuildSkeletonSignature(*it);
+			std::map<int, std::string>::iterator knownIt = m_SentSkeletonSignatures.find(it->Id);
+			if (knownIt != m_SentSkeletonSignatures.end() && knownIt->second == signature) continue;
+
+			std::vector<unsigned char> packet;
+			packet.reserve(4096);
+			AppendHeader(packet, kPacketTypeSkeleton, m_Sequence);
+			AppendI32(packet, it->Id);
+			AppendString(packet, it->ModelName);
+			AppendU32(packet, (uint32_t)it->BoneNames.size());
+
+			for (size_t i = 0; i < it->BoneNames.size(); ++i) {
+				AppendString(packet, it->BoneNames[i]);
+				AppendI32(packet, i < it->BoneParents.size() ? it->BoneParents[i] : -1);
+			}
+
+			if (SendPacket(packet, "skeleton")) {
+				m_SentSkeletonSignatures[it->Id] = signature;
+			}
+		}
+	}
+
+	void SendFramePackets(const Cs2RecordedFrame& frame) {
+		std::vector<unsigned char> packet;
+		packet.reserve(4096);
+		BeginFramePacket(packet, frame, true);
+		uint32_t entitiesInPacket = 0;
+		size_t entityCountOffset = packet.size();
+		AppendU32(packet, 0);
+
+		for (std::vector<Cs2RecordedEntity>::const_iterator it = frame.Entities.begin(); it != frame.Entities.end(); ++it) {
+			std::vector<unsigned char> entityBytes;
+			entityBytes.reserve(1024);
+			AppendFrameEntity(entityBytes, *it);
+
+			if (packet.size() + entityBytes.size() + sizeof(uint32_t) + frame.HiddenEntityIds.size() * sizeof(int32_t) > kMaxPacketBytes && entitiesInPacket > 0) {
+				PatchU32(packet, entityCountOffset, entitiesInPacket);
+				AppendHiddenIds(packet, frame);
+				SendPacket(packet, "frame");
+
+				packet.clear();
+				BeginFramePacket(packet, frame, false);
+				entitiesInPacket = 0;
+				entityCountOffset = packet.size();
+				AppendU32(packet, 0);
+			}
+
+			if (packet.size() + entityBytes.size() + sizeof(uint32_t) + frame.HiddenEntityIds.size() * sizeof(int32_t) > kMaxPacketBytes) {
+				WarnPacketTooLarge(packet.size() + entityBytes.size());
+				continue;
+			}
+
+			packet.insert(packet.end(), entityBytes.begin(), entityBytes.end());
+			++entitiesInPacket;
+		}
+
+		PatchU32(packet, entityCountOffset, entitiesInPacket);
+		AppendHiddenIds(packet, frame);
+		SendPacket(packet, "frame");
+	}
+
+	void BeginFramePacket(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame, bool includeCamera) {
+		AppendHeader(packet, kPacketTypeFrame, m_Sequence++);
+		AppendFloat(packet, frame.FrameTime);
+		AppendU8(packet, includeCamera && frame.HasCamera ? 1 : 0);
+		if (includeCamera && frame.HasCamera) {
+			AppendFloat(packet, frame.Camera.X);
+			AppendFloat(packet, frame.Camera.Y);
+			AppendFloat(packet, frame.Camera.Z);
+			AppendFloat(packet, frame.Camera.Rx);
+			AppendFloat(packet, frame.Camera.Ry);
+			AppendFloat(packet, frame.Camera.Rz);
+			AppendFloat(packet, frame.Camera.Fov);
+		}
+	}
+
+	static void AppendFrameEntity(std::vector<unsigned char>& packet, const Cs2RecordedEntity& entity) {
+		AppendI32(packet, entity.Id);
+		AppendString(packet, entity.ModelName);
+		AppendU8(packet, entity.Visible ? 1 : 0);
+		AppendU8(packet, entity.ViewModel ? 1 : 0);
+		AppendMatrix3x4(packet, entity.Transform);
+		AppendU8(packet, entity.HasBones ? 1 : 0);
+		AppendU32(packet, (uint32_t)entity.LocalBoneTransforms.size());
+
+		for (std::vector<SOURCESDK::matrix3x4_t>::const_iterator it = entity.LocalBoneTransforms.begin(); it != entity.LocalBoneTransforms.end(); ++it) {
+			AppendMatrix3x4(packet, *it);
+		}
+	}
+
+	static void AppendHiddenIds(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame) {
+		AppendU32(packet, (uint32_t)frame.HiddenEntityIds.size());
+		for (std::vector<int>::const_iterator it = frame.HiddenEntityIds.begin(); it != frame.HiddenEntityIds.end(); ++it) {
+			AppendI32(packet, *it);
+		}
+	}
+
+	static std::string BuildSkeletonSignature(const Cs2RecordedEntity& entity) {
+		std::string result;
+		result.reserve(entity.ModelName.size() + entity.BoneNames.size() * 32);
+		result.append(entity.ModelName);
+		result.push_back('\n');
+		for (size_t i = 0; i < entity.BoneNames.size(); ++i) {
+			result.append(entity.BoneNames[i]);
+			result.push_back('\0');
+			const int parent = i < entity.BoneParents.size() ? entity.BoneParents[i] : -1;
+			result.append((const char*)&parent, sizeof(parent));
+		}
+		return result;
+	}
+
+	bool SendPacket(const std::vector<unsigned char>& packet, const char* label) {
+		if (packet.size() > kMaxPacketBytes) {
+			WarnPacketTooLarge(packet.size());
+			return false;
+		}
+
+		const int result = sendto(
+			m_Socket,
+			(const char*)packet.data(),
+			(int)packet.size(),
+			0,
+			(const sockaddr*)&m_TargetSockAddr,
+			sizeof(m_TargetSockAddr));
+		if (result == SOCKET_ERROR) {
+			WarnSocketError(label ? label : "sendto", WSAGetLastError());
+			return false;
+		}
+		return true;
+	}
+
+	static void AppendHeader(std::vector<unsigned char>& packet, uint16_t packetType, uint32_t sequence) {
+		AppendU8(packet, 'A');
+		AppendU8(packet, 'F');
+		AppendU8(packet, 'X');
+		AppendU8(packet, 'L');
+		AppendU16(packet, 1);
+		AppendU16(packet, packetType);
+		AppendU32(packet, sequence);
+	}
+
+	static void PatchU32(std::vector<unsigned char>& packet, size_t offset, uint32_t value) {
+		if (offset + sizeof(value) > packet.size()) return;
+		memcpy(packet.data() + offset, &value, sizeof(value));
+	}
+
+	bool OpenSocket() {
+		if (!m_WsaStarted) {
+			WSADATA wsaData;
+			int wsaResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+			if (wsaResult != 0) {
+				WarnSocketError("WSAStartup", wsaResult);
+				return false;
+			}
+			m_WsaStarted = true;
+		}
+
+		if (m_Socket == INVALID_SOCKET) {
+			m_Socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+			if (m_Socket == INVALID_SOCKET) {
+				WarnSocketError("socket", WSAGetLastError());
+				return false;
+			}
+		}
+
+		ConfigureTargetAddress();
+		return true;
+	}
+
+	void CloseSocket() {
+		if (m_Socket != INVALID_SOCKET) {
+			closesocket(m_Socket);
+			m_Socket = INVALID_SOCKET;
+		}
+
+		if (m_WsaStarted) {
+			WSACleanup();
+			m_WsaStarted = false;
+		}
+	}
+
+	void ConfigureTargetAddress() {
+		memset(&m_TargetSockAddr, 0, sizeof(m_TargetSockAddr));
+		m_TargetSockAddr.sin_family = AF_INET;
+		m_TargetSockAddr.sin_addr.s_addr = m_TargetAddress;
+		m_TargetSockAddr.sin_port = htons((u_short)m_TargetPort);
+	}
+
+	static void AppendU8(std::vector<unsigned char>& packet, uint8_t value) {
+		packet.push_back(value);
+	}
+
+	static void AppendU16(std::vector<unsigned char>& packet, uint16_t value) {
+		AppendBytes(packet, &value, sizeof(value));
+	}
+
+	static void AppendU32(std::vector<unsigned char>& packet, uint32_t value) {
+		AppendBytes(packet, &value, sizeof(value));
+	}
+
+	static void AppendI32(std::vector<unsigned char>& packet, int32_t value) {
+		AppendBytes(packet, &value, sizeof(value));
+	}
+
+	static void AppendFloat(std::vector<unsigned char>& packet, float value) {
+		AppendBytes(packet, &value, sizeof(value));
+	}
+
+	static void AppendString(std::vector<unsigned char>& packet, const std::string& value) {
+		const size_t cappedSize = std::min<size_t>(value.size(), 65535);
+		AppendU16(packet, (uint16_t)cappedSize);
+		if (cappedSize > 0) {
+			AppendBytes(packet, value.data(), cappedSize);
+		}
+	}
+
+	static void AppendMatrix3x4(std::vector<unsigned char>& packet, const SOURCESDK::matrix3x4_t& value) {
+		for (int row = 0; row < 3; ++row) {
+			for (int col = 0; col < 4; ++col) {
+				AppendFloat(packet, value[row][col]);
+			}
+		}
+	}
+
+	static void AppendBytes(std::vector<unsigned char>& packet, const void* data, size_t size) {
+		const unsigned char* bytes = (const unsigned char*)data;
+		packet.insert(packet.end(), bytes, bytes + size);
+	}
+
+	void WarnPacketTooLarge(size_t packetSize) {
+		if (m_Sequence - m_LastLargePacketWarningSequence < 120) return;
+		m_LastLargePacketWarningSequence = m_Sequence;
+		advancedfx::Warning(
+			"mirv_livelink: UDP packet too large (%zu bytes, max %zu). Try recordSpectated 1 and disable broad entity groups.\n",
+			packetSize,
+			(size_t)kMaxPacketBytes);
+	}
+
+	void WarnSocketError(const char* operation, int errorCode) {
+		if (m_Sequence - m_LastSocketWarningSequence < 120) return;
+		m_LastSocketWarningSequence = m_Sequence;
+		advancedfx::Warning("mirv_livelink: UDP %s failed with error %d.\n", operation ? operation : "operation", errorCode);
+	}
+};
+
 class Cs2AgrRecorder {
 public:
 	bool Start(const wchar_t* fileName) {
@@ -406,11 +912,11 @@ public:
 		m_NextId = 1;
 		m_EntityIds.clear();
 		m_VisibleLastFrame.clear();
-		return m_Record.StartRecording(fileName, 6);
+		return m_AgrSink.Start(fileName);
 	}
 
 	void Stop() {
-		m_Record.EndRecording();
+		m_AgrSink.Stop();
 		m_EntityIds.clear();
 		m_VisibleLastFrame.clear();
 		m_FpsAccumulator = 0.0;
@@ -419,7 +925,7 @@ public:
 	}
 
 	bool IsRecording() {
-		return m_Record.GetRecording();
+		return m_AgrSink.IsRecording();
 	}
 
 	bool GetOverrideFps() const {
@@ -482,8 +988,112 @@ public:
 		m_HasWrittenFrame = false;
 	}
 
+	bool GetLiveDebug() const {
+		return m_DebugSink.IsEnabled();
+	}
+
+	void SetLiveDebug(bool value) {
+		m_DebugSink.SetEnabled(value);
+	}
+
+	int GetLiveDebugInterval() const {
+		return m_DebugSink.GetPrintInterval();
+	}
+
+	void SetLiveDebugInterval(int value) {
+		m_DebugSink.SetPrintInterval(value);
+	}
+
+	bool GetLiveUdp() const {
+		return m_UdpSink.IsEnabled();
+	}
+
+	bool SetLiveUdp(bool value) {
+		return m_UdpSink.SetEnabled(value);
+	}
+
+	const std::string& GetLiveTargetHost() const {
+		return m_UdpSink.GetTargetHost();
+	}
+
+	int GetLiveTargetPort() const {
+		return m_UdpSink.GetTargetPort();
+	}
+
+	bool SetLiveTarget(const char* host, int port) {
+		return m_UdpSink.SetTarget(host, port);
+	}
+
+	bool GetLiveRecordCamera() const {
+		return m_LiveRecordCamera;
+	}
+
+	void SetLiveRecordCamera(bool value) {
+		m_LiveRecordCamera = value;
+	}
+
+	bool GetLiveRecordPlayers() const {
+		return m_LiveRecordPlayers;
+	}
+
+	void SetLiveRecordPlayers(bool value) {
+		m_LiveRecordPlayers = value;
+	}
+
+	bool GetLiveRecordWeapons() const {
+		return m_LiveRecordWeapons;
+	}
+
+	void SetLiveRecordWeapons(bool value) {
+		m_LiveRecordWeapons = value;
+	}
+
+	bool GetLiveRecordViewModel() const {
+		return m_LiveRecordViewModel;
+	}
+
+	void SetLiveRecordViewModel(bool value) {
+		m_LiveRecordViewModel = value;
+	}
+
+	bool GetLiveRecordProjectiles() const {
+		return m_LiveRecordProjectiles;
+	}
+
+	void SetLiveRecordProjectiles(bool value) {
+		m_LiveRecordProjectiles = value;
+	}
+
+	bool GetLiveRecordSpectated() const {
+		return m_LiveRecordSpectated;
+	}
+
+	void SetLiveRecordSpectated(bool value) {
+		m_LiveRecordSpectated = value;
+	}
+
+	bool GetLiveOverrideFps() const {
+		return m_LiveOverrideFps;
+	}
+
+	float GetLiveOverrideFpsValue() const {
+		return m_LiveOverrideFpsValue;
+	}
+
+	void SetLiveOverrideFps(bool value) {
+		m_LiveOverrideFps = value;
+		m_LiveFpsAccumulator = 0.0;
+		m_LiveHasWrittenFrame = false;
+	}
+
+	void SetLiveOverrideFpsValue(float value) {
+		m_LiveOverrideFpsValue = value;
+		m_LiveFpsAccumulator = 0.0;
+		m_LiveHasWrittenFrame = false;
+	}
+
 	void OnSetupView(float frameTime, float x, float y, float z, float rx, float ry, float rz, float fov) {
-		if (!m_Record.GetRecording()) return;
+		if (!HasActiveSink()) return;
 
 		m_PendingFrameTime = frameTime;
 		m_PendingCameraX = x;
@@ -497,7 +1107,7 @@ public:
 	}
 
 	void OnMainRenderFrame() {
-		if (!m_Record.GetRecording()) return;
+		if (!HasActiveSink()) return;
 		if (!m_HasPendingSetupView) return;
 		m_HasPendingSetupView = false;
 
@@ -507,69 +1117,90 @@ public:
 		CEntityInstance* pawn = GetPawnFromControllerIndex(controllerIndex);
 		if (!pawn) return;
 
-		const float recordFrameTime = GetRecordFrameTime(m_PendingFrameTime);
+		const bool agrActive = m_AgrSink.IsRecording();
+		const float recordFrameTime = agrActive ? GetRecordFrameTime(m_PendingFrameTime) : GetLiveFrameTime(m_PendingFrameTime);
 		if (recordFrameTime <= 0.0f) return;
 
+		Cs2RecordedFrame frame;
+		frame.FrameTime = recordFrameTime;
 		std::set<int> visibleThisFrame;
-		m_Record.BeginFrame(recordFrameTime);
 
-		if (m_RecordPlayers || m_RecordWeapons || m_RecordProjectiles) {
+		if (!agrActive && m_LiveRecordSpectated) {
+			SampleEntity(pawn, false, visibleThisFrame, frame.Entities);
+		}
+
+		if (m_RecordPlayers || m_RecordWeapons || m_RecordProjectiles || (!agrActive && (m_LiveRecordPlayers || m_LiveRecordWeapons || m_LiveRecordProjectiles))) {
+			const bool samplePlayers = agrActive ? m_RecordPlayers : m_LiveRecordPlayers;
+			const bool sampleWeapons = agrActive ? m_RecordWeapons : m_LiveRecordWeapons;
+			const bool sampleProjectiles = agrActive ? m_RecordProjectiles : m_LiveRecordProjectiles;
 			int highestIndex = GetHighestEntityIndex();
 			for (int i = 0; i <= highestIndex; ++i) {
 				CEntityInstance* entity = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, i);
 				if (!entity) continue;
 
 				const char* debugName = entity->GetDebugName();
-				if (m_RecordPlayers && IsPlayerPawnForAgr(entity)) {
-					RecordEntity(entity, false, visibleThisFrame);
-				} else if (m_RecordWeapons && debugName && StringBeginsWithCaseSensitive(debugName, "weapon_")) {
-					RecordEntity(entity, false, visibleThisFrame);
-				} else if (m_RecordProjectiles && debugName && StringEndsWithCaseSensitive(debugName, "_projectile")) {
-					RecordEntity(entity, false, visibleThisFrame);
+				if (samplePlayers && IsPlayerPawnForAgr(entity)) {
+					SampleEntity(entity, false, visibleThisFrame, frame.Entities);
+				} else if (sampleWeapons && debugName && StringBeginsWithCaseSensitive(debugName, "weapon_")) {
+					SampleEntity(entity, false, visibleThisFrame, frame.Entities);
+				} else if (sampleProjectiles && debugName && StringEndsWithCaseSensitive(debugName, "_projectile")) {
+					SampleEntity(entity, false, visibleThisFrame, frame.Entities);
 				}
 			}
 		}
 
-		if (m_RecordViewModel) {
+		if (agrActive ? m_RecordViewModel : m_LiveRecordViewModel) {
 			std::vector<CEntityInstance*> hudModels;
 			CollectHudModelOwnersForPawn(pawn, hudModels);
 			for (CEntityInstance* hudModel : hudModels) {
-				RecordEntity(hudModel, true, visibleThisFrame);
+				SampleEntity(hudModel, true, visibleThisFrame, frame.Entities);
 			}
 		}
 
-		if (m_RecordCamera) {
-			m_Record.WriteDictionary("afxCam");
-			m_Record.Write(m_PendingCameraX);
-			m_Record.Write(m_PendingCameraY);
-			m_Record.Write(m_PendingCameraZ);
-			m_Record.Write(m_PendingCameraRx);
-			m_Record.Write(m_PendingCameraRy);
-			m_Record.Write(m_PendingCameraRz);
-			m_Record.Write(m_PendingCameraFov);
+		if (agrActive ? m_RecordCamera : m_LiveRecordCamera) {
+			frame.HasCamera = true;
+			frame.Camera.X = m_PendingCameraX;
+			frame.Camera.Y = m_PendingCameraY;
+			frame.Camera.Z = m_PendingCameraZ;
+			frame.Camera.Rx = m_PendingCameraRx;
+			frame.Camera.Ry = m_PendingCameraRy;
+			frame.Camera.Rz = m_PendingCameraRz;
+			frame.Camera.Fov = m_PendingCameraFov;
 		}
 
 		for (std::set<int>::iterator it = m_VisibleLastFrame.begin(); it != m_VisibleLastFrame.end(); ++it) {
 			if (visibleThisFrame.find(*it) == visibleThisFrame.end()) {
-				m_Record.MarkHidden(*it);
+				frame.HiddenEntityIds.push_back(*it);
 			}
 		}
 		m_VisibleLastFrame.swap(visibleThisFrame);
 
-		m_Record.EndFrame();
+		DispatchFrame(frame);
 	}
 
 private:
-	advancedfx::CAfxGameRecord m_Record;
+	Cs2AgrSink m_AgrSink;
+	Cs2DebugFrameSink m_DebugSink;
+	Cs2UdpFrameSink m_UdpSink;
 	bool m_RecordPlayers = true;
 	bool m_RecordWeapons = true;
 	bool m_RecordViewModel = true;
 	bool m_RecordProjectiles = true;
 	bool m_RecordCamera = true;
+	bool m_LiveRecordCamera = true;
+	bool m_LiveRecordPlayers = false;
+	bool m_LiveRecordWeapons = false;
+	bool m_LiveRecordViewModel = false;
+	bool m_LiveRecordProjectiles = false;
+	bool m_LiveRecordSpectated = true;
 	bool m_OverrideFps = false;
 	float m_OverrideFpsValue = 60.0f;
+	bool m_LiveOverrideFps = true;
+	float m_LiveOverrideFpsValue = 30.0f;
 	double m_FpsAccumulator = 0.0;
+	double m_LiveFpsAccumulator = 0.0;
 	bool m_HasWrittenFrame = false;
+	bool m_LiveHasWrittenFrame = false;
 	bool m_HasPendingSetupView = false;
 	float m_PendingFrameTime = 0.0f;
 	float m_PendingCameraX = 0.0f;
@@ -582,6 +1213,22 @@ private:
 	int m_NextId = 1;
 	std::map<CEntityInstance*, int> m_EntityIds;
 	std::set<int> m_VisibleLastFrame;
+
+	bool HasActiveSink() {
+		return m_AgrSink.IsRecording() || m_DebugSink.IsEnabled() || m_UdpSink.IsEnabled();
+	}
+
+	void DispatchFrame(const Cs2RecordedFrame& frame) {
+		if (m_AgrSink.IsRecording()) {
+			m_AgrSink.OnFrame(frame);
+		}
+		if (m_DebugSink.IsEnabled()) {
+			m_DebugSink.OnFrame(frame);
+		}
+		if (m_UdpSink.IsEnabled()) {
+			m_UdpSink.OnFrame(frame);
+		}
+	}
 
 	float GetRecordFrameTime(float sourceFrameTime) {
 		if (!m_OverrideFps) return sourceFrameTime;
@@ -608,6 +1255,31 @@ private:
 		return (float)interval;
 	}
 
+	float GetLiveFrameTime(float sourceFrameTime) {
+		if (!m_LiveOverrideFps) return sourceFrameTime;
+		if (m_LiveOverrideFpsValue <= 0.0f) return 0.0f;
+
+		const double interval = 1.0 / (double)m_LiveOverrideFpsValue;
+		if (!m_LiveHasWrittenFrame) {
+			m_LiveHasWrittenFrame = true;
+			m_LiveFpsAccumulator = 0.0;
+			return (float)interval;
+		}
+
+		if (sourceFrameTime > 0.0f) {
+			m_LiveFpsAccumulator += (double)sourceFrameTime;
+		}
+
+		if (m_LiveFpsAccumulator + 0.000001 < interval) return 0.0f;
+
+		m_LiveFpsAccumulator -= interval;
+		if (m_LiveFpsAccumulator >= interval) {
+			m_LiveFpsAccumulator = fmod(m_LiveFpsAccumulator, interval);
+		}
+
+		return (float)interval;
+	}
+
 	bool IsPlayerPawnForAgr(CEntityInstance* entity) {
 		const char* clientClassName = entity ? entity->GetClientClassName() : nullptr;
 		return clientClassName && 0 == _stricmp(clientClassName, "C_CSPlayerPawn");
@@ -622,22 +1294,7 @@ private:
 		return result;
 	}
 
-	void WriteMatrix3x4(const SOURCESDK::matrix3x4_t& value) {
-		m_Record.Write(value[0][0]);
-		m_Record.Write(value[0][1]);
-		m_Record.Write(value[0][2]);
-		m_Record.Write(value[0][3]);
-		m_Record.Write(value[1][0]);
-		m_Record.Write(value[1][1]);
-		m_Record.Write(value[1][2]);
-		m_Record.Write(value[1][3]);
-		m_Record.Write(value[2][0]);
-		m_Record.Write(value[2][1]);
-		m_Record.Write(value[2][2]);
-		m_Record.Write(value[2][3]);
-	}
-
-	bool RecordEntity(CEntityInstance* entity, bool viewModel, std::set<int>& visibleThisFrame) {
+	bool SampleEntity(CEntityInstance* entity, bool viewModel, std::set<int>& visibleThisFrame, std::vector<Cs2RecordedEntity>& outEntities) {
 		unsigned char* baseSceneNode = nullptr;
 		const char* baseModelName = nullptr;
 		if (!TryGetEntityModelBaseInfo(entity, baseSceneNode, baseModelName)) return false;
@@ -651,15 +1308,14 @@ private:
 		}
 
 		const int id = GetEntityId(entity);
-		visibleThisFrame.insert(id);
+		if (!visibleThisFrame.insert(id).second) return true;
 
-		m_Record.WriteDictionary("entity_state");
-		m_Record.Write(id);
-
-		m_Record.WriteDictionary("baseentity");
-		m_Record.WriteDictionary(baseModelName);
-		m_Record.Write(visible);
-		WriteMatrix3x4(entityTransform);
+		Cs2RecordedEntity sampledEntity;
+		sampledEntity.Id = id;
+		sampledEntity.ModelName = baseModelName ? baseModelName : "";
+		sampledEntity.Visible = visible;
+		sampledEntity.ViewModel = viewModel;
+		sampledEntity.Transform = entityTransform;
 
 		unsigned char* sceneNode = nullptr;
 		unsigned char* modelState = nullptr;
@@ -700,23 +1356,27 @@ private:
 			}
 		}
 
-		m_Record.WriteDictionary("baseanimating");
-		m_Record.Write(hasBones);
 		if (!hasBones) {
-			m_Record.WriteDictionary("/");
-			m_Record.Write(viewModel);
+			outEntities.push_back(sampledEntity);
 			return true;
 		}
 
-		m_Record.Write((int)boneCount);
+		sampledEntity.HasBones = true;
+		sampledEntity.BoneNames.reserve(boneCount);
+		sampledEntity.BoneParents.reserve(boneCount);
+		sampledEntity.LocalBoneTransforms.reserve(boneCount);
 
 		for (uint32_t i = 0; i < boneCount; ++i) {
 			SOURCESDK::matrix3x4_t parentInverse;
 			SOURCESDK::matrix3x4_t localBone;
+			const char* boneName = TryGetRecordingBoneNameFromArray(boneNamesArray, i);
+			sampledEntity.BoneNames.push_back(boneName ? boneName : "");
+			sampledEntity.BoneParents.push_back((int)boneParentArray[i]);
+
 			const bool boneIsUsed = !hasBoneFlags || ((boneFlagsArray[i] & kCs2BoneUsedByAnythingMask) != 0);
 			if (!boneIsUsed) {
 				MatrixIdentity(localBone);
-				WriteMatrix3x4(localBone);
+				sampledEntity.LocalBoneTransforms.push_back(localBone);
 				continue;
 			}
 
@@ -727,11 +1387,10 @@ private:
 				MatrixInvertRigid(entityTransform, parentInverse);
 			}
 			MatrixConcat(parentInverse, boneWorld[i], localBone);
-			WriteMatrix3x4(localBone);
+			sampledEntity.LocalBoneTransforms.push_back(localBone);
 		}
 
-		m_Record.WriteDictionary("/");
-		m_Record.Write(viewModel);
+		outEntities.push_back(sampledEntity);
 		return true;
 	}
 };
@@ -855,6 +1514,152 @@ CON_COMMAND(mirv_agr, "Source 2 AGR recording") {
 	}
 
 	advancedfx::Warning("mirv_agr: unknown command \"%s\".\n", cmd);
+}
+
+CON_COMMAND(mirv_livelink, "Source 2 Live Link streaming") {
+	int argc = args->ArgC();
+	if (argc < 2) {
+		advancedfx::Message(
+			"mirv_livelink debug 0|1\n"
+			"mirv_livelink udp 0|1\n"
+			"mirv_livelink target <ip> <port>\n"
+			"mirv_livelink recordCamera 0|1\n"
+			"mirv_livelink recordPlayers 0|1\n"
+			"mirv_livelink recordWeapons 0|1\n"
+			"mirv_livelink recordViewmodel 0|1\n"
+			"mirv_livelink recordProjectiles 0|1\n"
+			"mirv_livelink recordSpectated 0|1\n"
+			"mirv_livelink debugInterval <iFrames>\n"
+			"mirv_livelink fps default|<fValue>\n"
+			"mirv_livelink status\n"
+		);
+		return;
+	}
+
+	const char* cmd = args->ArgV(1);
+	auto handleBoolSetting = [&](const char* name, bool currentValue, void (Cs2AgrRecorder::*setter)(bool)) -> bool {
+		if (0 != _stricmp(cmd, name)) return false;
+		if (argc >= 3) {
+			int value = atoi(args->ArgV(2));
+			(g_Cs2AgrRecorder.*setter)(value != 0);
+			return true;
+		}
+
+		advancedfx::Message("mirv_livelink %s 0|1\nCurrent value: %d\n", name, currentValue ? 1 : 0);
+		return true;
+	};
+
+	if (handleBoolSetting("debug", g_Cs2AgrRecorder.GetLiveDebug(), &Cs2AgrRecorder::SetLiveDebug)) return;
+	if (handleBoolSetting("recordCamera", g_Cs2AgrRecorder.GetLiveRecordCamera(), &Cs2AgrRecorder::SetLiveRecordCamera)) return;
+	if (handleBoolSetting("recordPlayers", g_Cs2AgrRecorder.GetLiveRecordPlayers(), &Cs2AgrRecorder::SetLiveRecordPlayers)) return;
+	if (handleBoolSetting("recordWeapons", g_Cs2AgrRecorder.GetLiveRecordWeapons(), &Cs2AgrRecorder::SetLiveRecordWeapons)) return;
+	if (handleBoolSetting("recordViewmodel", g_Cs2AgrRecorder.GetLiveRecordViewModel(), &Cs2AgrRecorder::SetLiveRecordViewModel)) return;
+	if (handleBoolSetting("recordViewModel", g_Cs2AgrRecorder.GetLiveRecordViewModel(), &Cs2AgrRecorder::SetLiveRecordViewModel)) return;
+	if (handleBoolSetting("recordProjectiles", g_Cs2AgrRecorder.GetLiveRecordProjectiles(), &Cs2AgrRecorder::SetLiveRecordProjectiles)) return;
+	if (handleBoolSetting("recordSpectated", g_Cs2AgrRecorder.GetLiveRecordSpectated(), &Cs2AgrRecorder::SetLiveRecordSpectated)) return;
+
+	if (0 == _stricmp(cmd, "udp")) {
+		if (argc >= 3) {
+			int value = atoi(args->ArgV(2));
+			if (!g_Cs2AgrRecorder.SetLiveUdp(value != 0)) {
+				advancedfx::Warning(
+					"mirv_livelink: failed to enable UDP target %s:%d.\n",
+					g_Cs2AgrRecorder.GetLiveTargetHost().c_str(),
+					g_Cs2AgrRecorder.GetLiveTargetPort());
+			}
+			return;
+		}
+
+		advancedfx::Message("mirv_livelink udp 0|1\nCurrent value: %d\n", g_Cs2AgrRecorder.GetLiveUdp() ? 1 : 0);
+		return;
+	}
+
+	if (0 == _stricmp(cmd, "target")) {
+		if (argc >= 4) {
+			int port = atoi(args->ArgV(3));
+			if (!g_Cs2AgrRecorder.SetLiveTarget(args->ArgV(2), port)) {
+				advancedfx::Warning("mirv_livelink: target must be an IPv4 address and port between 1 and 65535.\n");
+			}
+			return;
+		}
+
+		advancedfx::Message(
+			"mirv_livelink target <ip> <port>\nCurrent value: %s:%d\n",
+			g_Cs2AgrRecorder.GetLiveTargetHost().c_str(),
+			g_Cs2AgrRecorder.GetLiveTargetPort());
+		return;
+	}
+
+	if (0 == _stricmp(cmd, "fps")) {
+		if (argc >= 3) {
+			const char* valueArg = args->ArgV(2);
+			if (0 == _stricmp(valueArg, "default")) {
+				g_Cs2AgrRecorder.SetLiveOverrideFps(false);
+				return;
+			}
+
+			char* endPtr = nullptr;
+			double value = strtod(valueArg, &endPtr);
+			if (endPtr && *endPtr == '\0' && value > 0.0 && value <= 1000.0) {
+				g_Cs2AgrRecorder.SetLiveOverrideFpsValue((float)value);
+				g_Cs2AgrRecorder.SetLiveOverrideFps(true);
+				return;
+			}
+
+			advancedfx::Warning("mirv_livelink: fps must be default or a value greater than 0 and at most 1000.\n");
+			return;
+		}
+
+		advancedfx::Message("mirv_livelink fps default|<fValue>\n");
+		if (g_Cs2AgrRecorder.GetLiveOverrideFps()) {
+			advancedfx::Message("Current value: %f\n", g_Cs2AgrRecorder.GetLiveOverrideFpsValue());
+		} else {
+			advancedfx::Message("Current value: default\n");
+		}
+		return;
+	}
+
+	if (0 == _stricmp(cmd, "debugInterval")) {
+		if (argc >= 3) {
+			int value = atoi(args->ArgV(2));
+			if (value < 1 || value > 10000) {
+				advancedfx::Warning("mirv_livelink: debugInterval must be between 1 and 10000.\n");
+				return;
+			}
+
+			g_Cs2AgrRecorder.SetLiveDebugInterval(value);
+			return;
+		}
+
+		advancedfx::Message("mirv_livelink debugInterval <iFrames>\nCurrent value: %d\n", g_Cs2AgrRecorder.GetLiveDebugInterval());
+		return;
+	}
+
+	if (0 == _stricmp(cmd, "status")) {
+		if (g_Cs2AgrRecorder.GetLiveOverrideFps()) {
+			advancedfx::Message("mirv_livelink: fps %f.\n", g_Cs2AgrRecorder.GetLiveOverrideFpsValue());
+		} else {
+			advancedfx::Message("mirv_livelink: fps default.\n");
+		}
+		advancedfx::Message(
+			"mirv_livelink: debug %d udp %d target %s:%d debugInterval %d.\n",
+			g_Cs2AgrRecorder.GetLiveDebug() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveUdp() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveTargetHost().c_str(),
+			g_Cs2AgrRecorder.GetLiveTargetPort(),
+			g_Cs2AgrRecorder.GetLiveDebugInterval());
+		advancedfx::Message(
+			"mirv_livelink: recordCamera %d recordPlayers %d recordWeapons %d recordViewmodel %d recordProjectiles %d recordSpectated %d.\n",
+			g_Cs2AgrRecorder.GetLiveRecordCamera() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveRecordPlayers() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveRecordWeapons() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveRecordViewModel() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveRecordProjectiles() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveRecordSpectated() ? 1 : 0);
+		return;
+	}
+
+	advancedfx::Warning("mirv_livelink: unknown command \"%s\".\n", cmd);
 }
 
 #ifdef _DEBUG
