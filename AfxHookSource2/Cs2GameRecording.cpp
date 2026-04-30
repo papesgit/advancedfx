@@ -401,6 +401,15 @@ static bool TryGetEntityRenderEnabled(CEntityInstance* entity, bool& outRenderEn
 	return ReadBoolField((unsigned char*)renderComponent, g_clientDllOffsets.CRenderComponent.m_bEnableRendering, outRenderEnabled);
 }
 
+static bool TryReadEntityHandleField(CEntityInstance* entity, std::ptrdiff_t offset, SOURCESDK::CS2::CBaseHandle& outHandle) {
+	outHandle = SOURCESDK::CS2::CEntityHandle::CEntityHandle();
+	if (!entity || offset <= 0) return false;
+	unsigned char* address = (unsigned char*)entity + offset;
+	if (IsBadReadPtr(address, sizeof(uint32_t))) return false;
+	outHandle = SOURCESDK::CS2::CEntityHandle::CEntityHandle(*(uint32_t*)address);
+	return true;
+}
+
 static const char* TryGetRecordingBoneNameFromArray(unsigned char* boneNamesArray, uint32_t boneIndex) {
 	if (!boneNamesArray) return nullptr;
 	unsigned char* entry = boneNamesArray + (size_t)boneIndex * sizeof(void*);
@@ -422,9 +431,11 @@ struct Cs2RecordedCamera {
 
 struct Cs2RecordedEntity {
 	int Id = 0;
+	int OwnerId = -1;
 	std::string ModelName;
 	bool Visible = true;
 	bool ViewModel = false;
+	bool Projectile = false;
 	SOURCESDK::matrix3x4_t Transform;
 	bool HasBones = false;
 	std::vector<std::string> BoneNames;
@@ -763,6 +774,8 @@ private:
 
 	static void AppendFrameEntity(std::vector<unsigned char>& packet, const Cs2RecordedEntity& entity) {
 		AppendI32(packet, entity.Id);
+		AppendI32(packet, entity.OwnerId);
+		AppendU8(packet, entity.Projectile ? 1 : 0);
 		AppendString(packet, entity.ModelName);
 		AppendU8(packet, entity.Visible ? 1 : 0);
 		AppendU8(packet, entity.ViewModel ? 1 : 0);
@@ -827,7 +840,7 @@ private:
 		AppendU8(packet, 'F');
 		AppendU8(packet, 'X');
 		AppendU8(packet, 'L');
-		AppendU16(packet, 2);
+		AppendU16(packet, 4);
 		AppendU16(packet, packetType);
 		AppendU32(packet, sequence);
 	}
@@ -1157,7 +1170,7 @@ public:
 		std::set<int> visibleThisFrame;
 
 		if (!agrActive && m_LiveRecordSpectated) {
-			SampleEntity(pawn, false, visibleThisFrame, frame.Entities);
+			SampleEntity(pawn, false, false, visibleThisFrame, frame.Entities);
 		}
 
 		if (m_RecordPlayers || m_RecordWeapons || m_RecordProjectiles || (!agrActive && (m_LiveRecordPlayers || m_LiveRecordWeapons || m_LiveRecordProjectiles))) {
@@ -1171,11 +1184,11 @@ public:
 
 				const char* debugName = entity->GetDebugName();
 				if (samplePlayers && IsPlayerPawnForAgr(entity)) {
-					SampleEntity(entity, false, visibleThisFrame, frame.Entities);
+					SampleEntity(entity, false, false, visibleThisFrame, frame.Entities);
 				} else if (sampleWeapons && debugName && StringBeginsWithCaseSensitive(debugName, "weapon_")) {
-					SampleEntity(entity, false, visibleThisFrame, frame.Entities);
+					SampleEntity(entity, false, false, visibleThisFrame, frame.Entities);
 				} else if (sampleProjectiles && debugName && StringEndsWithCaseSensitive(debugName, "_projectile")) {
-					SampleEntity(entity, false, visibleThisFrame, frame.Entities);
+					SampleEntity(entity, false, true, visibleThisFrame, frame.Entities);
 				}
 			}
 		}
@@ -1184,7 +1197,7 @@ public:
 			std::vector<CEntityInstance*> hudModels;
 			CollectHudModelOwnersForPawn(pawn, hudModels);
 			for (CEntityInstance* hudModel : hudModels) {
-				SampleEntity(hudModel, true, visibleThisFrame, frame.Entities);
+				SampleEntity(hudModel, true, false, visibleThisFrame, frame.Entities);
 			}
 		}
 
@@ -1325,7 +1338,7 @@ private:
 		return result;
 	}
 
-	bool SampleEntity(CEntityInstance* entity, bool viewModel, std::set<int>& visibleThisFrame, std::vector<Cs2RecordedEntity>& outEntities) {
+	bool SampleEntity(CEntityInstance* entity, bool viewModel, bool projectile, std::set<int>& visibleThisFrame, std::vector<Cs2RecordedEntity>& outEntities) {
 		unsigned char* baseSceneNode = nullptr;
 		const char* baseModelName = nullptr;
 		if (!TryGetEntityModelBaseInfo(entity, baseSceneNode, baseModelName)) return false;
@@ -1346,7 +1359,19 @@ private:
 		sampledEntity.ModelName = baseModelName ? baseModelName : "";
 		sampledEntity.Visible = visible;
 		sampledEntity.ViewModel = viewModel;
+		sampledEntity.Projectile = projectile;
 		sampledEntity.Transform = entityTransform;
+
+		SOURCESDK::CS2::CBaseHandle ownerHandle;
+		if (TryReadEntityHandleField(entity, g_clientDllOffsets.C_BaseEntity.m_hOwnerEntity, ownerHandle) && ownerHandle.IsValid()) {
+			int ownerEntryIndex = ownerHandle.GetEntryIndex();
+			CEntityInstance* ownerEntity = ownerEntryIndex >= 0 && g_pEntityList && *g_pEntityList && g_GetEntityFromIndex
+				? (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, ownerEntryIndex)
+				: nullptr;
+			if (ownerEntity && ownerEntity != entity) {
+				sampledEntity.OwnerId = GetEntityId(ownerEntity);
+			}
+		}
 
 		unsigned char* sceneNode = nullptr;
 		unsigned char* modelState = nullptr;
