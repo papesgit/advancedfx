@@ -652,6 +652,7 @@ private:
 	unsigned long m_TargetAddress = 0x0100007f; // 127.0.0.1 in network byte order.
 	sockaddr_in m_TargetSockAddr = {};
 	uint32_t m_Sequence = 0;
+	uint32_t m_FrameId = 0;
 	uint32_t m_LastLargePacketWarningSequence = 0;
 	uint32_t m_LastSocketWarningSequence = 0;
 	std::map<int, std::string> m_SentSkeletonSignatures;
@@ -683,49 +684,73 @@ private:
 	}
 
 	void SendFramePackets(const Cs2RecordedFrame& frame) {
-		std::vector<unsigned char> packet;
-		packet.reserve(4096);
-		BeginFramePacket(packet, frame, true);
-		uint32_t entitiesInPacket = 0;
-		size_t entityCountOffset = packet.size();
-		AppendU32(packet, 0);
+		struct FrameChunk {
+			std::vector<std::vector<unsigned char> > Entities;
+			size_t EntityBytes = 0;
+		};
 
+		const uint32_t frameId = m_FrameId++;
+		std::vector<FrameChunk> chunks;
+		chunks.push_back(FrameChunk());
+
+		const size_t basePacketBytes = 12 + sizeof(float) + sizeof(uint32_t) + 2 * sizeof(uint16_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t);
+		const size_t finalOnlyBytes = frame.HiddenEntityIds.size() * sizeof(int32_t) + (frame.HasCamera ? 7 * sizeof(float) : 0);
 		for (std::vector<Cs2RecordedEntity>::const_iterator it = frame.Entities.begin(); it != frame.Entities.end(); ++it) {
 			std::vector<unsigned char> entityBytes;
 			entityBytes.reserve(1024);
 			AppendFrameEntity(entityBytes, *it);
 
-			if (packet.size() + entityBytes.size() + sizeof(uint32_t) + frame.HiddenEntityIds.size() * sizeof(int32_t) > kMaxPacketBytes && entitiesInPacket > 0) {
-				PatchU32(packet, entityCountOffset, entitiesInPacket);
-				AppendHiddenIds(packet, frame);
-				SendPacket(packet, "frame");
-
-				packet.clear();
-				BeginFramePacket(packet, frame, false);
-				entitiesInPacket = 0;
-				entityCountOffset = packet.size();
-				AppendU32(packet, 0);
+			FrameChunk& chunk = chunks.back();
+			const size_t currentMaxSize = basePacketBytes + chunk.EntityBytes + entityBytes.size() + finalOnlyBytes;
+			if (currentMaxSize > kMaxPacketBytes && !chunk.Entities.empty()) {
+				chunks.push_back(FrameChunk());
 			}
 
-			if (packet.size() + entityBytes.size() + sizeof(uint32_t) + frame.HiddenEntityIds.size() * sizeof(int32_t) > kMaxPacketBytes) {
-				WarnPacketTooLarge(packet.size() + entityBytes.size());
+			FrameChunk& targetChunk = chunks.back();
+			const size_t targetMaxSize = basePacketBytes + targetChunk.EntityBytes + entityBytes.size() + finalOnlyBytes;
+			if (targetMaxSize > kMaxPacketBytes) {
+				WarnPacketTooLarge(targetMaxSize);
 				continue;
 			}
 
-			packet.insert(packet.end(), entityBytes.begin(), entityBytes.end());
-			++entitiesInPacket;
+			targetChunk.EntityBytes += entityBytes.size();
+			targetChunk.Entities.push_back(entityBytes);
 		}
 
-		PatchU32(packet, entityCountOffset, entitiesInPacket);
-		AppendHiddenIds(packet, frame);
-		SendPacket(packet, "frame");
+		const uint16_t chunkCount = (uint16_t)chunks.size();
+		for (uint16_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
+			const bool isFinalChunk = chunkIndex + 1 == chunkCount;
+			std::vector<unsigned char> packet;
+			packet.reserve(4096 + chunks[chunkIndex].EntityBytes);
+			BeginFramePacket(packet, frame, frameId, chunkIndex, chunkCount);
+			AppendU32(packet, (uint32_t)chunks[chunkIndex].Entities.size());
+			for (std::vector<std::vector<unsigned char> >::const_iterator it = chunks[chunkIndex].Entities.begin(); it != chunks[chunkIndex].Entities.end(); ++it) {
+				packet.insert(packet.end(), it->begin(), it->end());
+			}
+			if (isFinalChunk) {
+				AppendHiddenIds(packet, frame);
+				AppendCamera(packet, frame);
+			} else {
+				AppendU32(packet, 0);
+				AppendU8(packet, 0);
+			}
+			SendPacket(packet, "frame");
+		}
+
+		ForgetHiddenSkeletons(frame);
 	}
 
-	void BeginFramePacket(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame, bool includeCamera) {
+	void BeginFramePacket(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame, uint32_t frameId, uint16_t chunkIndex, uint16_t chunkCount) {
 		AppendHeader(packet, kPacketTypeFrame, m_Sequence++);
 		AppendFloat(packet, frame.FrameTime);
-		AppendU8(packet, includeCamera && frame.HasCamera ? 1 : 0);
-		if (includeCamera && frame.HasCamera) {
+		AppendU32(packet, frameId);
+		AppendU16(packet, chunkIndex);
+		AppendU16(packet, chunkCount);
+	}
+
+	static void AppendCamera(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame) {
+		AppendU8(packet, frame.HasCamera ? 1 : 0);
+		if (frame.HasCamera) {
 			AppendFloat(packet, frame.Camera.X);
 			AppendFloat(packet, frame.Camera.Y);
 			AppendFloat(packet, frame.Camera.Z);
@@ -754,6 +779,12 @@ private:
 		AppendU32(packet, (uint32_t)frame.HiddenEntityIds.size());
 		for (std::vector<int>::const_iterator it = frame.HiddenEntityIds.begin(); it != frame.HiddenEntityIds.end(); ++it) {
 			AppendI32(packet, *it);
+		}
+	}
+
+	void ForgetHiddenSkeletons(const Cs2RecordedFrame& frame) {
+		for (std::vector<int>::const_iterator it = frame.HiddenEntityIds.begin(); it != frame.HiddenEntityIds.end(); ++it) {
+			m_SentSkeletonSignatures.erase(*it);
 		}
 	}
 
@@ -796,7 +827,7 @@ private:
 		AppendU8(packet, 'F');
 		AppendU8(packet, 'X');
 		AppendU8(packet, 'L');
-		AppendU16(packet, 1);
+		AppendU16(packet, 2);
 		AppendU16(packet, packetType);
 		AppendU32(packet, sequence);
 	}
