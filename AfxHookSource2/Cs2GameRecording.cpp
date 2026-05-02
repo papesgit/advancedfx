@@ -429,6 +429,16 @@ struct Cs2RecordedCamera {
 	float Fov = 0.0f;
 };
 
+struct Cs2SkeletonMetadata {
+	unsigned char* ModelImp = nullptr;
+	std::string ModelName;
+	uint32_t BoneCount = 0;
+	bool HasBoneFlags = false;
+	std::vector<std::string> BoneNames;
+	std::vector<int> BoneParents;
+	std::vector<uint8_t> BoneUsed;
+};
+
 struct Cs2RecordedEntity {
 	int Id = 0;
 	int OwnerId = -1;
@@ -438,8 +448,7 @@ struct Cs2RecordedEntity {
 	bool Projectile = false;
 	SOURCESDK::matrix3x4_t Transform;
 	bool HasBones = false;
-	std::vector<std::string> BoneNames;
-	std::vector<int> BoneParents;
+	const Cs2SkeletonMetadata* Skeleton = nullptr;
 	std::vector<SOURCESDK::matrix3x4_t> LocalBoneTransforms;
 };
 
@@ -670,7 +679,7 @@ private:
 
 	void SendSkeletonPackets(const Cs2RecordedFrame& frame) {
 		for (std::vector<Cs2RecordedEntity>::const_iterator it = frame.Entities.begin(); it != frame.Entities.end(); ++it) {
-			if (!it->HasBones) continue;
+			if (!it->HasBones || !it->Skeleton) continue;
 
 			std::string signature = BuildSkeletonSignature(*it);
 			std::map<int, std::string>::iterator knownIt = m_SentSkeletonSignatures.find(it->Id);
@@ -681,11 +690,11 @@ private:
 			AppendHeader(packet, kPacketTypeSkeleton, m_Sequence);
 			AppendI32(packet, it->Id);
 			AppendString(packet, it->ModelName);
-			AppendU32(packet, (uint32_t)it->BoneNames.size());
+			AppendU32(packet, (uint32_t)it->Skeleton->BoneNames.size());
 
-			for (size_t i = 0; i < it->BoneNames.size(); ++i) {
-				AppendString(packet, it->BoneNames[i]);
-				AppendI32(packet, i < it->BoneParents.size() ? it->BoneParents[i] : -1);
+			for (size_t i = 0; i < it->Skeleton->BoneNames.size(); ++i) {
+				AppendString(packet, it->Skeleton->BoneNames[i]);
+				AppendI32(packet, i < it->Skeleton->BoneParents.size() ? it->Skeleton->BoneParents[i] : -1);
 			}
 
 			if (SendPacket(packet, "skeleton")) {
@@ -839,14 +848,16 @@ private:
 	}
 
 	static std::string BuildSkeletonSignature(const Cs2RecordedEntity& entity) {
+		if (!entity.Skeleton) return std::string();
+
 		std::string result;
-		result.reserve(entity.ModelName.size() + entity.BoneNames.size() * 32);
-		result.append(entity.ModelName);
+		result.reserve(entity.Skeleton->ModelName.size() + entity.Skeleton->BoneNames.size() * 32);
+		result.append(entity.Skeleton->ModelName);
 		result.push_back('\n');
-		for (size_t i = 0; i < entity.BoneNames.size(); ++i) {
-			result.append(entity.BoneNames[i]);
+		for (size_t i = 0; i < entity.Skeleton->BoneNames.size(); ++i) {
+			result.append(entity.Skeleton->BoneNames[i]);
 			result.push_back('\0');
-			const int parent = i < entity.BoneParents.size() ? entity.BoneParents[i] : -1;
+			const int parent = i < entity.Skeleton->BoneParents.size() ? entity.Skeleton->BoneParents[i] : -1;
 			result.append((const char*)&parent, sizeof(parent));
 		}
 		return result;
@@ -1294,6 +1305,8 @@ private:
 	int m_NextId = 1;
 	std::map<CEntityInstance*, int> m_EntityIds;
 	std::set<int> m_VisibleLastFrame;
+	std::map<unsigned char*, Cs2SkeletonMetadata> m_SkeletonCache;
+	std::vector<SOURCESDK::matrix3x4_t> m_BoneWorldScratch;
 
 	bool HasActiveSink() {
 		return m_AgrSink.IsRecording() || m_DebugSink.IsEnabled() || m_UdpSink.IsEnabled();
@@ -1375,6 +1388,66 @@ private:
 		return result;
 	}
 
+	const Cs2SkeletonMetadata* GetSkeletonMetadata(
+		unsigned char* modelImp,
+		const char* modelName,
+		unsigned char* boneNamesArray,
+		int16_t* boneParentArray,
+		uint32_t boneCount) {
+		if (!modelImp || !modelName || !boneNamesArray || !boneParentArray || boneCount == 0 || boneCount > kMaxReasonableBoneCount) return nullptr;
+
+		std::map<unsigned char*, Cs2SkeletonMetadata>::iterator it = m_SkeletonCache.find(modelImp);
+		if (it != m_SkeletonCache.end()
+			&& it->second.BoneCount == boneCount
+			&& 0 == strcmp(it->second.ModelName.c_str(), modelName)) {
+			return &it->second;
+		}
+
+		if (!IsLikelyPrintableAscii(modelName, 256) || !IsValidBoneParentArray(boneParentArray, boneCount)) return nullptr;
+
+		Cs2SkeletonMetadata metadata;
+		metadata.ModelImp = modelImp;
+		metadata.ModelName = modelName;
+		metadata.BoneCount = boneCount;
+		metadata.BoneNames.reserve(boneCount);
+		metadata.BoneParents.reserve(boneCount);
+		metadata.BoneUsed.assign(boneCount, 1);
+
+		for (uint32_t i = 0; i < boneCount; ++i) {
+			const char* boneName = TryGetRecordingBoneNameFromArray(boneNamesArray, i);
+			metadata.BoneNames.push_back(boneName ? boneName : "");
+			metadata.BoneParents.push_back((int)boneParentArray[i]);
+		}
+
+		uint32_t* boneFlagsArray = nullptr;
+		if (!IsBadReadPtr(modelImp + kModelBoneFlagsArrayOffset, sizeof(uint32_t*))) {
+			boneFlagsArray = *(uint32_t**)(modelImp + kModelBoneFlagsArrayOffset);
+			int knownCount = 0;
+			int usedCount = 0;
+			int zeroCount = 0;
+			uint32_t unknownMask = 0;
+			metadata.HasBoneFlags = IsLikelyBoneFlagsArray(boneFlagsArray, boneCount, knownCount, usedCount, zeroCount, unknownMask);
+		}
+
+		if (metadata.HasBoneFlags) {
+			for (uint32_t i = 0; i < boneCount; ++i) {
+				metadata.BoneUsed[i] = (boneFlagsArray[i] & kCs2BoneUsedByAnythingMask) != 0 ? 1 : 0;
+			}
+
+			for (uint32_t i = 0; i < boneCount; ++i) {
+				if (!metadata.BoneUsed[i]) continue;
+				int parent = metadata.BoneParents[i];
+				while (parent >= 0 && parent < (int)boneCount && !metadata.BoneUsed[(uint32_t)parent]) {
+					metadata.BoneUsed[(uint32_t)parent] = 1;
+					parent = metadata.BoneParents[(uint32_t)parent];
+				}
+			}
+		}
+
+		m_SkeletonCache[modelImp] = metadata;
+		return &m_SkeletonCache[modelImp];
+	}
+
 	bool SampleEntity(CEntityInstance* entity, bool viewModel, bool projectile, std::set<int>& visibleThisFrame, std::vector<Cs2RecordedEntity>& outEntities) {
 		unsigned char* baseSceneNode = nullptr;
 		const char* baseModelName = nullptr;
@@ -1418,34 +1491,30 @@ private:
 		unsigned char* boneNamesArray = nullptr;
 		int16_t* boneParentArray = nullptr;
 		uint32_t boneCount = 0;
-		bool hasBones = TryGetEntityModelInfo(entity, sceneNode, modelState, modelHandle, modelImp, modelName, boneNamesArray, boneParentArray, boneCount)
-			&& modelName
-			&& IsLikelyPrintableAscii(modelName, 256)
-			&& IsValidBoneParentArray(boneParentArray, boneCount);
-
-		uint32_t* boneFlagsArray = nullptr;
-		bool hasBoneFlags = false;
-		if (hasBones && modelImp && !IsBadReadPtr(modelImp + kModelBoneFlagsArrayOffset, sizeof(uint32_t*))) {
-			boneFlagsArray = *(uint32_t**)(modelImp + kModelBoneFlagsArrayOffset);
-			int knownCount = 0;
-			int usedCount = 0;
-			int zeroCount = 0;
-			uint32_t unknownMask = 0;
-			hasBoneFlags = IsLikelyBoneFlagsArray(boneFlagsArray, boneCount, knownCount, usedCount, zeroCount, unknownMask);
+		const Cs2SkeletonMetadata* skeleton = nullptr;
+		bool hasBones = TryGetEntityModelInfo(entity, sceneNode, modelState, modelHandle, modelImp, modelName, boneNamesArray, boneParentArray, boneCount);
+		if (hasBones) {
+			skeleton = GetSkeletonMetadata(modelImp, modelName, boneNamesArray, boneParentArray, boneCount);
+			hasBones = skeleton != nullptr;
 		}
 
-		std::vector<SOURCESDK::matrix3x4_t> boneWorld;
 		if (hasBones) {
-			boneWorld.resize(boneCount);
+			m_BoneWorldScratch.resize(skeleton->BoneCount);
 			for (uint32_t i = 0; i < boneCount; ++i) {
+				if (skeleton->HasBoneFlags && !skeleton->BoneUsed[i]) {
+					MatrixIdentity(m_BoneWorldScratch[i]);
+					continue;
+				}
+
 				SOURCESDK::Vector origin;
 				SOURCESDK::Quaternion angles;
 				if (!entity->GetBone((int)i, origin, angles)) {
 					hasBones = false;
-					boneWorld.clear();
+					skeleton = nullptr;
+					m_BoneWorldScratch.clear();
 					break;
 				}
-				MatrixFromQuaternionPosition(angles, origin, boneWorld[i]);
+				MatrixFromQuaternionPosition(angles, origin, m_BoneWorldScratch[i]);
 			}
 		}
 
@@ -1455,31 +1524,27 @@ private:
 		}
 
 		sampledEntity.HasBones = true;
-		sampledEntity.BoneNames.reserve(boneCount);
-		sampledEntity.BoneParents.reserve(boneCount);
-		sampledEntity.LocalBoneTransforms.reserve(boneCount);
+		sampledEntity.Skeleton = skeleton;
+		sampledEntity.LocalBoneTransforms.reserve(skeleton->BoneCount);
 
-		for (uint32_t i = 0; i < boneCount; ++i) {
+		for (uint32_t i = 0; i < skeleton->BoneCount; ++i) {
 			SOURCESDK::matrix3x4_t parentInverse;
 			SOURCESDK::matrix3x4_t localBone;
-			const char* boneName = TryGetRecordingBoneNameFromArray(boneNamesArray, i);
-			sampledEntity.BoneNames.push_back(boneName ? boneName : "");
-			sampledEntity.BoneParents.push_back((int)boneParentArray[i]);
 
-			const bool boneIsUsed = !hasBoneFlags || ((boneFlagsArray[i] & kCs2BoneUsedByAnythingMask) != 0);
+			const bool boneIsUsed = !skeleton->HasBoneFlags || skeleton->BoneUsed[i] != 0;
 			if (!boneIsUsed) {
 				MatrixIdentity(localBone);
 				sampledEntity.LocalBoneTransforms.push_back(localBone);
 				continue;
 			}
 
-			int parentIndex = (int)boneParentArray[i];
-			if (parentIndex >= 0 && (uint32_t)parentIndex < boneCount) {
-				MatrixInvertRigid(boneWorld[(uint32_t)parentIndex], parentInverse);
+			int parentIndex = i < skeleton->BoneParents.size() ? skeleton->BoneParents[i] : -1;
+			if (parentIndex >= 0 && (uint32_t)parentIndex < skeleton->BoneCount) {
+				MatrixInvertRigid(m_BoneWorldScratch[(uint32_t)parentIndex], parentInverse);
 			} else {
 				MatrixInvertRigid(entityTransform, parentInverse);
 			}
-			MatrixConcat(parentInverse, boneWorld[i], localBone);
+			MatrixConcat(parentInverse, m_BoneWorldScratch[i], localBone);
 			sampledEntity.LocalBoneTransforms.push_back(localBone);
 		}
 
