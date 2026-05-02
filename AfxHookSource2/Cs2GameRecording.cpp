@@ -704,7 +704,7 @@ private:
 		std::vector<FrameChunk> chunks;
 		chunks.push_back(FrameChunk());
 
-		const size_t basePacketBytes = 12 + sizeof(float) + sizeof(uint32_t) + 2 * sizeof(uint16_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t);
+		const size_t basePacketBytes = 12 + sizeof(float) + sizeof(uint32_t) + 2 * sizeof(uint16_t) + 2 * sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t);
 		const size_t finalOnlyBytes = frame.HiddenEntityIds.size() * sizeof(int32_t) + (frame.HasCamera ? 7 * sizeof(float) : 0);
 		for (std::vector<Cs2RecordedEntity>::const_iterator it = frame.Entities.begin(); it != frame.Entities.end(); ++it) {
 			std::vector<unsigned char> entityBytes;
@@ -752,11 +752,48 @@ private:
 	}
 
 	void BeginFramePacket(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame, uint32_t frameId, uint16_t chunkIndex, uint16_t chunkCount) {
+		uint32_t frameRateNumerator = 30;
+		uint32_t frameRateDenominator = 1;
+		GetFrameRateFromDeltaTime(frame.FrameTime, frameRateNumerator, frameRateDenominator);
+
 		AppendHeader(packet, kPacketTypeFrame, m_Sequence++);
 		AppendFloat(packet, frame.FrameTime);
 		AppendU32(packet, frameId);
 		AppendU16(packet, chunkIndex);
 		AppendU16(packet, chunkCount);
+		AppendU32(packet, frameRateNumerator);
+		AppendU32(packet, frameRateDenominator);
+	}
+
+	static void GetFrameRateFromDeltaTime(float deltaTime, uint32_t& outNumerator, uint32_t& outDenominator) {
+		outNumerator = 30;
+		outDenominator = 1;
+		if (deltaTime <= 0.0f) return;
+
+		const double framesPerSecond = 1.0 / (double)deltaTime;
+		const uint32_t roundedFps = (uint32_t)llround(framesPerSecond);
+		if (roundedFps >= 1 && roundedFps <= 10000 && fabs(framesPerSecond - (double)roundedFps) < 0.01) {
+			outNumerator = roundedFps;
+			outDenominator = 1;
+			return;
+		}
+
+		const uint32_t scale = 1000000;
+		uint32_t denominator = (uint32_t)llround((double)deltaTime * (double)scale);
+		if (denominator == 0) return;
+		uint32_t numerator = scale;
+		const uint32_t divisor = Gcd(numerator, denominator);
+		outNumerator = numerator / divisor;
+		outDenominator = denominator / divisor;
+	}
+
+	static uint32_t Gcd(uint32_t a, uint32_t b) {
+		while (b != 0) {
+			uint32_t t = b;
+			b = a % b;
+			a = t;
+		}
+		return a == 0 ? 1 : a;
 	}
 
 	static void AppendCamera(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame) {
@@ -840,7 +877,7 @@ private:
 		AppendU8(packet, 'F');
 		AppendU8(packet, 'X');
 		AppendU8(packet, 'L');
-		AppendU16(packet, 4);
+		AppendU16(packet, 5);
 		AppendU16(packet, packetType);
 		AppendU32(packet, sequence);
 	}
