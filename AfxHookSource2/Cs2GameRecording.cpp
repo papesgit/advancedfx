@@ -626,7 +626,7 @@ public:
 		if (!OpenSocket()) return false;
 		m_Enabled = true;
 		m_Sequence = 0;
-		m_SentSkeletonSignatures.clear();
+		m_SentSkeletons.clear();
 		return true;
 	}
 
@@ -675,17 +675,18 @@ private:
 	uint32_t m_FrameId = 0;
 	uint32_t m_LastLargePacketWarningSequence = 0;
 	uint32_t m_LastSocketWarningSequence = 0;
-	std::map<int, std::string> m_SentSkeletonSignatures;
+	std::map<int, const Cs2SkeletonMetadata*> m_SentSkeletons;
+	std::vector<unsigned char> m_PacketScratch;
 
 	void SendSkeletonPackets(const Cs2RecordedFrame& frame) {
 		for (std::vector<Cs2RecordedEntity>::const_iterator it = frame.Entities.begin(); it != frame.Entities.end(); ++it) {
 			if (!it->HasBones || !it->Skeleton) continue;
 
-			std::string signature = BuildSkeletonSignature(*it);
-			std::map<int, std::string>::iterator knownIt = m_SentSkeletonSignatures.find(it->Id);
-			if (knownIt != m_SentSkeletonSignatures.end() && knownIt->second == signature) continue;
+			std::map<int, const Cs2SkeletonMetadata*>::iterator knownIt = m_SentSkeletons.find(it->Id);
+			if (knownIt != m_SentSkeletons.end() && knownIt->second == it->Skeleton) continue;
 
-			std::vector<unsigned char> packet;
+			std::vector<unsigned char>& packet = m_PacketScratch;
+			packet.clear();
 			packet.reserve(4096);
 			AppendHeader(packet, kPacketTypeSkeleton, m_Sequence);
 			AppendI32(packet, it->Id);
@@ -698,54 +699,50 @@ private:
 			}
 
 			if (SendPacket(packet, "skeleton")) {
-				m_SentSkeletonSignatures[it->Id] = signature;
+				m_SentSkeletons[it->Id] = it->Skeleton;
 			}
 		}
 	}
 
 	void SendFramePackets(const Cs2RecordedFrame& frame) {
-		struct FrameChunk {
-			std::vector<std::vector<unsigned char> > Entities;
-			size_t EntityBytes = 0;
-		};
-
 		const uint32_t frameId = m_FrameId++;
-		std::vector<FrameChunk> chunks;
-		chunks.push_back(FrameChunk());
-
 		const size_t basePacketBytes = 12 + sizeof(float) + sizeof(uint32_t) + 2 * sizeof(uint16_t) + 2 * sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t);
 		const size_t finalOnlyBytes = frame.HiddenEntityIds.size() * sizeof(int32_t) + (frame.HasCamera ? 7 * sizeof(float) : 0);
-		for (std::vector<Cs2RecordedEntity>::const_iterator it = frame.Entities.begin(); it != frame.Entities.end(); ++it) {
-			std::vector<unsigned char> entityBytes;
-			entityBytes.reserve(1024);
-			AppendFrameEntity(entityBytes, *it);
-
-			FrameChunk& chunk = chunks.back();
-			const size_t currentMaxSize = basePacketBytes + chunk.EntityBytes + entityBytes.size() + finalOnlyBytes;
-			if (currentMaxSize > kMaxPacketBytes && !chunk.Entities.empty()) {
-				chunks.push_back(FrameChunk());
-			}
-
-			FrameChunk& targetChunk = chunks.back();
-			const size_t targetMaxSize = basePacketBytes + targetChunk.EntityBytes + entityBytes.size() + finalOnlyBytes;
-			if (targetMaxSize > kMaxPacketBytes) {
-				WarnPacketTooLarge(targetMaxSize);
-				continue;
-			}
-
-			targetChunk.EntityBytes += entityBytes.size();
-			targetChunk.Entities.push_back(entityBytes);
+		if (basePacketBytes + finalOnlyBytes > kMaxPacketBytes) {
+			WarnPacketTooLarge(basePacketBytes + finalOnlyBytes);
+			return;
 		}
 
-		const uint16_t chunkCount = (uint16_t)chunks.size();
-		for (uint16_t chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
-			const bool isFinalChunk = chunkIndex + 1 == chunkCount;
-			std::vector<unsigned char> packet;
-			packet.reserve(4096 + chunks[chunkIndex].EntityBytes);
-			BeginFramePacket(packet, frame, frameId, chunkIndex, chunkCount);
-			AppendU32(packet, (uint32_t)chunks[chunkIndex].Entities.size());
-			for (std::vector<std::vector<unsigned char> >::const_iterator it = chunks[chunkIndex].Entities.begin(); it != chunks[chunkIndex].Entities.end(); ++it) {
-				packet.insert(packet.end(), it->begin(), it->end());
+		size_t entityIndex = 0;
+		uint16_t chunkIndex = 0;
+		do {
+			const size_t chunkStartEntityIndex = entityIndex;
+			size_t chunkEntityBytes = 0;
+			uint32_t chunkEntityCount = 0;
+
+			while (entityIndex < frame.Entities.size()) {
+				const size_t entityBytes = GetFrameEntityPacketSize(frame.Entities[entityIndex]);
+				const size_t targetMaxSize = basePacketBytes + finalOnlyBytes + chunkEntityBytes + entityBytes;
+				if (targetMaxSize > kMaxPacketBytes) {
+					if (chunkEntityCount > 0) break;
+					WarnPacketTooLarge(targetMaxSize);
+					++entityIndex;
+					continue;
+				}
+
+				chunkEntityBytes += entityBytes;
+				++chunkEntityCount;
+				++entityIndex;
+			}
+
+			const bool isFinalChunk = entityIndex >= frame.Entities.size();
+			std::vector<unsigned char>& packet = m_PacketScratch;
+			packet.clear();
+			packet.reserve(4096 + chunkEntityBytes);
+			BeginFramePacket(packet, frame, frameId, chunkIndex, isFinalChunk ? kFrameChunkFlagFinal : 0);
+			AppendU32(packet, chunkEntityCount);
+			for (size_t i = 0; i < chunkEntityCount; ++i) {
+				AppendFrameEntity(packet, frame.Entities[chunkStartEntityIndex + i]);
 			}
 			if (isFinalChunk) {
 				AppendHiddenIds(packet, frame);
@@ -755,12 +752,21 @@ private:
 				AppendU8(packet, 0);
 			}
 			SendPacket(packet, "frame");
-		}
+
+			if (isFinalChunk) break;
+			if (chunkIndex == UINT16_MAX) {
+				advancedfx::Warning("mirv_livelink: too many chunks for frame %u.\n", frameId);
+				break;
+			}
+			++chunkIndex;
+		} while (entityIndex < frame.Entities.size());
 
 		ForgetHiddenSkeletons(frame);
 	}
 
-	void BeginFramePacket(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame, uint32_t frameId, uint16_t chunkIndex, uint16_t chunkCount) {
+	enum { kFrameChunkFlagFinal = 1 };
+
+	void BeginFramePacket(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame, uint32_t frameId, uint16_t chunkIndex, uint16_t chunkFlags) {
 		uint32_t frameRateNumerator = 30;
 		uint32_t frameRateDenominator = 1;
 		GetFrameRateFromDeltaTime(frame.FrameTime, frameRateNumerator, frameRateDenominator);
@@ -769,7 +775,7 @@ private:
 		AppendFloat(packet, frame.FrameTime);
 		AppendU32(packet, frameId);
 		AppendU16(packet, chunkIndex);
-		AppendU16(packet, chunkCount);
+		AppendU16(packet, chunkFlags);
 		AppendU32(packet, frameRateNumerator);
 		AppendU32(packet, frameRateDenominator);
 	}
@@ -822,7 +828,6 @@ private:
 		AppendI32(packet, entity.Id);
 		AppendI32(packet, entity.OwnerId);
 		AppendU8(packet, entity.Projectile ? 1 : 0);
-		AppendString(packet, entity.ModelName);
 		AppendU8(packet, entity.Visible ? 1 : 0);
 		AppendU8(packet, entity.ViewModel ? 1 : 0);
 		AppendMatrix3x4(packet, entity.Transform);
@@ -834,6 +839,18 @@ private:
 		}
 	}
 
+	static size_t GetFrameEntityPacketSize(const Cs2RecordedEntity& entity) {
+		return sizeof(int32_t) // Id
+			+ sizeof(int32_t) // OwnerId
+			+ sizeof(uint8_t) // Projectile
+			+ sizeof(uint8_t) // Visible
+			+ sizeof(uint8_t) // ViewModel
+			+ 12 * sizeof(float) // Transform
+			+ sizeof(uint8_t) // HasBones
+			+ sizeof(uint32_t) // BoneCount
+			+ entity.LocalBoneTransforms.size() * 12 * sizeof(float);
+	}
+
 	static void AppendHiddenIds(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame) {
 		AppendU32(packet, (uint32_t)frame.HiddenEntityIds.size());
 		for (std::vector<int>::const_iterator it = frame.HiddenEntityIds.begin(); it != frame.HiddenEntityIds.end(); ++it) {
@@ -843,24 +860,8 @@ private:
 
 	void ForgetHiddenSkeletons(const Cs2RecordedFrame& frame) {
 		for (std::vector<int>::const_iterator it = frame.HiddenEntityIds.begin(); it != frame.HiddenEntityIds.end(); ++it) {
-			m_SentSkeletonSignatures.erase(*it);
+			m_SentSkeletons.erase(*it);
 		}
-	}
-
-	static std::string BuildSkeletonSignature(const Cs2RecordedEntity& entity) {
-		if (!entity.Skeleton) return std::string();
-
-		std::string result;
-		result.reserve(entity.Skeleton->ModelName.size() + entity.Skeleton->BoneNames.size() * 32);
-		result.append(entity.Skeleton->ModelName);
-		result.push_back('\n');
-		for (size_t i = 0; i < entity.Skeleton->BoneNames.size(); ++i) {
-			result.append(entity.Skeleton->BoneNames[i]);
-			result.push_back('\0');
-			const int parent = i < entity.Skeleton->BoneParents.size() ? entity.Skeleton->BoneParents[i] : -1;
-			result.append((const char*)&parent, sizeof(parent));
-		}
-		return result;
 	}
 
 	bool SendPacket(const std::vector<unsigned char>& packet, const char* label) {
@@ -888,14 +889,9 @@ private:
 		AppendU8(packet, 'F');
 		AppendU8(packet, 'X');
 		AppendU8(packet, 'L');
-		AppendU16(packet, 5);
+		AppendU16(packet, 7);
 		AppendU16(packet, packetType);
 		AppendU32(packet, sequence);
-	}
-
-	static void PatchU32(std::vector<unsigned char>& packet, size_t offset, uint32_t value) {
-		if (offset + sizeof(value) > packet.size()) return;
-		memcpy(packet.data() + offset, &value, sizeof(value));
 	}
 
 	bool OpenSocket() {
@@ -1687,6 +1683,7 @@ CON_COMMAND(mirv_livelink, "Source 2 Live Link streaming") {
 			"mirv_livelink recordViewmodel 0|1\n"
 			"mirv_livelink recordProjectiles 0|1\n"
 			"mirv_livelink recordSpectated 0|1\n"
+			"mirv_livelink recordAll 0|1\n"
 			"mirv_livelink debugInterval <iFrames>\n"
 			"mirv_livelink fps default|<fValue>\n"
 			"mirv_livelink status\n"
@@ -1715,6 +1712,28 @@ CON_COMMAND(mirv_livelink, "Source 2 Live Link streaming") {
 	if (handleBoolSetting("recordViewModel", g_Cs2AgrRecorder.GetLiveRecordViewModel(), &Cs2AgrRecorder::SetLiveRecordViewModel)) return;
 	if (handleBoolSetting("recordProjectiles", g_Cs2AgrRecorder.GetLiveRecordProjectiles(), &Cs2AgrRecorder::SetLiveRecordProjectiles)) return;
 	if (handleBoolSetting("recordSpectated", g_Cs2AgrRecorder.GetLiveRecordSpectated(), &Cs2AgrRecorder::SetLiveRecordSpectated)) return;
+
+	if (0 == _stricmp(cmd, "recordAll")) {
+		if (argc >= 3) {
+			const bool value = atoi(args->ArgV(2)) != 0;
+			g_Cs2AgrRecorder.SetLiveRecordPlayers(value);
+			g_Cs2AgrRecorder.SetLiveRecordWeapons(value);
+			g_Cs2AgrRecorder.SetLiveRecordViewModel(value);
+			g_Cs2AgrRecorder.SetLiveRecordProjectiles(value);
+			g_Cs2AgrRecorder.SetLiveRecordSpectated(value);
+			return;
+		}
+
+		advancedfx::Message(
+			"mirv_livelink recordAll 0|1\n"
+			"Current values: recordPlayers %d recordWeapons %d recordViewmodel %d recordProjectiles %d recordSpectated %d\n",
+			g_Cs2AgrRecorder.GetLiveRecordPlayers() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveRecordWeapons() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveRecordViewModel() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveRecordProjectiles() ? 1 : 0,
+			g_Cs2AgrRecorder.GetLiveRecordSpectated() ? 1 : 0);
+		return;
+	}
 
 	if (0 == _stricmp(cmd, "udp")) {
 		if (argc >= 3) {
