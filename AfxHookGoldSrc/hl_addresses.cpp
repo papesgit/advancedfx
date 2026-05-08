@@ -2,6 +2,8 @@
 
 #include "hl_addresses.h"
 
+#include "AfxSteamLegacy.h"
+
 #include <shared/binutils.h>
 
 using namespace Afx::BinUtils;
@@ -13,17 +15,32 @@ AFXADDR_DEF(engine_ClientFunctionTable)
 AFXADDR_DEF(CL_Disconnect)
 AFXADDR_DEF(CL_EmitEntities)
 AFXADDR_DEF(CL_ParseServerMessage_CmdRead)
+AFXADDR_DEF(CL_ParseServerMessage_CmdRead_MsgReadByte_CallAddrOfs)
 AFXADDR_DEF(CL_ParseServerMessage_CmdRead_DSZ)
 AFXADDR_DEF(p_cmd_functions)
 AFXADDR_DEF(S_Update_)
 AFXADDR_DEF(_Host_Frame)
 AFXADDR_DEF(Host_Init)
 AFXADDR_DEF(Mod_LeafPVS)
+
+// SteamLegacy only:
+AFXADDR_DEF(R_DrawEntitiesOnList)
+
+// Current only:
 AFXADDR_DEF(R_DrawEntitiesOnList_In)
 AFXADDR_DEF(R_DrawEntitiesOnList_Out)
+
 AFXADDR_DEF(R_DrawParticles)
+
+// BEGIN SteamLegacy only
+AFXADDR_DEF(R_DrawSkyBoxEx)
+// END SteamLegacy only
+
+// BEGIN Current only
 AFXADDR_DEF(R_DrawSkyBox_Begin)
 AFXADDR_DEF(R_DrawSkyBox_End)
+// END Current only
+
 AFXADDR_DEF(R_DrawViewModel)
 AFXADDR_DEF(R_PolyBlend)
 AFXADDR_DEF(R_PushDlights)
@@ -108,6 +125,12 @@ void ErrorBox(char const * messageText)
 #define STRINGIZE2(x) #x
 #define MkErrStr(file,line) "Problem in " file ":" STRINGIZE(line)
 
+bool g_bHas_A3D_DLL_String = false;
+
+bool AfxSteamLegacy() {
+	return g_bHas_A3D_DLL_String;
+}
+
 void Addresses_InitHwDll(AfxAddr hwDll)
 {
 	AFXADDR_SET(hwDll, hwDll);
@@ -138,59 +161,141 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 		else ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
-	// pEngfuncs // [5] // Checked: 2023-12-16
-	// ppmove // [5] // Checked: 2023-12-16
-	// pstudio // [5] // Checked: 2023-12-16
-	{
-		MemRange s1 = FindCString(data1Range, "ScreenFade");
+	// Presence of this stirng indicates steam_legacy version or older:
+	g_bHas_A3D_DLL_String = !(FindCString(data2Range, "A3D.DLL").IsEmpty());
 
-		if (!s1.IsEmpty()) {
-
-			MemRange r1 = FindBytes(textRange, (const char *)&s1.Start, sizeof(s1.Start));
-
-			if (!r1.IsEmpty()) {
-
-				MemRange r2 = FindPatternString(textRange.And(MemRange(r1.Start + 0x09, r1.Start + 0x09 + 30)), "6A 07 68 ?? ?? ?? ?? FF 15 ?? ?? ?? ?? a1 ?? ?? ?? ?? 83 c4 18 85 c0 74 ?? 68 ?? ?? ?? ??");
-
-				if (!r2.IsEmpty()) {
-
-					AFXADDR_SET(pEngfuncs, *(DWORD *)(r2.Start + 3));
-					AFXADDR_SET(ppmove, *(DWORD *)(r2.Start + 26));
-				}
-				else ErrorBox(MkErrStr(__FILE__, __LINE__));
-			}
-			else ErrorBox(MkErrStr(__FILE__, __LINE__));
-		}
-		else ErrorBox(MkErrStr(__FILE__, __LINE__));
-
-		s1 = MemRange(data1Range.Start, data1Range.Start);
-
-		for (int i = 0; i < 1; ++i)
+	if(AfxSteamLegacy()){
+		// pEngfuncs // [5] // Checked: 2018-10-06
+		// ppmove // [5] // Checked: 2018-10-06
+		// pstudio // [5] // Checked: 2018-10-06
 		{
-			s1 = FindCString(MemRange(s1.End, data1Range.End), "HUD_GetStudioModelInterface");
-		}
+			MemRange s1 = FindCString(data2Range, "ScreenFade");
 
-		if (!s1.IsEmpty()) {
+			if (!s1.IsEmpty()) {
 
-			MemRange r1 = FindBytes(textRange, (const char *)&s1.Start, sizeof(s1.Start));
+				MemRange r1 = FindBytes(textRange, (const char *)&s1.Start, sizeof(s1.Start));
 
-			if (!r1.IsEmpty()) {
+				if (!r1.IsEmpty()) {
 
-				MemRange r2 = FindPatternString(textRange.And(MemRange(r1.Start + 0x4, r1.Start + 0x4 + 26)), "56 ff 15 ?? ?? ?? ?? a1 ?? ?? ?? ?? 85 c0 74 ?? 68 ?? ?? ?? ?? 68 ?? ?? ?? ??");
+					MemRange r2 = FindPatternString(textRange.And(MemRange(r1.Start + 0x09, r1.Start + 0x09 + 23)), "6A 07 68 ?? ?? ?? ?? FF 15 ?? ?? ?? ?? 68 ?? ?? ?? ?? E8 ?? ?? ?? ??");
 
-				if (!r2.IsEmpty()) {
+					if (!r2.IsEmpty()) {
 
-					AFXADDR_SET(pstudio, *(DWORD *)(r2.Start + 17));
+						AFXADDR_SET(pEngfuncs, *(DWORD *)(r2.Start + 3));
+						AFXADDR_SET(ppmove, *(DWORD *)(r2.Start + 14));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+			s1 = MemRange(data2Range.Start, data2Range.Start);
+
+			for (int i = 0; i < 2; ++i)
+			{
+				s1 = FindCString(MemRange(s1.End, data2Range.End), "HUD_GetStudioModelInterface");
+			}
+
+			if (!s1.IsEmpty()) {
+
+				MemRange r1 = FindBytes(textRange, (const char *)&s1.Start, sizeof(s1.Start));
+
+				if (!r1.IsEmpty()) {
+
+					MemRange r2 = FindPatternString(textRange.And(MemRange(r1.Start + 0x14, r1.Start + 0x14 + 14)), "68 ?? ?? ?? ?? 68 ?? ?? ?? ?? 6A 01 FF D0");
+
+					if (!r2.IsEmpty()) {
+
+						AFXADDR_SET(pstudio, *(DWORD *)(r2.Start + 1));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		}		
+	} else {
+		// pEngfuncs // [5] // Checked: 2023-12-16
+		// ppmove // [5] // Checked: 2023-12-16
+		// pstudio // [5] // Checked: 2023-12-16
+		{
+			MemRange s1 = FindCString(data1Range, "ScreenFade");
+
+			if (!s1.IsEmpty()) {
+
+				MemRange r1 = FindBytes(textRange, (const char *)&s1.Start, sizeof(s1.Start));
+
+				if (!r1.IsEmpty()) {
+
+					MemRange r2 = FindPatternString(textRange.And(MemRange(r1.Start + 0x09, r1.Start + 0x09 + 30)), "6A 07 68 ?? ?? ?? ?? FF 15 ?? ?? ?? ?? a1 ?? ?? ?? ?? 83 c4 18 85 c0 74 ?? 68 ?? ?? ?? ??");
+
+					if (!r2.IsEmpty()) {
+
+						AFXADDR_SET(pEngfuncs, *(DWORD *)(r2.Start + 3));
+						AFXADDR_SET(ppmove, *(DWORD *)(r2.Start + 26));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+			s1 = MemRange(data1Range.Start, data1Range.Start);
+
+			for (int i = 0; i < 1; ++i)
+			{
+				s1 = FindCString(MemRange(s1.End, data1Range.End), "HUD_GetStudioModelInterface");
+			}
+
+			if (!s1.IsEmpty()) {
+
+				MemRange r1 = FindBytes(textRange, (const char *)&s1.Start, sizeof(s1.Start));
+
+				if (!r1.IsEmpty()) {
+
+					MemRange r2 = FindPatternString(textRange.And(MemRange(r1.Start + 0x4, r1.Start + 0x4 + 26)), "56 ff 15 ?? ?? ?? ?? a1 ?? ?? ?? ?? 85 c0 74 ?? 68 ?? ?? ?? ?? 68 ?? ?? ?? ??");
+
+					if (!r2.IsEmpty()) {
+
+						AFXADDR_SET(pstudio, *(DWORD *)(r2.Start + 17));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
 				}
 				else ErrorBox(MkErrStr(__FILE__, __LINE__));
 			}
 			else ErrorBox(MkErrStr(__FILE__, __LINE__));
 		}
-		else ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
-	// engine_ClientFunctionTable // [9] // Checked: 2023-12-20
-	{
+	if(AfxSteamLegacy()) {
+		// engine_ClientFunctionTable // [9] // Checked: 2018-09-01
+
+		MemRange tmp1 = FindCString(data2Range, "Initialize");
+		if (!tmp1.IsEmpty())
+		{
+			MemRange refTmp1 = FindBytes(textRange, (const char *)&tmp1.Start, sizeof(tmp1.Start));
+			if (!refTmp1.IsEmpty())
+			{
+				{
+					MemRange tmp2 = textRange.And(MemRange(refTmp1.Start + 0x11, refTmp1.Start + 0x11 + 0x7));
+					if (!tmp2.IsEmpty())
+					{
+						if (!FindPatternString(tmp2, "85 C0 A3 ?? ?? ?? ??").IsEmpty())
+						{
+							AFXADDR_SET(engine_ClientFunctionTable, *(DWORD *)(tmp2.Start + 0x3));
+						}
+						else ErrorBox(MkErrStr(__FILE__, __LINE__));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+				}
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));
+	} else {
+		// engine_ClientFunctionTable // [9] // Checked: 2023-12-20
+
 		MemRange tmp1 = FindCString(data1Range, "Initialize");
 		if (!tmp1.IsEmpty())
 		{
@@ -220,7 +325,32 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 	//
 
 	// Host_Init [18] // Checked: 2023-12-20
-	{
+	if(AfxSteamLegacy()) {
+		{
+			MemRange tmp1 = FindCString(data2Range, "-toconsole");
+			if (!tmp1.IsEmpty())
+			{
+				MemRange refTmp1 = FindBytes(textRange, (const char *)&tmp1.Start, sizeof(tmp1.Start));
+				if (!refTmp1.IsEmpty())
+				{
+					{
+						MemRange tmp2 = textRange.And(MemRange(refTmp1.Start - 0x77, refTmp1.Start - 0x77 + 0x3));
+						if (!tmp2.IsEmpty())
+						{
+							if (!FindPatternString(tmp2, "55 8B EC").IsEmpty())
+							{
+								AFXADDR_SET(Host_Init, tmp2.Start);
+							}
+							else ErrorBox(MkErrStr(__FILE__, __LINE__));
+						}
+						else ErrorBox(MkErrStr(__FILE__, __LINE__));
+					}
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		}
+	} else {
 		MemRange tmp1 = FindCString(data1Range, "-toconsole");
 		if (!tmp1.IsEmpty())
 		{
@@ -245,10 +375,73 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 		else ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
-	// _Host_Frame [8] // Checked: 2023-12-20
-	// host_frametime [8] // Checked: 2023-12-20
-	// CL_EmitEntities // [8] // Checked: 2023-12-20
-	{
+	if(AfxSteamLegacy()) {
+		// _Host_Frame [8] // Checked: 2018-09-01
+		// host_frametime [8] // Checked: 2018-09-01
+		// CL_EmitEntities // [8] // Checked: 2018-09-01
+		MemRange tmp1 = FindCString(data2Range, "host_killtime");
+		if (!tmp1.IsEmpty())
+		{
+			MemRange refTmp1 = FindBytes(data2Range, (const char *)&tmp1.Start, sizeof(tmp1.Start));
+			if (!refTmp1.IsEmpty())
+			{
+				DWORD tmpAddr = refTmp1.Start + 0x0C;
+
+				MemRange refTmp2 = FindBytes(textRange, (const char *)&tmpAddr, sizeof(tmpAddr));
+				if (!refTmp2.IsEmpty())
+				{
+
+					MemRange tmp2 = textRange.And(MemRange(refTmp2.Start - 0x18D, refTmp2.Start - 0x18D + 0x3));
+					if (!tmp2.IsEmpty())
+					{
+						if (!FindPatternString(tmp2, "55 8B EC").IsEmpty())
+						{
+							AFXADDR_SET(_Host_Frame, tmp2.Start);
+						}
+						else ErrorBox(MkErrStr(__FILE__, __LINE__));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+/*
+.text:01D562B9     loc_1D562B9:                            ; CODE XREF: sub_1D56200+...
+.text:01D562B9 004                 mov     edx, dword ptr dbl_27B4068+4
+.text:01D562BF 004                 mov     eax, dword ptr dbl_27B4068
+.text:01D562C4 004                 push    edx
+.text:01D562C5 008                 push    eax
+.text:01D562C6 00C                 call    sub_1D0BE00 // ClientDLL_Frame(host_frametime);
+.text:01D562CB 00C                 add     esp, 8
+.text:01D562CE 004                 call    sub_1D20340
+.text:01D562D3 004                 call    sub_1D16E50
+.text:01D562D8 004                 call    sub_1D20350
+.text:01D562DD 004                 call    sub_1D56100
+.text:01D562E2 004                 call    sub_1D14A30 // CL_EmitEntities
+.text:01D562E7 004                 call    sub_1D17BD0
+.text:01D562EC
+.text:01D562EC     loc_1D562EC:                            ; CODE XREF: sub_1D56200+...
+*/
+
+					tmp2 = textRange.And(MemRange(refTmp2.Start - 0x0D4, refTmp2.Start - 0x0D4 + 0x33));
+					if (!tmp2.IsEmpty())
+					{
+						if (!FindPatternString(tmp2, "8B 15 ?? ?? ?? ?? A1 ?? ?? ?? ?? 52 50 E8 ?? ?? ?? ?? 83 C4 08 E8 ?? ?? ?? ?? E8 ?? ?? ?? ??  E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? ?? ??").IsEmpty())
+						{
+							AFXADDR_SET(host_frametime, *(DWORD *)(tmp2.Start +0x7));
+							AFXADDR_SET(CL_EmitEntities, *(DWORD *)(tmp2.Start + 0x33 -0x5 -0x4) + (DWORD)(tmp2.Start + 0x33 - 0x5)); // Decode Call
+						}
+						else ErrorBox(MkErrStr(__FILE__, __LINE__));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));
+	} else {
+		// _Host_Frame [8] // Checked: 2023-12-20
+		// host_frametime [8] // Checked: 2023-12-20
+		// CL_EmitEntities // [8] // Checked: 2023-12-20
 		MemRange tmp1 = FindCString(data1Range, "host_killtime");
 		if (!tmp1.IsEmpty())
 		{
@@ -387,8 +580,17 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 		else ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
-	// CL_Disconnect // [16] // Checked: 2023-11-22
-	{
+	if(AfxSteamLegacy()) {
+		// CL_Disconnect // [16] // Checked: 2021-02-24
+		MemRange r1 = FindPatternString(textRange, "55 8B EC 83 EC 14 53 56 33 DB");
+
+		if (!r1.IsEmpty())
+		{
+			AFXADDR_SET(CL_Disconnect, r1.Start);
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));
+	} else {
+		// CL_Disconnect // [16] // Checked: 2023-11-22
 		MemRange s1 = FindCString(data1Range, "ExitGame");
 		if (!s1.IsEmpty())
 		{
@@ -406,9 +608,40 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 		else ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 	
-	// p_cmd_functions // Checked: 2023-12-22
-	// We are actually at the inlined Cmd_Exists in Cmd_AddCommand (shortly before the string we search) in order to get the cmd_functions root:
-	{
+	if(AfxSteamLegacy()) {
+		// p_cmd_functions // Checked: 2018-09-01
+		// We are actually at the inlined Cmd_Exists in Cmd_AddCommand (shortly before the string we search) in order to get the cmd_functions root:
+		MemRange tmp1 = FindCString(data2Range, "Cmd_AddCommand: %s already defined\n");
+		if (!tmp1.IsEmpty())
+		{
+			MemRange refTmp1 = FindBytes(textRange, (const char *)&tmp1.Start, sizeof(tmp1.Start));
+			if (!refTmp1.IsEmpty())
+			{
+				MemRange tmp2 = textRange.And(MemRange(refTmp1.Start - 0x42, refTmp1.Start - 0x42 + 0x8));
+				if (!tmp2.IsEmpty())
+				{
+/*
+.text:01D279A6     loc_1D279A6:                            ; CODE XREF: sub_1D27960+...
+.text:01D279A6 020                 mov     esi, dword_1FE08A0
+.text:01D279AC 020                 test    esi, esi
+.text:01D279AE 020                 jz      short loc_1D279C7
+.text:01D279B0
+.text:01D279B0     loc_1D279B0:                            ; CODE XREF: sub_1D27960+...
+*/
+					if (!FindPatternString(tmp2, "8B 35 ?? ?? ?? ?? 85 F6").IsEmpty())
+					{
+						AFXADDR_SET(p_cmd_functions, *(DWORD *)(tmp2.Start + 0x2));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));
+	} else {
+		// p_cmd_functions // Checked: 2023-12-22
+		// We are actually at the inlined Cmd_Exists in Cmd_AddCommand (shortly before the string we search) in order to get the cmd_functions root:
 		MemRange tmp1 = FindCString(data1Range, "Cmd_AddCommand: %s already defined\n");
 		if (!tmp1.IsEmpty())
 		{
@@ -443,8 +676,24 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 	// Rendering related:
 	//
 
-	// UnkDrawHud* // [7] // Checked 2023-12-22
-	{
+	if(AfxSteamLegacy()) {
+		// UnkDrawHud* // [7] // Checked 2018-09-08
+		MemRange r1 = FindPatternString(textRange, "E8 ?? ?? ?? ?? A1 ?? ?? ?? ?? BF 05 00 00 00 3B C7 75 39 83 3D ?? ?? ?? ?? 02 75 30 A1 ?? ?? ?? ?? 88 5D FC 83 F8 01 75 04 C6 45 FC 01 53 E8 ?? ?? ?? ?? 8B 4D FC 81 E1 FF 00 00 00 51 E8 ?? ?? ?? ?? 6A 01 E8 ?? ?? ?? ?? 83 C4 0C 39 1D ?? ?? ?? ?? 75 16 83 3D ?? ?? ?? ?? 01 75 08 39 1D ?? ?? ?? ?? 74 05 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 39 3D ?? ?? ?? ?? 75 0E 83 3D ?? ?? ?? ?? 02 75 05 E8 ?? ?? ?? ?? E8 ?? ?? ?? ??");
+
+		if (!r1.IsEmpty())
+		{
+			AFXADDR_SET(UnkDrawHudInCall, *(DWORD *)(r1.Start + 1) + (DWORD)(r1.Start + 1 + 4)); // [7] // Decode Call
+			AFXADDR_SET(UnkDrawHudOutCall, *(DWORD *)(r1.Start + 134) + (DWORD)(r1.Start + 134 + 4)); // [7] // Decode Call
+
+			AFXADDR_SET(UnkDrawHudIn, r1.Start); // [7]
+			AFXADDR_SET(UnkDrawHudInContinue, AFXADDR_GET(UnkDrawHudIn) + 0x5); // [7]
+			AFXADDR_SET(UnkDrawHudOut, r1.Start + 133); // [7]
+			AFXADDR_SET(UnkDrawHudOutContinue, AFXADDR_GET(UnkDrawHudOut) + 0x5); // [7]
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+	} else {
+		// UnkDrawHud* // [7] // Checked 2023-12-22
 		MemRange r1 = FindPatternString(textRange, "e8 ?? ?? ?? ?? 83 3d ?? ?? ?? ?? 05 75 33 83 3d ?? ?? ?? ?? 02 75 2a b8 01 00 00 00 33 f6 39 05 ?? ?? ?? ?? 6a 00 0f 44 f0 e8 ?? ?? ?? ?? 56 e8 ?? ?? ?? ?? 6a 01 e8 ?? ?? ?? ?? 8b 75 dc 83 c4 0c 83 3d ?? ?? ?? ?? 00 75 17 83 3d ?? ?? ?? ?? 01 75 09 83 3d ?? ?? ?? ?? 00 74 05 e8 ?? ?? ?? ?? e8 ?? ?? ?? ?? 83 3d ?? ?? ?? ?? 05 75 0e 83 3d ?? ?? ?? ?? 02 75 05 e8 ?? ?? ?? ?? e8 ?? ?? ?? ??");
 
 		if (!r1.IsEmpty())
@@ -460,8 +709,17 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 		else ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
-	// R_PushDlights // [7] // Checked 2023-12-31
-	{
+	if(AfxSteamLegacy()) {
+		// R_PushDlights // [7] // Checked 2018-09-08
+		MemRange r1 = FindPatternString(textRange, "D9 05 ?? ?? ?? ?? D8 1D ?? ?? ?? ?? DF E0 F6 C4 44 7A 61 A1 ?? ?? ?? ?? 56 40 57 A3 ?? ?? ?? ?? 33 F6 BF ?? ?? ?? ??");
+
+		if (!r1.IsEmpty())
+		{
+			AFXADDR_SET(R_PushDlights, r1.Start); // [7]
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));
+	} else {
+		// R_PushDlights // [7] // Checked 2023-12-31
 		MemRange r1 = FindPatternString(textRange, "f3 0f 10 05 ?? ?? ?? ?? 0f 57 d2 0f 2e c2 9f f6 c4 44 7a ?? a1 ?? ?? ?? ?? 53 56 57 bf 01 00 00 00 40 a3 ?? ?? ?? ?? be ?? ?? ?? ?? 8d 5f 1f 90");
 
 		if (!r1.IsEmpty())
@@ -471,14 +729,99 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 		else ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
-	// R_RenderView // [7] // Checked: 2023-12-31
-	// R_DrawViewModel // [7] // Checked: 2023-12-31
-	// R_PolyBlend // [7] // Checked: 2023-12-31
-	// R_DrawEntitiesOnList_In, R_DrawEntitiesOnList_Out // [7] // Checked: 2024-01-04 // this one got inlined in 25th Aniversary, so we need to detour in/out
-	// R_DrawParticles // [7] // Checked: 2024-01-04
-	// r_refdef // [7] // Checked: 2024-01-04
-	// Mod_LeafPVS // [7] // Checked: 2024-01-04
-	{
+	if(AfxSteamLegacy()) {
+		// R_RenderView // [7] // Checked: 2018-09-08
+		// R_DrawViewModel // [7] // Checked: 2018-09-08
+		// R_PolyBlend // [7] // Checked: 2018-09-08
+		// R_DrawEntitiesOnList // [7] // Checked: 2018-09-08
+		// R_DrawParticles // [7] // Checked: 2018-09-08
+		// r_refdef // [7] // Checked: 2018-09-08
+		// Mod_LeafPVS // [7] // Checked: 2018-09-08
+
+		MemRange tmp1 = FindCString(data2Range, "R_RenderView: NULL worldmodel");
+		if (!tmp1.IsEmpty())
+		{
+			MemRange refTmp1 = FindBytes(textRange, (const char *)&tmp1.Start, sizeof(tmp1.Start));
+			if (!refTmp1.IsEmpty())
+			{
+				{
+					MemRange tmp2 = textRange.And(MemRange(refTmp1.Start - 0x30, refTmp1.Start - 0x30 + 0x3));
+					if (!tmp2.IsEmpty())
+					{
+						if (!FindPatternString(tmp2, "55 8B EC").IsEmpty())
+						{
+							AFXADDR_SET(R_RenderView, tmp2.Start);
+
+							// Search "inside" R_RenderView function:
+							MemRange tmp3 = FindPatternString(MemRange(AFXADDR_GET(R_RenderView), textRange.End), "E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? A1 ?? ?? ?? ?? 85 C0 75 0A E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? ?? ??");
+
+							if (!tmp3.IsEmpty())
+							{
+								DWORD addr_R_RenderScene = *(DWORD *)(tmp3.Start + 6) + (DWORD)(tmp3.Start + 6 + 4); // Decode Call
+								AFXADDR_SET(R_DrawViewModel, *(DWORD *)(tmp3.Start + 20) + (DWORD)(tmp3.Start + 20 + 4)); // Decode Call
+								AFXADDR_SET(R_PolyBlend, *(DWORD *)(tmp3.Start + 25) + (DWORD)(tmp3.Start + 25 + 4)); // Decode CAll
+
+								// Look into R_RenderScene:
+								MemRange range_R_RenderScene = textRange.And(MemRange(addr_R_RenderScene, addr_R_RenderScene +0x0DD));
+								MemRange tmp4 = FindPatternString(range_R_RenderScene, "83 C4 04 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? ?? ??");
+								if (!tmp4.IsEmpty())
+								{
+									DWORD addr_R_SetupGL = *(DWORD *)(tmp4.Start + 14) + (DWORD)(tmp4.Start + 14 +  4); // Decode Call
+									DWORD addr_R_MarkLeaves = *(DWORD *)(tmp4.Start + 19) + (DWORD)(tmp4.Start + 19 +4); // Decode Call
+
+									MemRange tmp5 = FindPatternString(MemRange(tmp4.End, range_R_RenderScene.End), "E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? A1 ?? ?? ?? ?? 85 C0 74 05");
+									if (!tmp5.IsEmpty())
+									{
+										//DWORD addr_R_DrawWorld = *(DWORD *)(tmp5.Start + 1);
+
+										AFXADDR_SET(R_DrawEntitiesOnList, *(DWORD *)(tmp5.Start + 11) +(DWORD)(tmp5.Start + 11 + 4)); // Decode call
+
+										MemRange tmp6 = FindPatternString(MemRange(tmp5.End, range_R_RenderScene.End), "A1 ?? ?? ?? ?? 85 C0 75 0F E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? E9 ?? ?? ?? ??");
+										if (!tmp6.IsEmpty())
+										{
+											AFXADDR_SET(R_DrawParticles, *(DWORD *)(tmp6.Start + 10) + (DWORD)(tmp6.Start + 14)); // (Decod E9 JMP into R_DrawParticles sub).
+										}
+										else ErrorBox(MkErrStr(__FILE__, __LINE__));
+									}
+									else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+									// Look into R_SetupGL:
+									MemRange tmp7 = FindPatternString(textRange.And(MemRange(addr_R_SetupGL, addr_R_SetupGL + 0x3FB)), "8B 1D ?? ?? ?? ?? 8B 3D ?? ?? ?? ?? A1 ?? ?? ?? ?? 8B 15 ?? ?? ?? ??");
+									if (!tmp7.IsEmpty())
+									{
+										AFXADDR_SET(r_refdef, *(DWORD *)(tmp7.Start + 8));
+									}
+									else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+									// Look into R_MarkLeaves:
+									MemRange tmp8 = FindPatternString(textRange.And(MemRange(addr_R_MarkLeaves, addr_R_MarkLeaves +0x106)), "51 68 FF 00 00 00 52 E8 ?? ?? ?? ?? 83 C4 0C EB 0C 50 51 E8 ?? ?? ?? ??");
+									if (!tmp8.IsEmpty())
+									{
+										AFXADDR_SET(Mod_LeafPVS, *(DWORD *)(tmp8.Start + 20) + (DWORD)(tmp8.Start + 20 + 4)); // Decode Call
+									}
+									else ErrorBox(MkErrStr(__FILE__, __LINE__));
+								}
+								else ErrorBox(MkErrStr(__FILE__, __LINE__));
+							}
+							else ErrorBox(MkErrStr(__FILE__, __LINE__));
+						}
+						else ErrorBox(MkErrStr(__FILE__, __LINE__));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+				}
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));
+	} else {
+		// R_RenderView // [7] // Checked: 2023-12-31
+		// R_DrawViewModel // [7] // Checked: 2023-12-31
+		// R_PolyBlend // [7] // Checked: 2023-12-31
+		// R_DrawEntitiesOnList_In, R_DrawEntitiesOnList_Out // [7] // Checked: 2024-01-04 // this one got inlined in 25th Aniversary, so we need to detour in/out
+		// R_DrawParticles // [7] // Checked: 2024-01-04
+		// r_refdef // [7] // Checked: 2024-01-04
+		// Mod_LeafPVS // [7] // Checked: 2024-01-04
+
 		MemRange tmp1 = FindCString(data1Range, "R_RenderView: NULL worldmodel");
 		if (!tmp1.IsEmpty())
 		{
@@ -600,12 +943,31 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 			}
 			else ErrorBox(MkErrStr(__FILE__, __LINE__));
 		}
-		else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));		
 	}
 
-	// R_DrawSkyBox_Begin, R_DrawSkyBox_End // [11] // Checked: 2024-01-16 // this one got inlined in 25th Aniversary, so we need to detour in/out and adjust jmp addresses for out hook
-	// skytextures // [11] // Checked: 2024-01-16
-	{
+	if(AfxSteamLegacy()) {
+		// R_DrawSkyBoxEx // [11] // Checked: 2018-09-08
+		// skytextures // [11] // Checked: 2018-09-08
+		{
+			MemRange r1 = FindPatternString(textRange, "55 8B EC 83 EC 1C A1 ?? ?? ?? ?? 53 56 BB 00 00 80 3F 57 C7 45 F8 00 00 00 00 85 C0");
+			if (!r1.IsEmpty())
+			{
+				AFXADDR_SET(R_DrawSkyBoxEx, r1.Start);
+
+				MemRange range_R_DrawSkyBoxEx = textRange.And(MemRange(AFXADDR_GET(R_DrawSkyBoxEx), AFXADDR_GET(R_DrawSkyBoxEx) + 0x1F0));
+				MemRange r2 = FindPatternString(range_R_DrawSkyBoxEx, "8B 04 B5 ?? ?? ?? ?? 8B 0C 85 ?? ?? ?? ?? 51 E8 ?? ?? ?? ?? 8B 55 FC 83 C4 04 52 53 57 FF 15 ?? ?? ?? ?? 6A 07");
+				if (!r2.IsEmpty())
+				{
+					AFXADDR_SET(skytextures, *(DWORD *)(r2.Start + 10));
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		}
+	} else {
+		// R_DrawSkyBox_Begin, R_DrawSkyBox_End // [11] // Checked: 2024-01-16 // this one got inlined in 25th Aniversary, so we need to detour in/out and adjust jmp addresses for out hook
+		// skytextures // [11] // Checked: 2024-01-16
 		/*
 								LAB_10251521                                    XREF[2]:     10251501(j), 10251510(j)  
 			10251521 f3 0f 10        MOVSS      XMM3,dword ptr [DAT_10306750]                    = BF800000h  <-- we can safely detour here, there's enough space
@@ -675,8 +1037,28 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 		} else ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
-	// Draw_DecalMaterial // [12] // Checked 2024-01-16
-	{
+	if(AfxSteamLegacy()) {
+		// Draw_DecalMaterial // [12] // Checked 2018-09-19
+
+		MemRange tmp1 = FindCString(data2Range, "Failed to load custom decal for player #%i:%s using default decal 0.\n"); // Find String inside Draw_DecalMaterial
+		if (!tmp1.IsEmpty())
+		{
+			MemRange refTmp1 = FindBytes(textRange, (const char *)&tmp1.Start, sizeof(tmp1.Start));
+			if (!refTmp1.IsEmpty())
+			{
+				MemRange r2 = FindPatternString(textRange.And(MemRange(refTmp1.Start - 0x73, refTmp1.Start - 0x73 + 3)), "55 8B EC");
+				if (!r2.IsEmpty())
+				{
+					AFXADDR_SET(Draw_DecalMaterial, r2.Start);
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));
+	} else {
+		// Draw_DecalMaterial // [12] // Checked 2024-01-16
+
 		MemRange tmp1 = FindCString(data1Range, "Failed to load custom decal for player #%i:%s using default decal 0.\n"); // Find String inside Draw_DecalMaterial
 		if (!tmp1.IsEmpty())
 		{
@@ -695,8 +1077,19 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 		else ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
-	// g_fov // [17] // Checked 2024-01-16
-	{
+	if(AfxSteamLegacy()){
+		// g_fov // [17] // Checked 2018-09-19
+
+		MemRange r1 = FindPatternString(textRange, "51 FF D0 83 C4 08 85 C0 74 23 8B 55 E8 8B 45 EC 8B 4D F0 89 15 ?? ?? ?? ?? 8B 55 F8 A3 ?? ?? ?? ?? 89 0D ?? ?? ?? ?? 89 15 ?? ?? ?? ??");
+
+		if (!r1.IsEmpty())
+		{
+			AFXADDR_SET(g_fov, *(DWORD *)(r1.Start + 41));
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));		
+	} else {
+		// g_fov // [17] // Checked 2024-01-16
+	
 		MemRange r1 = FindPatternString(textRange, "56 ff d0 83 c4 08 85 c0 74 ?? 83 3d ?? ?? ?? ?? 00 75 ?? f3 0f 10 46 0c f3 0f 11 05 ?? ?? ?? ?? f3 0f 10 46 10 f3 0f 11 05 ?? ?? ?? ?? f3 0f 10 46 14 f3 0f 11 05 ?? ?? ?? ?? f3 0f 10 46 1c f3 0f 11 05 ?? ?? ?? ??");
 
 		if (!r1.IsEmpty())
@@ -710,13 +1103,23 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 	// Sound system related:
 	//
 
+	// SteamLegacy:
+	// - GetSoundtime // [6] // Checked 2018-09-22
+	// S_PaintChannels // [6] // Checked 2018-09-22
+	// paintedtime // [6] // Checked 2018-09-22
+	// shm // [6] // Checked 2018-09-22
+	// - soundtime // [6] // Checked 2018-09-22
+	// paintbuffer // [6] // Checked 2018-09-22
+	// S_TransferPaintBuffer // [6] // Checked 2018-09-22
+	//
+	// Current:
 	// S_PaintChannels // [6] // Checked 2024-01-19
 	// paintedtime // [6] // Checked 2024-01-19
 	// shm // [6] // Checked 2024-01-19
 	// paintbuffer // [6] // Checked 2024-01-19
 	// S_TransferPaintBuffer // [6] // Checked 2024-01-19
 	{
-		MemRange s1 = FindCString(data1Range, "Couldn't get sound buffer status\n");
+		MemRange s1 = FindCString(AfxSteamLegacy()?data2Range:data1Range, "Couldn't get sound buffer status\n");
 
 		if (!s1.IsEmpty()) {
 
@@ -729,29 +1132,67 @@ void Addresses_InitHwDll(AfxAddr hwDll)
         			101feef1 8b ec           MOV        EBP,ESP
         			101feef3 51              PUSH       ECX				
 				*/
-				MemRange r2a = FindPatternString(textRange.And(MemRange(refS1.Start - 0x125, refS1.Start - 0x125 + 0x4)), "55 8b ec 51");
+				MemRange r2a = AfxSteamLegacy()
+					? FindPatternString(textRange.And(MemRange(refS1.Start - 0x91, refS1.Start - 0x91 + 0x4)), "55 8b ec 51")
+					: FindPatternString(textRange.And(MemRange(refS1.Start - 0x125, refS1.Start - 0x125 + 0x4)), "55 8b ec 51")
+				;
 
 				if (!r2a.IsEmpty())
 				{
 					AFXADDR_SET(S_Update_, r2a.Start);
+					
+					if(AfxSteamLegacy()){
+						/*
+							01d8ccce 56              PUSH       ESI
+							01d8cccf 57              PUSH       EDI
+							01d8ccd0 e8 8b fe        CALL       FUN_01d8cb60 // non-inlined GetSoundtime
+									ff ff
+							01d8ccd5 8b 35 f8        MOV        ESI,dword ptr [DAT_023bb1f8] // shm
+									b1 3b 02
+							01d8ccdb 85 f6           TEST       ESI,ESI
+							01d8ccdd 74 33           JZ         LAB_01d8cd12
+						*/						
 
-					/*
-						101fef0e a1 a4 0c        MOV        EAX,[shm]                                        = ??
-								53 10
-						101fef13 56              PUSH       ESI
-						101fef14 57              PUSH       EDI
-						101fef15 85 c0           TEST       EAX,EAX
-						101fef17 74 13           JZ         LAB_101fef2c					
-					*/
+						AFXADDR_SET(shm, *(size_t *)(r2a.Start + 0x25 + 2));
 
-					AFXADDR_SET(shm, *(size_t *)(r2a.Start + 0x1e + 1));
+						/*
+							01d8ccd5 8b 35 f8        MOV        ESI,dword ptr [DAT_023bb1f8]
+									b1 3b 02
+							01d8ccdb 85 f6           TEST       ESI,ESI
+							01d8ccdd 74 33           JZ         LAB_01d8cd12
+							01d8ccdf 8b 46 24        MOV        EAX,dword ptr [ESI + 0x24]
+							01d8cce2 89 45 fc        MOV        dword ptr [EBP + local_8],EAX
+							01d8cce5 db 45 fc        FILD       dword ptr [EBP + local_8]
+							01d8cce8 d9 5d fc        FSTP       float ptr [EBP + local_8]
+							01d8cceb d9 45 fc        FLD        float ptr [EBP + local_8]
+							01d8ccee d8 0d 84        FMUL       float ptr [DAT_01e54384]
+									43 e5 01
+							01d8ccf4 db 05 5c        FILD       dword ptr [DAT_0272ed5c] // painted time is referenced in GetSoundTime also, but this one is just 4 bytes (float) before paintedtime
+									ed 72 02
+						*/
+						AFXADDR_SET(paintedtime, *(size_t *)(r2a.Start + 0x44 + 2) + sizeof(float));
+					} else {
+						/*
+							101fef0e a1 a4 0c        MOV        EAX,[shm]                                        = ??
+									53 10
+							101fef13 56              PUSH       ESI
+							101fef14 57              PUSH       EDI
+							101fef15 85 c0           TEST       EAX,EAX
+							101fef17 74 13           JZ         LAB_101fef2c					
+						*/
 
-					/*
-						101fef44 81 3d b0        CMP        dword ptr [paintedtime],0x40000000               = ??
-								2e 1c 11 
-								00 00 00 40					
-					*/
-					AFXADDR_SET(paintedtime, *(size_t *)(r2a.Start + 0x54 + 2));
+						AFXADDR_SET(shm, *(size_t *)(r2a.Start + 0x1e + 1));
+
+						/*
+							GetSoundTime is inlined, so we find paintedtime in this function:
+
+							101fef44 81 3d b0        CMP        dword ptr [paintedtime],0x40000000               = ??
+									2e 1c 11 
+									00 00 00 40					
+						*/
+						AFXADDR_SET(paintedtime, *(size_t *)(r2a.Start + 0x54 + 2));
+					}
+
 
 					/*
 											LAB_101ff04f                                    XREF[2]:     101ff002(j), 101ff03a(j)  
@@ -770,7 +1211,10 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 						101ff064 c3              RET					
 					*/		
 
-					MemRange r2b = FindPatternString(textRange.And(MemRange(r2a.Start + 0x15f, r2a.Start + 0x15f  + 8)), "d1 ee 56 E8 ?? ?? ?? ??");
+					MemRange r2b = AfxSteamLegacy()
+						? FindPatternString(textRange.And(MemRange(refS1.Start + 0x34, refS1.Start + 0x34  + 8)), "D1 EF 57 E8 ?? ?? ?? ??")
+						: FindPatternString(textRange.And(MemRange(r2a.Start + 0x15f, r2a.Start + 0x15f  + 8)), "d1 ee 56 E8 ?? ?? ?? ??")
+					;
 
 					if (!r2b.IsEmpty())
 					{
@@ -796,10 +1240,19 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 							10201c22 e8 f9 93        CALL       memset                                           undefined memset(undefined4 para
 									fb ff
 						*/
-						MemRange r3 = textRange.And(MemRange(AFXADDR_GET(S_PaintChannels) + 0x3a, AFXADDR_GET(S_PaintChannels) + 0x3a + 13));
-						MemRange r4 = FindPatternString(r3, "50 6a 00 68 ?? ?? ?? ?? e8 ?? ?? ?? ??");
+						MemRange r3 = AfxSteamLegacy()
+							? textRange.And(MemRange(AFXADDR_GET(S_PaintChannels), AFXADDR_GET(S_PaintChannels) + 0x196))
+							: textRange.And(MemRange(AFXADDR_GET(S_PaintChannels) + 0x3a, AFXADDR_GET(S_PaintChannels) + 0x3a + 13))
+						;
+						MemRange r4 = AfxSteamLegacy()
+							? FindPatternString(r3, "8B F3 2B F0 8D 14 F5 00 00 00 00 52 6A 00 68 ?? ?? ?? ??")
+							: FindPatternString(r3, "50 6a 00 68 ?? ?? ?? ?? e8 ?? ?? ?? ??")
+						;
 						if (!r4.IsEmpty()) {
-							AFXADDR_SET(paintbuffer, *(size_t *)(r4.Start + 4));
+							AFXADDR_SET(paintbuffer, AfxSteamLegacy()
+								? *(size_t *)(r4.Start + 15)
+								: *(size_t *)(r4.Start + 4)
+							);
 
 							/*
 													LAB_10201de2                                    XREF[1]:     10201dc8(j)  
@@ -807,9 +1260,15 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 								10201de3 e8 28 00        CALL       S_TransferPaintBuffer                            undefined S_TransferPaintBuffer(
 										00 00						
 							*/
-							MemRange r5 = FindPatternString(MemRange(r4.End, AFXADDR_GET(S_PaintChannels) + 0x225).And(textRange), "83 c4 0c 57 E8 ?? ?? ?? ??");
+							MemRange r5 = AfxSteamLegacy()
+								? FindPatternString(MemRange(r4.End, r3.End), "53 E8 ?? ?? ?? ?? 8B 4D 08 83 C4 04")
+								: FindPatternString(MemRange(r4.End, AFXADDR_GET(S_PaintChannels) + 0x225).And(textRange), "83 c4 0c 57 E8 ?? ?? ?? ??")
+							;
 							if (!r5.IsEmpty()) {
-								AFXADDR_SET(S_TransferPaintBuffer, *(DWORD *)(r5.Start + 5) + (DWORD)(r5.Start + 5 + 4));
+								AFXADDR_SET(S_TransferPaintBuffer, AfxSteamLegacy()
+									? *(DWORD *)(r5.Start + 2) + (DWORD)(r5.Start + 6)
+									: *(DWORD *)(r5.Start + 5) + (DWORD)(r5.Start + 5 + 4)
+								);
 							}
 							else ErrorBox(MkErrStr(__FILE__, __LINE__));
 
@@ -826,7 +1285,7 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 	
 	// S_StartDynamicSound // [6] // Checked 2024-01-19
 	{
-		MemRange s1 = FindCString(data1Range, "S_StartDynamicSound: %s volume > 255");
+		MemRange s1 = FindCString(AfxSteamLegacy()?data2Range:data1Range, "S_StartDynamicSound: %s volume > 255");
 		if (!s1.IsEmpty()) {
 			MemRange refS1 = FindBytes(textRange, (const char *)&s1.Start, sizeof(s1.Start));
 			if (!refS1.IsEmpty()) {
@@ -836,7 +1295,10 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 						101fe3e1 8b ec           MOV        EBP,ESP
 						101fe3e3 83 ec 5c        SUB        ESP,0x5c
 				*/
-				MemRange r1 = FindPatternString(MemRange(refS1.Start - 0x9B, refS1.Start - 0x9B + 6).And(textRange), "55 8b ec 83 ec 5c");
+				MemRange r1 = AfxSteamLegacy()
+					? FindPatternString(MemRange(refS1.Start - 0x8a, refS1.Start - 0x8a + 6).And(textRange), "55 8b ec 83 ec 48")
+					: FindPatternString(MemRange(refS1.Start - 0x9B, refS1.Start - 0x9B + 6).And(textRange), "55 8b ec 83 ec 5c")
+				;
 				if(!r1.IsEmpty()) {
 					AFXADDR_SET(S_StartDynamicSound, r1.Start);
 				} else ErrorBox(MkErrStr(__FILE__, __LINE__));
@@ -854,7 +1316,7 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 	// msg_readcount // [10] // Checked 2024-01-20
 	// net_message // [10] // Checked 2024-01-20
 	{
-		MemRange s1 = FindCString(data1Range, "CL_ParseServerMessage: Bad server message");
+		MemRange s1 = FindCString(AfxSteamLegacy()?data2Range:data1Range, "CL_ParseServerMessage: Bad server message");
 
 		if (!s1.IsEmpty()) {
 
@@ -868,16 +1330,20 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 						101a7de2 e8 99 1d        CALL       FUN_101b9b80                                     undefined FUN_101b9b80()
 								01 00
 				*/
-				MemRange r2 = FindPatternString(textRange.And(MemRange(s1Ref.Start + 0x12, s1Ref.Start + 0x12 + 11)), "89 9d ?? ?? ?? ?? e8 ?? ?? ?? ??");
+				MemRange r2 = AfxSteamLegacy()
+					? FindPatternString(textRange.And(MemRange(s1Ref.Start + 0x12, s1Ref.Start + 0x12 + 0x7)), "8B DF E8 ?? ?? ?? ??")
+					: FindPatternString(textRange.And(MemRange(s1Ref.Start + 0x12, s1Ref.Start + 0x12 + 11)), "89 9d ?? ?? ?? ?? e8 ?? ?? ?? ??")
+				;
 
 				if (!r2.IsEmpty()) {
 
 					AFXADDR_SET(CL_ParseServerMessage_CmdRead, r2.Start);
-					AFXADDR_SET(CL_ParseServerMessage_CmdRead_DSZ, 11);
+					AFXADDR_SET(CL_ParseServerMessage_CmdRead_DSZ, AfxSteamLegacy() ? 7 : 11);
+					AFXADDR_SET(CL_ParseServerMessage_CmdRead_MsgReadByte_CallAddrOfs, AfxSteamLegacy() ? 3 : 7);
 
-					DWORD addMessageReadByte = *(DWORD *)(r2.Start + 7) + (DWORD)(r2.Start + 7 + 4);
+					DWORD addMessageReadByte = *(DWORD *)(r2.Start + AFXADDR_GET(CL_ParseServerMessage_CmdRead_MsgReadByte_CallAddrOfs)) + (DWORD)(r2.Start + AFXADDR_GET(CL_ParseServerMessage_CmdRead_MsgReadByte_CallAddrOfs) + 4);
 
-					MemRange rMessageReadByte = textRange.And(MemRange(addMessageReadByte, addMessageReadByte + 0x2F));
+					MemRange rMessageReadByte = textRange.And(MemRange(addMessageReadByte, addMessageReadByte + (AfxSteamLegacy()  ? 0x36 : 0x2F)));
 
 					/*
 											undefined MSG_ReadByte()                                                                                          [more]
@@ -887,12 +1353,19 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 						101b9b89 3b 15 f0        CMP        EDX,dword ptr [net_message.cursize]              = ??
 								5f 24 11
 					*/
-					MemRange r3 = FindPatternString(rMessageReadByte, "8b 0d ?? ?? ?? ?? 8d 51 01 3b 15 ?? ?? ?? ??");
+					MemRange r3 = AfxSteamLegacy()
+						? FindPatternString(rMessageReadByte, "A1 ?? ?? ?? ?? 8B 15 ?? ?? ?? ??")
+						: FindPatternString(rMessageReadByte, "8b 0d ?? ?? ?? ?? 8d 51 01 3b 15 ?? ?? ?? ??")
+					;
 
 					if (!r3.IsEmpty() && r3.Start == rMessageReadByte.Start) {
-
-						AFXADDR_SET(msg_readcount, *(DWORD *)(r3.Start + 2));
-						AFXADDR_SET(net_message, *(DWORD *)(r3.Start + 11) - 0x10);
+						if(AfxSteamLegacy()) {
+							AFXADDR_SET(msg_readcount, *(DWORD *)(r3.Start + 1));
+							AFXADDR_SET(net_message, *(DWORD *)(r3.Start + 7) - 0x10);
+						} else {
+							AFXADDR_SET(msg_readcount, *(DWORD *)(r3.Start + 2));
+							AFXADDR_SET(net_message, *(DWORD *)(r3.Start + 11) - 0x10);
+						}
 					}
 					else ErrorBox(MkErrStr(__FILE__, __LINE__));
 				}
@@ -905,10 +1378,48 @@ void Addresses_InitHwDll(AfxAddr hwDll)
 
 	//
 	// Studio interface related:
-	//
-	// 2024-01-22
-	//
-	{
+
+	if(AfxSteamLegacy()){
+		//
+		// 2020-03-12
+
+		MemRange s1 = FindCString(data2Range, "HUD_GetStudioModelInterface");
+
+		if (!s1.IsEmpty()) {
+
+			s1 = FindCString(MemRange(s1.End, data2Range.End), "HUD_GetStudioModelInterface");
+
+			if (!s1.IsEmpty()) {
+
+				MemRange s1Ref = FindBytes(textRange, (const char*)(&s1.Start), sizeof(s1.Start));
+
+				if (!s1Ref.IsEmpty()) {
+
+					/*
+					push    offset off_1E53248
+					push    offset off_1E5330C
+					push    1
+					call    eax
+					*/
+					MemRange r2 = FindPatternString(textRange.And(MemRange(s1Ref.Start + 0x14, s1Ref.Start + 0x14 + 0xE)), "68 ?? ?? ?? ?? 68 ?? ?? ?? ?? 6A ?? FF ??");
+
+					if (!r2.IsEmpty()) {
+
+						AFXADDR_SET(hw_HUD_GetStudioModelInterface_pStudio, *(DWORD*)(r2.Start + 1));
+						AFXADDR_SET(hw_HUD_GetStudioModelInterface_pInterface, *(DWORD*)(r2.Start + 6));
+						AFXADDR_SET(hw_HUD_GetStudioModelInterface_version, *(BYTE*)(r2.Start + 11));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		}
+		else ErrorBox(MkErrStr(__FILE__, __LINE__));
+	} else {
+		//
+		// 2024-01-22
+
 		MemRange s1 = FindCString(data1Range, "HUD_GetStudioModelInterface");
 
 		if (!s1.IsEmpty()) {
@@ -972,11 +1483,35 @@ void Addresses_InitClientDll(AfxAddr clientDll, const char * gamedir)
 
 	if (0 == _stricmp("cstrike", gamedir))
 	{
-		// cstrike CrossHair fix related:
-		// cstrike_UnkCrosshairFn // [1] // Checked 2024-01-24
-		// cstrike_UnkCrosshairFn_mul_fac // [1] // Checked 2024-01-24
-		// cstrike_UnkCrosshairFn_add_fac // [1] // Checked 2024-01-24
-		{
+		if(AfxSteamLegacy()) {
+			// cstrike CrossHair fix related:
+			// cstrike_UnkCrosshairFn // [1] // Checked 2018-10-06
+			// cstrike_UnkCrosshairFn_mul_fac // [1] // Checked 2018-10-06
+			// cstrike_UnkCrosshairFn_add_fac // [1] // Checked 2018-10-06
+
+			MemRange r1 = FindPatternString(textRange, "83 EC 08 8B 44 24 10 53 55 56 57 8B F9 8D 48 FF 89 7C 24 14 83 F9 1D BA 04 00 00 00 BE 05 00 00 00");
+
+			if (!r1.IsEmpty()) {
+
+				AFXADDR_SET(cstrike_UnkCrosshairFn, r1.Start);
+
+				MemRange r2 = textRange.And(MemRange(r1.Start, r1.Start + 0x550));
+
+				MemRange r3 = FindPatternString(r2, "D9 47 44 DD 05 ?? ?? ?? ?? D8 C9 83 C0 02 89 47 48 DC 05 ?? ?? ?? ??");
+
+				if (!r3.IsEmpty()) {
+					AFXADDR_SET(cstrike_UnkCrosshairFn_mul_fac, *(DWORD *)(r3.Start + 5));
+					AFXADDR_SET(cstrike_UnkCrosshairFn_add_fac, *(DWORD *)(r3.Start + 19));
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		} else {
+			// cstrike CrossHair fix related:
+			// cstrike_UnkCrosshairFn // [1] // Checked 2024-01-24
+			// cstrike_UnkCrosshairFn_mul_fac // [1] // Checked 2024-01-24
+			// cstrike_UnkCrosshairFn_add_fac // [1] // Checked 2024-01-24
+
 			/*
 									cstrike_UnkCrosshairFn                          XREF[2]:     FUN_10043a60:10043afe(c), 
 																								FUN_10043a60:10043c15(c)  
@@ -1036,44 +1571,53 @@ void Addresses_InitClientDll(AfxAddr clientDll, const char * gamedir)
 			else ErrorBox(MkErrStr(__FILE__, __LINE__));
 		}
 
-		// cstrike_PM_CatagorizePositionFn // Checked 2024-01-20
-		//
-		// cstrike spectator fix, gets PM_CatagorizePosition
-		/*
-			PM_CatagorizePosition gets called in void PM_PlayerMove ( qboolean server ) (see pm_shared.c in SDK),
-			which references the string "Bogus pmove player movetype %i on (%i) 0=cl 1=sv\n":
+		if(AfxSteamLegacy()) {
+			// cstrike spectator fix, gets PM_CatagorizePosition
 
-								switchD_1006146d::caseD_2                       XREF[3]:     10061460(j), 1006146d(j), 
-								switchD_1006146d::caseD_4                                    100622c0(*)  
-								switchD_1006146d::caseD_7
-								switchD_1006146d::caseD_9
-								switchD_1006146d::caseD_1
-			10062264 ff 76 04        PUSH       dword ptr [ESI + 0x4]
-			10062267 8b 86 64        MOV        EAX,dword ptr [ESI + 0x4f564]
-					f5 04 00
-			1006226d 51              PUSH       ECX
-			1006226e 68 fc 0f        PUSH       s_Bogus_pmove_player_movetype_%i_o_100d0ffc      = "Bogus pmove player movetype %
-					0d 10
-			10062273 ff d0           CALL       EAX
-			10062275 83 c4 0c        ADD        ESP,0xc
-			10062278 5f              POP        EDI
-			10062279 5e              POP        ESI
-			1006227a 8b 8c 24        MOV        ECX,dword ptr [ESP + 0xdc]
-					dc 00 00 00
-			10062281 33 cc           XOR        ECX,ESP
-			10062283 e8 96 20        CALL       FUN_100b431e                                     undefined FUN_100b431e(int param
-					05 00
-			10062288 8b e5           MOV        ESP,EBP
-			1006228a 5d              POP        EBP
-			1006228b c3              RET
-								LAB_1006228c                                    XREF[2]:     10061277(j), 10061283(j)  
-			1006228c e8 5f 01        CALL       FUN_100623f0                                     undefined FUN_100623f0(void)
-					00 00
-			10062291 e8 4a b6        CALL       PM_CatagorizePosition                            undefined PM_CatagorizePosition(
-					ff ff
+			MemRange r1 = FindPatternString(textRange, "81 EC 94 00 00 00 55 56 57 E8 32 FE FF FF 8B 0D");
 
-		*/
-		{
+			if (!r1.IsEmpty())
+				AFXADDR_SET(cstrike_PM_CatagorizePositionFn, r1.Start);
+			else 
+				ErrorBox(MkErrStr(__FILE__, __LINE__));
+		} else {
+			// cstrike_PM_CatagorizePositionFn // Checked 2024-01-20
+			//
+			// cstrike spectator fix, gets PM_CatagorizePosition
+			/*
+				PM_CatagorizePosition gets called in void PM_PlayerMove ( qboolean server ) (see pm_shared.c in SDK),
+				which references the string "Bogus pmove player movetype %i on (%i) 0=cl 1=sv\n":
+
+									switchD_1006146d::caseD_2                       XREF[3]:     10061460(j), 1006146d(j), 
+									switchD_1006146d::caseD_4                                    100622c0(*)  
+									switchD_1006146d::caseD_7
+									switchD_1006146d::caseD_9
+									switchD_1006146d::caseD_1
+				10062264 ff 76 04        PUSH       dword ptr [ESI + 0x4]
+				10062267 8b 86 64        MOV        EAX,dword ptr [ESI + 0x4f564]
+						f5 04 00
+				1006226d 51              PUSH       ECX
+				1006226e 68 fc 0f        PUSH       s_Bogus_pmove_player_movetype_%i_o_100d0ffc      = "Bogus pmove player movetype %
+						0d 10
+				10062273 ff d0           CALL       EAX
+				10062275 83 c4 0c        ADD        ESP,0xc
+				10062278 5f              POP        EDI
+				10062279 5e              POP        ESI
+				1006227a 8b 8c 24        MOV        ECX,dword ptr [ESP + 0xdc]
+						dc 00 00 00
+				10062281 33 cc           XOR        ECX,ESP
+				10062283 e8 96 20        CALL       FUN_100b431e                                     undefined FUN_100b431e(int param
+						05 00
+				10062288 8b e5           MOV        ESP,EBP
+				1006228a 5d              POP        EBP
+				1006228b c3              RET
+									LAB_1006228c                                    XREF[2]:     10061277(j), 10061283(j)  
+				1006228c e8 5f 01        CALL       FUN_100623f0                                     undefined FUN_100623f0(void)
+						00 00
+				10062291 e8 4a b6        CALL       PM_CatagorizePosition                            undefined PM_CatagorizePosition(
+						ff ff
+
+			*/
 			MemRange s1 = FindCString(data1Range, "Bogus pmove player movetype %i on (%i) 0=cl 1=sv\n");
 			if (!s1.IsEmpty()) {
 				MemRange r1 = FindBytes(textRange, (const char *)&s1.Start, sizeof(s1.Start));
@@ -1090,9 +1634,71 @@ void Addresses_InitClientDll(AfxAddr clientDll, const char * gamedir)
 		// cstrike_EV_CreateSmoke: // [3]
 		// This is set in MypfnHookEvent.
 
-		// cstrike DeathMsg related (client.dll offsets):
-		// [2] // Checked 2024-01-26
-		{
+		if(AfxSteamLegacy()) {
+			// cstrike DeathMsg related (client.dll offsets):
+			// [2] // Checked 2018-10-06
+
+			MemRange s1 = FindCString(data2Range, "DeathMsg");
+
+			if (!s1.IsEmpty()) {
+
+				MemRange r1 = FindBytes(textRange, (const char *)&s1.Start, sizeof(s1.Start));
+
+				if (!r1.IsEmpty()) {
+
+					MemRange r2 = FindPatternString(textRange.And(MemRange(r1.Start - 6, r1.Start +4 + 6)), "68 ?? ?? ?? ?? 68 ?? ?? ?? ?? FF 15 ?? ?? ?? ??");
+
+					if (!r2.IsEmpty()) {
+
+						AFXADDR_SET(cstrike_MsgFunc_DeathMsg, *(DWORD *)(r2.Start + 1));
+
+						MemRange r3 = FindPatternString(textRange.And(MemRange(AFXADDR_GET(cstrike_MsgFunc_DeathMsg), AFXADDR_GET(cstrike_MsgFunc_DeathMsg) + 0x1A)), "8B 44 24 0C 8B 4C 24 08 8B 54 24 04 50 51 52 B9 ?? ?? ?? ?? E8 ?? ?? ?? ?? C3");
+
+						if (!r3.IsEmpty())
+						{
+							AFXADDR_SET(cstrike_CHudDeathNotice_MsgFunc_DeathMsg, *(DWORD *)(r3.Start + 21) + (DWORD)(r3.Start + 25)); // Decode call address.
+
+							MemRange r4 = FindPatternString(textRange.And(MemRange(AFXADDR_GET(cstrike_CHudDeathNotice_MsgFunc_DeathMsg), AFXADDR_GET(cstrike_CHudDeathNotice_MsgFunc_DeathMsg) +0x43F)), "68 80 02 00 00 68 ?? ?? ?? ?? 68 ?? ?? ?? ?? E8 ?? ?? ?? ??");
+
+							if (!r4.IsEmpty()) {
+								AFXADDR_SET(cstrike_rgDeathNoticeList, *(DWORD *)(r4.Start + 11));
+							}
+							else ErrorBox(MkErrStr(__FILE__, __LINE__));
+						}
+						else ErrorBox(MkErrStr(__FILE__, __LINE__));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+			MemRange r1 = FindPatternString(textRange, "83 EC 3C 56 8B F1 89 74 24 0C 8B 46 1C 89 44 24 2C A1 ?? ?? ?? ?? 85 C0 75 0A FF 15 ?? ?? ?? ?? 85 C0 74 12");
+
+			if (!r1.IsEmpty()) {
+
+				AFXADDR_SET(cstrike_CHudDeathNotice_Draw, r1.Start);
+
+				// Check that our Y-Res adjusting code is still correct (otherwise it needs to be adjusted):
+				//
+				// .text:01944724 04C                 mov     ebp, [esi+18h]
+				// .text:01944727 04C                 mov     edx, [esp+38h]
+				// .text:0194472B 04C                 imul    ebp, ebx
+				//
+				MemRange r2 = FindPatternString(textRange.And(MemRange(r1.Start, r1.Start + 0x37D)), "8B 6E 18 8B 54 24 38 0F AF EB");
+
+				if (!r2.IsEmpty())
+				{
+					AFXADDR_SET(cstrike_CHudDeathNotice_Draw_YRes, r2.Start);
+					AFXADDR_SET(cstrike_CHudDeathNotice_Draw_YRes_DSZ, r2.End - r2.Start);
+				}
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		} else {
+			// cstrike DeathMsg related (client.dll offsets):
+			// [2] // Checked 2024-01-26
+
 			MemRange s1 = FindCString(data1Range, "DeathMsg");
 
 			if (!s1.IsEmpty()) {
@@ -1154,9 +1760,65 @@ void Addresses_InitClientDll(AfxAddr clientDll, const char * gamedir)
 	}
 	else if (0 == _stricmp("tfc", gamedir))
 	{
-		// tfc DeathMsg related (client.dll offsets):
-		// [14] // Checked 2024-10-02
-		{
+		if(AfxSteamLegacy()) {
+			// tfc DeathMsg related (client.dll offsets):
+			// [14] // Checked 2018-10-06
+
+			MemRange s1 = FindCString(data2Range, "DeathMsg");
+
+			if (!s1.IsEmpty()) {
+
+				MemRange r1 = FindBytes(textRange, (const char *)&s1.Start, sizeof(s1.Start));
+
+				if (!r1.IsEmpty()) {
+
+					MemRange r2 = FindPatternString(textRange.And(MemRange(r1.Start - 6, r1.Start + 4 + 6)), "68 ?? ?? ?? ?? 68 ?? ?? ?? ?? FF 15 ?? ?? ?? ??");
+
+					if (!r2.IsEmpty()) {
+
+						AFXADDR_SET(tfc_MsgFunc_DeathMsg, *(DWORD *)(r2.Start + 1));
+
+						MemRange r3 = FindPatternString(textRange.And(MemRange(AFXADDR_GET(tfc_MsgFunc_DeathMsg), AFXADDR_GET(tfc_MsgFunc_DeathMsg) + 0x1A)), "8B 44 24 0C 8B 4C 24 08 8B 54 24 04 50 51 52 B9 ?? ?? ?? ?? E8 ?? ?? ?? ?? C3");
+
+						if (!r3.IsEmpty())
+						{
+							AFXADDR_SET(tfc_CHudDeathNotice_MsgFunc_DeathMsg, *(DWORD *)(r3.Start + 21) + (DWORD)(r3.Start + 25)); // Decode call address.
+
+							MemRange r4 = FindPatternString(textRange.And(MemRange(AFXADDR_GET(tfc_CHudDeathNotice_MsgFunc_DeathMsg), AFXADDR_GET(tfc_CHudDeathNotice_MsgFunc_DeathMsg) + 0x363)), "68 70 02 00 00 68 ?? ?? ?? ?? 68 ?? ?? ?? ?? E8 ?? ?? ?? ??");
+
+							if (!r4.IsEmpty()) {
+								AFXADDR_SET(tfc_rgDeathNoticeList, *(DWORD *)(r4.Start + 11));
+							}
+							else ErrorBox(MkErrStr(__FILE__, __LINE__));
+						}
+						else ErrorBox(MkErrStr(__FILE__, __LINE__));
+					}
+					else ErrorBox(MkErrStr(__FILE__, __LINE__));
+				}
+				else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+
+			MemRange r1 = FindPatternString(textRange, "83 EC 30 53 55 56 57 33 FF BD 22 00 00 00 89 4C 24 2C 89 7C 24 18 C7 44 24 14 ?? ?? ?? ?? C7 44 24 10 ?? ?? ?? ?? 89 6C 24 28 C7 44 24 1C ?? ?? ?? ??");
+
+			if (!r1.IsEmpty()) {
+
+				AFXADDR_SET(tfc_CHudDeathNotice_Draw, r1.Start);
+
+				// Check that our Y-Res adjusting code is still correct (otherwise it needs to be adjusted):
+				//
+				// .text:01928069 040                 mov     ebp, 22h
+				//
+
+				AFXADDR_SET(cstrike_CHudDeathNotice_Draw_YRes, r1.Start + 9);
+				AFXADDR_SET(cstrike_CHudDeathNotice_Draw_YRes_DSZ, r1.Start + 9 + 5);
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		} else {
+			// tfc DeathMsg related (client.dll offsets):
+			// [14] // Checked 2024-10-02
+
 			MemRange s1 = FindCString(data1Range, "DeathMsg");
 
 			if (!s1.IsEmpty()) {
@@ -1212,8 +1874,18 @@ void Addresses_InitClientDll(AfxAddr clientDll, const char * gamedir)
 			else ErrorBox(MkErrStr(__FILE__, __LINE__));
 		}
 
-		// tfc_TeamFortressViewport_UpdateSpecatorPanel // [4] // Checked 2024-10-02
-		{
+		if(AfxSteamLegacy()) {
+			// tfc_TeamFortressViewport_UpdateSpecatorPanel // [4] // Checked 2018-10-06
+			MemRange r1 = FindPatternString(textRange, "A1 ?? ?? ?? ?? 81 EC 44 02 00 00 56 8B F1 89 86 24 02 00 00 8B 0D ?? ?? ?? ?? 89 8E 28 02 00 00 8B 8E 18 0A 00 00 8B 15 ?? ?? ?? ?? 85 C9 89 96 2C 02 00 00 0F 84 ?? ?? ?? ??");
+
+			if (!r1.IsEmpty()) {
+
+				AFXADDR_SET(tfc_TeamFortressViewport_UpdateSpecatorPanel, r1.Start);
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		} else {
+			// tfc_TeamFortressViewport_UpdateSpecatorPanel // [4] // Checked 2024-10-02
+
 			MemRange r1 = FindPatternString(textRange, "55 8b ec 81 ec 4c 02 00 00 a1 ?? ?? ?? ?? 33 c5 89 45 fc a1 ?? ?? ?? ?? 53 8b d9 89 9d b8 fd ff ff 8b 8b 18 0a 00 00 89 83 24 02 00 00 a1 ?? ?? ?? ?? 89 83 28 02 00 00 a1 ?? ?? ?? ?? 89 83 2c 02 00 00 85 c9 0f 84 e3 03 00 00");
 
 			if (!r1.IsEmpty()) {
@@ -1225,8 +1897,19 @@ void Addresses_InitClientDll(AfxAddr clientDll, const char * gamedir)
 	}
 	else if (0 == _stricmp("valve", gamedir)) // (Half-Life)
 	{
-		// valve_TeamFortressViewport_UpdateSpecatorPanel // [4] // Checked 2024-01-26
-		{
+		if(AfxSteamLegacy()) {
+			// valve_TeamFortressViewport_UpdateSpecatorPanel // [4] // Checked 2018-10-06
+
+			MemRange r1 = FindPatternString(textRange, "A1 ?? ?? ?? ?? 81 EC 44 02 00 00 56 8B F1 89 86 24 02 00 00 8B 0D ?? ?? ?? ?? 89 8E 28 02 00 00 8B 8E 18 0A 00 00 8B 15 ?? ?? ?? ?? 85 C9 89 96 2C 02 00 00 0F 84 ?? ?? ?? ??");
+
+			if (!r1.IsEmpty()) {
+
+				AFXADDR_SET(valve_TeamFortressViewport_UpdateSpecatorPanel, r1.Start);
+			}
+			else ErrorBox(MkErrStr(__FILE__, __LINE__));
+		} else {
+			// valve_TeamFortressViewport_UpdateSpecatorPanel // [4] // Checked 2024-01-26
+
 			MemRange r1 = FindPatternString(textRange, "55 8b ec 81 ec 4c 02 00 00 a1 ?? ?? ?? ?? 33 c5 89 45 fc a1 ?? ?? ?? ?? 53 8b d9 89 9d b8 fd ff ff 8b 8b 18 0a 00 00 89 83 24 02 00 00 a1 ?? ?? ?? ?? 89 83 28 02 00 00 a1 ?? ?? ?? ?? 89 83 2c 02 00 00 85 c9 0f 84 e3 03 00 00 83 3d ?? ?? ?? ?? 00");
 
 			if (!r1.IsEmpty()) {

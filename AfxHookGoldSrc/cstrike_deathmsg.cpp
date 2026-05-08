@@ -2,6 +2,7 @@
 
 #include <hlsdk.h>
 
+#include "AfxSteamLegacy.h"
 #include "cmdregister.h"
 #include "hl_addresses.h"
 
@@ -253,8 +254,54 @@ __declspec(naked) void tfc_DeathMsg_DrawHelperY() {
 	}
 }
 
-#define DEF_Hook_DeathMsg(modification) \
-bool Hook_DeathMsg_ ## modification() \
+__declspec(naked) void SteamLegacy_cstrike_DeathMsg_DrawHelperY() {
+	__asm {
+		mov     ebp,dword ptr [esi+18h] ; original code
+
+		mov dl, g_DeathMsg_ForceOffset
+		test dl, dl
+		JZ __OrgValue
+
+		mov edx, g_DeathMsg_Offset
+		JMP __Continue
+
+		__OrgValue:
+		mov     edx,dword ptr [esp+38h] ; original code
+		
+		__Continue:
+		; imul    ebp,ebx ; original code
+		imul    ebp, DeathMsg_Draw_ItemIndex
+		
+		JMP [DeathMsg_Draw_AfterYRes]
+	}
+}
+
+__declspec(naked) void SteamLegacy_tfc_DeathMsg_DrawHelperY() {
+	__asm {
+		mov ebp, DeathMsg_Draw_ItemIndex
+		imul ebp, 0x14
+
+		push eax
+		mov al, g_DeathMsg_ForceOffset
+		test al, al
+		JZ __OrgValue
+
+		add ebp, g_DeathMsg_Offset
+		JMP __Continue
+
+		__OrgValue:
+		add ebp, 0x22
+		
+		__Continue:
+		pop eax
+
+		JMP [DeathMsg_Draw_AfterYRes]
+	}
+}
+
+
+#define DEF_Hook_DeathMsg(modification,steam_legacy) \
+bool steam_legacy ## Hook_DeathMsg_ ## modification() \
 { \
 	static bool firstRun = true; \
 	static bool firstResult = true; \
@@ -296,7 +343,7 @@ bool Hook_DeathMsg_ ## modification() \
 		{ \
 			/* Patch Draw fn: */ \
 			DeathMsg_Draw_AfterYRes = HL_ADDR_GET(modification ## _CHudDeathNotice_Draw_YRes) + HL_ADDR_GET(modification ## _CHudDeathNotice_Draw_YRes_DSZ); \
-			Asm32ReplaceWithJmp((void *)(HL_ADDR_GET(modification ## _CHudDeathNotice_Draw_YRes)), HL_ADDR_GET(modification ## _CHudDeathNotice_Draw_YRes_DSZ), (void *)modification ## _DeathMsg_DrawHelperY); \
+			Asm32ReplaceWithJmp((void *)(HL_ADDR_GET(modification ## _CHudDeathNotice_Draw_YRes)), HL_ADDR_GET(modification ## _CHudDeathNotice_Draw_YRes_DSZ), (void *)steam_legacy ## modification ## _DeathMsg_DrawHelperY); \
 		} \
 	} \
 	else \
@@ -305,9 +352,10 @@ bool Hook_DeathMsg_ ## modification() \
 	return firstResult; \
 }
 
-DEF_Hook_DeathMsg(cstrike)
-
-DEF_Hook_DeathMsg(tfc)
+DEF_Hook_DeathMsg(cstrike, )
+DEF_Hook_DeathMsg(tfc, )
+DEF_Hook_DeathMsg(cstrike, SteamLegacy_)
+DEF_Hook_DeathMsg(tfc, SteamLegacy_)
 
 bool Hook_DeathMsg()
 {
@@ -322,11 +370,17 @@ bool Hook_DeathMsg()
 	{	
 		if(!strcmp("cstrike",gameDir))
 		{
-			firstResult = Hook_DeathMsg_cstrike();
+			firstResult = AfxSteamLegacy()
+				? SteamLegacy_Hook_DeathMsg_cstrike()
+				: Hook_DeathMsg_cstrike()
+			;
 		}
 		else if(!strcmp("tfc",gameDir))
 		{
-			firstResult = Hook_DeathMsg_tfc();
+			firstResult = AfxSteamLegacy()
+				? SteamLegacy_Hook_DeathMsg_tfc()
+				: Hook_DeathMsg_tfc()
+			;
 		}
 	}
 
@@ -433,29 +487,41 @@ REGISTER_CMD_FUNC(deathmsg)
 				int iT = atoi(pEngfuncs->Cmd_Argv(4));
 				acmd = pEngfuncs->Cmd_Argv(5);
 
-				const char *gameDir = pEngfuncs->pfnGetGameDirectory();
-				if(gameDir)
-				{	
-					if(!strcmp("cstrike",gameDir))
+				if(AfxSteamLegacy()) {
+					size_t sz = 3*sizeof(BYTE)+sizeof(char)*(1+strlen(acmd));
+
+					BYTE * pMem = (BYTE *)malloc(sz);
+					pMem[0] = iA;
+					pMem[1] = iV;
+					pMem[2] = iT;
+					strcpy_s((char *)(&pMem[3]), sz-3, acmd);
+					detoured_MsgFunc_DeathMsg("DeathMsg", (int)sz, pMem);
+					free(pMem);
+				} else {
+					const char *gameDir = pEngfuncs->pfnGetGameDirectory();
+					if(gameDir)
 					{
-						size_t sz = 3*sizeof(BYTE)+sizeof(char)*(1+strlen(acmd));
-						BYTE * pMem = (BYTE *)malloc(sz);
-						pMem[0] = iA;
-						pMem[1] = iV;
-						pMem[2] = iT;
-						strcpy_s((char *)(&pMem[3]), sz-3, acmd);
-						detoured_MsgFunc_DeathMsg("DeathMsg", (int)sz, pMem);
-						free(pMem);
-					}
-					else if(!strcmp("tfc",gameDir))
-					{
-						size_t sz = 2*sizeof(BYTE)+sizeof(char)*(1+strlen(acmd));
-						BYTE * pMem = (BYTE *)malloc(sz);
-						pMem[0] = iA;
-						pMem[1] = iV;
-						strcpy_s((char *)(&pMem[2]), sz-2, acmd);
-						detoured_MsgFunc_DeathMsg("DeathMsg", (int)sz, pMem);
-						free(pMem);
+						if(!strcmp("cstrike",gameDir))
+						{
+							size_t sz = 3*sizeof(BYTE)+sizeof(char)*(1+strlen(acmd));
+							BYTE * pMem = (BYTE *)malloc(sz);
+							pMem[0] = iA;
+							pMem[1] = iV;
+							pMem[2] = iT;
+							strcpy_s((char *)(&pMem[3]), sz-3, acmd);
+							detoured_MsgFunc_DeathMsg("DeathMsg", (int)sz, pMem);
+							free(pMem);
+						}
+						else if(!strcmp("tfc",gameDir))
+						{
+							size_t sz = 2*sizeof(BYTE)+sizeof(char)*(1+strlen(acmd));
+							BYTE * pMem = (BYTE *)malloc(sz);
+							pMem[0] = iA;
+							pMem[1] = iV;
+							strcpy_s((char *)(&pMem[2]), sz-2, acmd);
+							detoured_MsgFunc_DeathMsg("DeathMsg", (int)sz, pMem);
+							free(pMem);
+						}
 					}
 				}
 				return;

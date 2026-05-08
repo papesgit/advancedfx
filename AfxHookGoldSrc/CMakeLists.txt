@@ -109,6 +109,7 @@ target_sources(${PROJECT_NAME} PRIVATE
     AfxMemory.h
     AfxSettings.cpp
     AfxSettings.h
+    AfxSteamLegacy.h
     aiming.cpp
     aiming.h
     camexport.cpp
@@ -144,6 +145,7 @@ target_sources(${PROJECT_NAME} PRIVATE
     hlsdk.h
     HltvFix.cpp
     HltvFix.h
+    ICreateContext.h
     main.cpp
     mdt_media.cpp
     mdt_media.h

@@ -1,21 +1,25 @@
 mod advancedfx;
 
-use core::ffi::c_char;
+use boa_engine::object::builtins::JsFunction;
+
 use core::ffi::CStr;
+use core::ffi::c_char;
+
+use rustc_hash::FxHashMap;
+
+use std::borrow::Borrow;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_float;
 use std::ffi::c_void;
-
-use std::{cell::RefCell, collections::VecDeque, future::Future, pin::Pin};
-use std::task::Poll::Ready;
+use std::future::Future;
 use std::rc::Rc;
 use std::rc::Weak;
 use std::path::Path;
 use std::path::PathBuf;
-
-use futures::SinkExt;
-use futures::StreamExt;
-use futures::stream::SplitSink;
-use futures::stream::SplitStream;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use boa_gc::GcRefCell;
 use boa_engine::{
@@ -24,9 +28,8 @@ use boa_engine::{
         ClassBuilder,
     },
     Context,
-    builtins::promise::PromiseState,
     context::{
-        ContextBuilder,
+        ContextBuilder
     },
     JsError,
     JsResult,
@@ -35,21 +38,29 @@ use boa_engine::{
     JsObject,
     JsString,
     JsValue,
+    JsVariant,
     JsBigInt,
-    job::{
-        NativeJob,
-        FutureJob,
-        JobQueue,
-    },
     js_string,
+    js_value,
+    job::{
+        JobExecutor,
+        PromiseJob,
+        NativeAsyncJob,
+        TimeoutJob,
+        GenericJob,
+        Job
+    },
     module::{
+        ImportAttribute,
         ModuleLoader,
         Referrer,
+        ModuleRequest,
         resolve_module_specifier
     },
     Module,
     native_function::NativeFunction,
     object::ObjectInitializer,
+    object::builtins::AlignedVec,
     object::builtins::JsArray,
     object::builtins::JsArrayBuffer,
     object::builtins::JsPromise,
@@ -62,13 +73,24 @@ use boa_runtime::{
     Logger
 };
 
-use async_tungstenite::async_std::ConnectStream;
+use futures::SinkExt;
+use futures::StreamExt;
+use async_std::net::TcpStream;
+
+use async_tungstenite::tungstenite::Bytes;
 use async_tungstenite::tungstenite::protocol::Message;
-use async_tungstenite::WebSocketStream;
+use async_tungstenite::WebSocketSender;
+use async_tungstenite::WebSocketReceiver;
+
+use std::{collections::VecDeque, fmt::Debug};
+use std::mem;
+use std::collections::BTreeMap;
+use boa_engine::context::time::JsInstant;
+use futures_lite::future;
 
 type AfxEntityRef = c_void;
 
-extern "C" {
+unsafe extern "C" {
     fn afx_hook_source2_message(s: *const c_char);
     fn afx_hook_source2_warning(s: *const c_char);
     fn afx_hook_source2_exec(s: *const c_char);
@@ -179,10 +201,10 @@ extern "C" {
 ////////////////////////////////////////////////////////////////////////////////
 
 type CommandArgsRs = c_void;
-type CommandCallbackRs = extern "C" fn(p_user_data: * mut c_void, p_command_args: * mut CommandArgsRs);
+type CommandCallbackRs = unsafe extern "C" fn(p_user_data: * mut c_void, p_command_args: * mut CommandArgsRs);
 type ConCommandRs = c_void;
 
-extern "C" {
+unsafe extern "C" {
     fn afx_hook_source2_new_command(psz_name: *const c_char, psz_help_string: *const c_char, flags: i64, additional_flags: i64, p_callback: CommandCallbackRs, p_user_data: * mut c_void) -> * mut ConCommandRs;
 
     fn afx_hook_source2_delete_command(p_con_command: * mut ConCommandRs);
@@ -223,7 +245,7 @@ impl ConCommandsArgs {
                     let result = unsafe {
                         afx_hook_source2_command_args_argc(*ptr)
                     };
-                    return Ok(JsValue::Integer(result));
+                    return Ok(js_value!(result));
                 }
             }
         }
@@ -239,7 +261,7 @@ impl ConCommandsArgs {
                             let str_result = unsafe {CStr::from_ptr(
                                 afx_hook_source2_command_args_argv(*ptr, index)
                             )}.to_str().unwrap();
-                            return Ok( JsValue::String(js_string!(str_result)));
+                            return Ok( js_value!(js_string!(str_result)));
                         }
                     }
                 }
@@ -285,12 +307,13 @@ struct ConCommand {
     #[unsafe_ignore_trace]
     callback: JsObject,
 
-    context: advancedfx::js::ContextMutRef
+    #[unsafe_ignore_trace]
+    context: Rc<advancedfx::js::BoxedContext>
 }
 
 impl ConCommand {
     #[must_use]
-    pub fn new(callback: JsObject,  context: advancedfx::js::ContextMutRef) -> Self {
+    pub fn new(callback: JsObject,  context: Rc<advancedfx::js::BoxedContext>) -> Self {
         Self {
             callback : callback,
             context: context
@@ -298,18 +321,17 @@ impl ConCommand {
     }
 
     fn callback(&mut self, p_command_args: * mut CommandArgsRs) {
-        if let Some(context) = self.context.get() {
-            let rc = Rc::new(p_command_args);
-            if let Ok(result_object) = ConCommandsArgs::from_data(ConCommandsArgs::new(Rc::downgrade(&rc.clone())), context) {
-                if let Err(e) = self.callback.call(&JsValue::null(), &[JsValue::Object(result_object)], context) {
-                    let _ = afx_on_error(&e, context);
-                }
+        let context = (*self.context).get();
+        let rc = Rc::new(p_command_args);
+        if let Ok(result_object) = ConCommandsArgs::from_data(ConCommandsArgs::new(Rc::downgrade(&rc.clone())), context) {
+            if let Err(e) = self.callback.call(&JsValue::null(), &[js_value!(result_object)], context) {
+                let _ = afx_on_error(&e, context);
             }
         }
     }    
 } 
 
-extern "C" fn afx_hook_source2_callback_fn_impl(p_user_data: * mut c_void, p_command_args: * mut CommandArgsRs) {
+unsafe extern "C" fn afx_hook_source2_callback_fn_impl(p_user_data: * mut c_void, p_command_args: * mut CommandArgsRs) {
     let con_command: &mut ConCommand = unsafe { &mut *(p_user_data as *mut ConCommand) };
     con_command.callback(p_command_args);
 }
@@ -361,7 +383,7 @@ impl ConCommandBox {
                             if let Some(description) = args[1].as_string() {
                                 if let Ok(str_description) = description.to_std_string() {
                                     con_command_box.do_register(str_name, str_description, 0, 0);
-                                    return Ok(JsValue::Undefined);
+                                    return Ok(JsValue::undefined());
                                 }
                             }
                         }
@@ -410,16 +432,13 @@ impl Class for ConCommandBox {
     fn data_constructor(
         _this: &JsValue,
         args: &[JsValue],
-        context: &mut Context,
+        context: &mut Context
     ) -> JsResult<Self> {
         if 1 == args.len() {
             if let Some(object) = args[0].as_object() {
                 if object.is_callable() {
-                    if let Some(context) = context.get_data::<advancedfx::js::ContextMutRef>() {
-                        let command_ptr = Box::into_raw(Box::new(ConCommand::new(object.clone(), context.clone())));
-                        return Ok(ConCommandBox::new(command_ptr));        
-                    }
-                    return Err(advancedfx::js::errors::error_no_wrapper(context).into());
+                    let command_ptr = Box::into_raw(Box::new(ConCommand::new(object.clone(), advancedfx::js::ContextRef::get_from_context(context))));
+                    return Ok(ConCommandBox::new(command_ptr));        
                 }
             }
         }
@@ -445,15 +464,45 @@ impl Class for ConCommandBox {
 
 
 ////////////////////////////////////////////////////////////////////////////////
+//
+// AfxSimpleModuleLoader
+//
+// Based on boad-dev pre-1.0 GitHub: https://github.com/boa-dev/boa/blob/da570fd74bb6cd5b0fc01363451eb710b7ab5a0c/core/engine/src/module/loader/mod.rs
+// Might need updating for newer BoaJS versions!
+//
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AfxModuleCacheKey {
+    path: PathBuf,
+    attributes: Box<[ImportAttribute]>,
+}
+
+impl AfxModuleCacheKey {
+    fn new(path: PathBuf, attributes: &[ImportAttribute]) -> Self {
+        let mut attributes = attributes.to_vec();
+        attributes.sort_unstable_by(|left, right| left.key().cmp(right.key()));
+        Self {
+            path,
+            attributes: attributes.into_boxed_slice(),
+        }
+    }
+}
+
+/// A simple module loader that loads modules relative to a root path.
+///
+/// # Note
+///
+/// This loader only works by using the type methods [`AfxSimpleModuleLoader::insert`] and
+/// [`AfxSimpleModuleLoader::get`]. The utility methods on [`ModuleLoader`] don't work at the moment,
+/// but we'll unify both APIs in the future.
 #[derive(Debug)]
 pub struct AfxSimpleModuleLoader {
-    module_map: GcRefCell<std::collections::HashMap<PathBuf, Module>>,
+    module_map: GcRefCell<FxHashMap<AfxModuleCacheKey, Module>>,
 }
 
 impl AfxSimpleModuleLoader {
-    /// Creates a new `AfxSimpleModuleLoader`
-    pub fn new() -> AfxSimpleModuleLoader {
+    /// Creates a new `AfxSimpleModuleLoader` from a root module path.
+    pub fn new() -> Self {
         Self {
             module_map: GcRefCell::default(),
         }
@@ -462,171 +511,556 @@ impl AfxSimpleModuleLoader {
     /// Inserts a new module onto the module map.
     #[inline]
     pub fn insert(&self, path: PathBuf, module: Module) {
-        self.module_map.borrow_mut().insert(path, module);
+        self.insert_with_attributes(path, &[], module);
+    }
+
+    /// Inserts a new module onto the module map with the given attributes.
+    #[inline]
+    pub fn insert_with_attributes(
+        &self,
+        path: PathBuf,
+        attributes: &[ImportAttribute],
+        module: Module,
+    ) {
+        self.module_map
+            .borrow_mut()
+            .insert(AfxModuleCacheKey::new(path, attributes), module);
     }
 
     /// Gets a module from its original path.
     #[inline]
     pub fn get(&self, path: &Path) -> Option<Module> {
-        self.module_map.borrow().get(path).cloned()
+        self.get_with_attributes(path, &[])
+    }
+
+    /// Gets a module from its original path and attributes.
+    #[inline]
+    pub fn get_with_attributes(
+        &self,
+        path: &Path,
+        attributes: &[ImportAttribute],
+    ) -> Option<Module> {
+        self.module_map
+            .borrow()
+            .get(&AfxModuleCacheKey::new(path.to_path_buf(), attributes))
+            .cloned()
     }
 }
 
 impl ModuleLoader for AfxSimpleModuleLoader {
     fn load_imported_module(
-        &self,
+        self: Rc<Self>,
         referrer: Referrer,
-        specifier: JsString,
-        finish_load: Box<dyn FnOnce(JsResult<Module>, &mut Context)>,
-        context: &mut Context,
-    ) {
+        request: ModuleRequest,
+        context: &RefCell<&mut Context>,
+    ) -> impl Future<Output = JsResult<Module>> {
         let result = (|| {
-            let short_path = specifier.to_std_string_escaped();
-            let path =
-                resolve_module_specifier(None, &specifier, referrer.path(), context)?;
-            if let Some(module) = self.get(&path) {
+            let short_path = request.specifier().to_std_string_escaped();
+            let path = resolve_module_specifier(
+                None,
+                request.specifier(),
+                referrer.path(),
+                &mut context.borrow_mut(),
+            )?;
+
+            if let Some(module) = self.get_with_attributes(&path, request.attributes()) {
                 return Ok(module);
             }
 
-            let source = Source::from_filepath(&path).map_err(|err| {
-                advancedfx::js::errors::make_error!(JsNativeError::error(),format!("could not open file `{short_path}`").to_string(),context)
-                    .with_cause(JsError::from_opaque(js_string!(err.to_string()).into()))
-            })?;
-            let module = Module::parse(source, None, context).map_err(|err| {
-                advancedfx::js::errors::make_error!(JsNativeError::syntax(),format!("could not parse module `{short_path}`").to_string(),context)
-                    .with_cause(err)
-            })?;
-            self.insert(path, module.clone());
+            // Check for import attribute type
+            let mut module_type = None;
+            let type_key = js_string!("type");
+            for attr in request.attributes() {
+                if attr.key() == &type_key {
+                    module_type = Some(attr.value());
+                }
+            }
+
+            if path
+                .extension()
+                .is_some_and(|ext| ext.to_string_lossy() == "json")
+            {
+                let is_json_type = module_type.is_some_and(|t| t == &js_string!("json"));
+                if !is_json_type {
+                    return Err(JsNativeError::typ()
+                        .with_message(format!(
+                            "module `{short_path}` needs an import attribute of type \"json\""
+                        ))
+                        .into());
+                }
+            }
+            let module = if let Some(ty) = module_type {
+                // Handle different module types based on the type attribute
+                match ty.to_std_string_escaped().as_str() {
+                    "json" => {
+                        // Load and parse as JSON module
+                        let json_content = std::fs::read_to_string(&path).map_err(|err| {
+                            JsNativeError::typ()
+                                .with_message(format!("could not open file `{short_path}`"))
+                                .with_cause(JsError::from_rust(err))
+                        })?;
+                        let json_string = js_string!(json_content.as_str());
+                        Module::parse_json(json_string, &mut context.borrow_mut()).map_err(
+                            |err| {
+                                JsNativeError::syntax()
+                                    .with_message(format!(
+                                        "could not parse JSON module `{short_path}`"
+                                    ))
+                                    .with_cause(err)
+                            },
+                        )?
+                    }
+                    other => {
+                        // Unknown module type
+                        return Err(JsNativeError::typ()
+                            .with_message(format!(
+                                "unsupported module type `{other}` for module `{short_path}`"
+                            ))
+                            .into());
+                    }
+                }
+            } else {
+                // No type attribute, load as regular JavaScript module
+                let source = Source::from_filepath(&path).map_err(|err| {
+                    JsNativeError::typ()
+                        .with_message(format!("could not open file `{short_path}`"))
+                        .with_cause(JsError::from_rust(err))
+                })?;
+                Module::parse(source, None, &mut context.borrow_mut()).map_err(|err| {
+                    JsNativeError::syntax()
+                        .with_message(format!("could not parse module `{short_path}`"))
+                        .with_cause(err)
+                })?
+            };
+
+            self.insert_with_attributes(path, request.attributes(), module.clone());
             Ok(module)
         })();
 
-        finish_load(result, context);
-    }
-
-    fn register_module(&self, specifier: JsString, module: Module) {
-        let path = PathBuf::from(specifier.to_std_string_escaped());
-
-        self.insert(path, module);
-    }
-
-    fn get_module(&self, specifier: JsString) -> Option<Module> {
-        let path = specifier.to_std_string_escaped();
-
-        self.get(Path::new(&path))
+        async { result }
     }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+//
+// AfxSimpleJobExecutor
+//
+// Based on boad-dev pre-1.0 GitHub: https://github.com/boa-dev/boa/blob/da570fd74bb6cd5b0fc01363451eb710b7ab5a0c/core/engine/src/job.rs
+// Might need updating for newer BoaJS versions!
+//
 
-/**
- * @todo Implement context / waker.
- */
-pub struct AsyncJobQueue {
-    jobs: RefCell<VecDeque<NativeJob>>,
-    futures: RefCell<Vec<FutureJob>>
+use boa_engine::job::BoxedFuture;
+use futures_concurrency::future::FutureGroup;
+
+/// A simple FIFO executor that bails on the first error.
+///
+/// This is the default job executor for the [`Context`], but it is mostly pretty limited
+/// for a custom event loop.
+///
+/// To disable running promise jobs on the engine, see [`IdleJobExecutor`].
+#[derive(Default)]
+pub struct AfxSimpleJobExecutor {
+    promise_jobs: RefCell<VecDeque<PromiseJob>>,
+    async_jobs: RefCell<VecDeque<NativeAsyncJob>>,
+    finalization_registry_jobs: RefCell<VecDeque<NativeAsyncJob>>,
+    timeout_jobs: RefCell<BTreeMap<JsInstant, Vec<TimeoutJob>>>,
+    generic_jobs: RefCell<VecDeque<GenericJob>>,
+    stop: Arc<AtomicBool>,
 }
 
-impl AsyncJobQueue {
+impl AfxSimpleJobExecutor {
+    fn clear(&self) {
+        self.promise_jobs.borrow_mut().clear();
+        self.async_jobs.borrow_mut().clear();
+        self.timeout_jobs.borrow_mut().clear();
+        self.generic_jobs.borrow_mut().clear();
+    }
+}
+
+impl Debug for AfxSimpleJobExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AfxSimpleJobExecutor").finish_non_exhaustive()
+    }
+}
+
+impl AfxSimpleJobExecutor {
+    /// Creates a new `AfxSimpleJobExecutor`.
     #[must_use]
     pub fn new() -> Self {
-        let jobs = RefCell::<VecDeque<NativeJob>>::default();
-        let futures = RefCell::<Vec<FutureJob>>::default();
-        Self { jobs, futures }
+        Self::default()
+    }
+
+    /// Gets the cancellation token for this executor.
+    ///
+    /// Setting the signal to `true` will exit the inner event loop and
+    /// stop executing any pending jobs.
+    pub fn get_cancellation_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.promise_jobs.borrow().is_empty()
+            && self.async_jobs.borrow().is_empty()
+            && self.generic_jobs.borrow().is_empty()
+            && self.timeout_jobs.borrow().is_empty()
     }
 }
 
-impl JobQueue for AsyncJobQueue {
-    fn enqueue_promise_job(&self, job: NativeJob, _context: &mut Context) {
-        self.jobs.borrow_mut().push_back(job);
-    }
-
-    fn run_jobs(&self, context: &mut Context) {
-        // Yeah, I have no idea why Rust extends the lifetime of a `RefCell` that should be immediately
-        // dropped after calling `pop_front`.
-        let mut next_job = self.jobs.borrow_mut().pop_front();
-        while let Some(job) = next_job {
-            if job.call(context).is_err() {
-                self.jobs.borrow_mut().clear();
-                return;
-            };
-            next_job = self.jobs.borrow_mut().pop_front();
+impl JobExecutor for AfxSimpleJobExecutor {
+    fn enqueue_job(self: Rc<Self>, job: Job, context: &mut Context) {
+        match job {
+            Job::PromiseJob(p) => self.promise_jobs.borrow_mut().push_back(p),
+            Job::AsyncJob(a) => self.async_jobs.borrow_mut().push_back(a),
+            Job::TimeoutJob(t) => {
+                let now = context.clock().now();
+                self.timeout_jobs
+                    .borrow_mut()
+                    .entry(now + t.timeout())
+                    .or_default()
+                    .push(t);
+            }
+            Job::GenericJob(g) => self.generic_jobs.borrow_mut().push_back(g),
+            Job::FinalizationRegistryCleanupJob(fr) => {
+                self.finalization_registry_jobs.borrow_mut().push_back(fr);
+            },
+            _ => todo!()
         }
     }
 
-    fn enqueue_future_job(&self, future: FutureJob, _context: &mut Context) {
-        self.futures.borrow_mut().push(future);
+    fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
+        future::block_on(self.run_jobs_async(&RefCell::new(context)))
     }
 
-    fn run_jobs_async<'a, 'ctx, 'fut>(
-        &'a self,
-        context: &'ctx mut Context,
-    ) -> Pin<Box<dyn Future<Output = ()> + 'fut>>
+    async fn run_jobs_async(self: Rc<Self>, context: &RefCell<&mut Context>) -> JsResult<()>
     where
-        'a: 'fut,
-        'ctx: 'fut,
+        Self: Sized,
     {
-        Box::pin(async {
-            loop {
-                self.run_jobs(context);
-                let mut items_removed = false;
-                let mut futures = self.futures.borrow_mut();
-                for i in (0..futures.len()).rev() {
-                    let mut future_ready = false;
-                    if let Ready(job) = futures::poll!(futures[i].as_mut()) {
-                        self.jobs.borrow_mut().push_back(job);
-                        future_ready = true;
+        let mut group = FutureGroup::new();
+        let mut fr_group = FutureGroup::new();
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                self.stop.store(false, Ordering::Relaxed);
+                self.clear();
+                return Ok(());
+            }
+
+            for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
+                group.insert(job.call(context));
+            }
+
+            for job in mem::take(&mut *self.finalization_registry_jobs.borrow_mut()) {
+                fr_group.insert(job.call(context));
+            }
+
+            // Dispatch all past-due timeout jobs before the termination check.
+            {
+                let now = context.borrow().clock().now();
+                let jobs_to_run = {
+                    let mut timeout_jobs = self.timeout_jobs.borrow_mut();
+                    let mut jobs_to_keep = timeout_jobs.split_off(&now);
+                    jobs_to_keep.retain(|_, jobs| {
+                        jobs.retain(|job| !job.cancelled());
+                        !jobs.is_empty()
+                    });
+                    mem::replace(&mut *timeout_jobs, jobs_to_keep)
+                };
+
+                for jobs in jobs_to_run.into_values() {
+                    for job in jobs {
+                        if !job.cancelled()
+                            && let Err(err) = job.call(&mut context.borrow_mut())
+                        {
+                            self.clear();
+                            return Err(err);
+                        }
                     }
-                    if future_ready {
-                        drop(futures.swap_remove(i));
-                        items_removed = true;
-                    }
-                }
-                if !items_removed {
-                    break;
                 }
             }
-        })
+
+            if self.is_empty() && group.is_empty() {
+                match future::poll_once(fr_group.next()).await.flatten() {
+                    Some(Err(err)) => {
+                        self.clear();
+                        return Err(err);
+                    }
+                    _ if !self.is_empty() => {}
+                    _ => break,
+                }
+            }
+
+            if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
+                self.clear();
+                return Err(err);
+            }
+
+            let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
+            for job in jobs {
+                if let Err(err) = job.call(&mut context.borrow_mut()) {
+                    self.clear();
+                    return Err(err);
+                }
+            }
+
+            let jobs = mem::take(&mut *self.generic_jobs.borrow_mut());
+            for job in jobs {
+                if let Err(err) = job.call(&mut context.borrow_mut()) {
+                    self.clear();
+                    return Err(err);
+                }
+            }
+            context.borrow_mut().clear_kept_objects();
+            future::yield_now().await;
+        }
+
+        Ok(())
     }
 }
 
+impl AfxSimpleJobExecutor {
+    async fn afx_run_jobs_async<'a>(self: Rc<Self>, context: &RefCell<&mut Context>, group: &mut FutureGroup<BoxedFuture<'a>>, fr_group: &mut FutureGroup<BoxedFuture<'a>>) -> JsResult<()>
+    where
+        Self: Sized,
+    {
+        let mut done = false;
+        loop {
+            if self.stop.load(Ordering::Relaxed) {
+                self.stop.store(false, Ordering::Relaxed);
+                self.clear();
+                return Ok(());
+            }
+
+            if done {
+                break;
+            }
+
+            done = true;
+
+            for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
+                let context_weak_ref = advancedfx::js::ContextRef::get_from_context_weak(&context.borrow());
+                let closure = async move || {
+                    if let Some(context_ref) = context_weak_ref.upgrade() {
+                        let context = (*context_ref).get();
+                        let result = {
+                            let ref_cell = RefCell::<&mut Context>::new(context);
+                            job.call(&ref_cell).await
+                        };
+                        return result;
+                    }
+                    Err(JsError::from_native(JsNativeError::error().with_message("advancedfx::js::BoxedContext is gone")))
+                };
+                group.insert(Box::pin(closure()));
+            }
+
+            for job in mem::take(&mut *self.finalization_registry_jobs.borrow_mut()) {
+                let context_weak_ref = advancedfx::js::ContextRef::get_from_context_weak(&context.borrow());
+                let closure = async move || {
+                    if let Some(context_ref) = context_weak_ref.upgrade() {
+                        let context = (*context_ref).get();
+                        let result = {
+                            let ref_cell = RefCell::<&mut Context>::new(context);
+                            job.call(&ref_cell).await
+                        };
+                        return result;
+                    }
+                    Err(JsError::from_native(JsNativeError::error().with_message("advancedfx::js::BoxedContext is gone")))
+                };
+                fr_group.insert(Box::pin(closure()));
+            }
+
+            // Dispatch all past-due timeout jobs before the termination check.
+            {
+                let now = context.borrow().clock().now();
+                let jobs_to_run = {
+                    let mut timeout_jobs = self.timeout_jobs.borrow_mut();
+                    let mut jobs_to_keep = timeout_jobs.split_off(&now);
+                    jobs_to_keep.retain(|_, jobs| {
+                        jobs.retain(|job| !job.cancelled());
+                        !jobs.is_empty()
+                    });
+                    mem::replace(&mut *timeout_jobs, jobs_to_keep)
+                };
+
+                for jobs in jobs_to_run.into_values() {
+                    for job in jobs {
+                        if !job.cancelled()
+                            && let Err(err) = job.call(&mut context.borrow_mut())
+                        {
+                            self.clear();
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+
+            if self.is_empty() && group.is_empty() {
+                match future::poll_once(fr_group.next()).await.flatten() {
+                    Some(result) => {
+                        if let Err(err) = result {
+                            self.clear();
+                            return Err(err);
+                        }
+                        if self.is_empty() {
+                            break;
+                        }
+                        done = false;
+                    }
+                    _ if !self.is_empty() => {
+                    }
+                    _ => break,
+                }
+            }
+
+            if let Some(result) = future::poll_once(group.next()).await.flatten() {
+                if let Err(err) = result {
+                    self.clear();
+                    return Err(err);
+                }
+                done = false;
+            }
+
+            let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
+            for job in jobs {
+                if let Err(err) = job.call(&mut context.borrow_mut()) {
+                    self.clear();
+                    return Err(err);
+                }
+            }
+
+            let jobs = mem::take(&mut *self.generic_jobs.borrow_mut());
+            for job in jobs {
+                if let Err(err) = job.call(&mut context.borrow_mut()) {
+                    self.clear();
+                    return Err(err);
+                }
+            }
+            context.borrow_mut().clear_kept_objects();
+            future::yield_now().await;            
+        }
+
+        Ok(())
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 struct MirvEvents {
-    on_record_start: RefCell<Option<JsObject>>,
-    on_record_end: RefCell<Option<JsObject>>,
-    on_game_event: RefCell<Option<JsObject>>,
-    on_c_view_render_setup_view: RefCell<Option<JsObject>>,
-    on_client_frame_stage_notify: RefCell<Option<JsObject>>,
-    on_add_entity: RefCell<Option<JsObject>>,
-    on_remove_entity: RefCell<Option<JsObject>>,
+    on_record_start: RefCell<Option<JsFunction>>,
+    record_start: JsObject<advancedfx::js::events::EventSource>,
+
+    on_record_end: RefCell<Option<JsFunction>>,
+    record_end: JsObject<advancedfx::js::events::EventSource>,
+
+    on_game_event: RefCell<Option<JsFunction>>,
+    game_event: JsObject<advancedfx::js::events::EventSource>,
+
+    on_c_view_render_setup_view: RefCell<Option<JsFunction>>,
+    c_view_render_setup_view: JsObject<advancedfx::js::events::EventSource>,
+
+    on_client_frame_stage_notify: RefCell<Option<JsFunction>>,
+    client_frame_stage_notify: JsObject<advancedfx::js::events::EventSource>,
+
+    on_add_entity: RefCell<Option<JsFunction>>,
+    add_entity: JsObject<advancedfx::js::events::EventSource>,
+
+    on_remove_entity: RefCell<Option<JsFunction>>,
+    remove_entity: JsObject<advancedfx::js::events::EventSource>,
 }
 
 impl MirvEvents {
-    fn new() -> Self {
+    fn new(context: &mut Context) -> Self {
+
+        let mut record_start = advancedfx::js::events::EventSource::new();
+        record_start.set_on_empty_changed(Some( NativeFunction::from_copy_closure(|_,args,_|{
+            afx_enable_on_record_start(!args[0].as_boolean().unwrap());
+            Ok(JsValue::undefined())
+        }) ));
+
+        let mut record_end = advancedfx::js::events::EventSource::new();
+        record_end.set_on_empty_changed(Some( NativeFunction::from_copy_closure(|_,args,_|{
+            afx_enable_on_record_end(!args[0].as_boolean().unwrap());
+            Ok(JsValue::undefined())
+        }) ));
+
+        let mut game_event = advancedfx::js::events::EventSource::new();
+        game_event.set_on_empty_changed(Some( NativeFunction::from_copy_closure(|_,args,_|{
+            afx_enable_on_game_event(!args[0].as_boolean().unwrap());
+            Ok(JsValue::undefined())})
+        ));
+
+        let mut c_view_render_setup_view = advancedfx::js::events::EventSource::new();
+        c_view_render_setup_view.set_on_empty_changed(Some( NativeFunction::from_copy_closure(|_,args,_|{
+            afx_enable_on_c_view_render_setup_view(!args[0].as_boolean().unwrap());
+            Ok(JsValue::undefined())})
+        ));
+
+        let mut client_frame_stage_notify = advancedfx::js::events::EventSource::new();
+        client_frame_stage_notify.set_on_empty_changed(Some( NativeFunction::from_copy_closure(|_,args,_|{
+            afx_enable_on_client_frame_stage_notify(!args[0].as_boolean().unwrap());
+            Ok(JsValue::undefined())
+        }) ));
+        
+        let mut add_entity = advancedfx::js::events::EventSource::new();
+        add_entity.set_on_empty_changed(Some( NativeFunction::from_copy_closure(|_,args,_|{
+            afx_enable_on_add_entity(!args[0].as_boolean().unwrap());
+            Ok(JsValue::undefined())
+        }) ));
+
+        let mut remove_entity = advancedfx::js::events::EventSource::new();
+        remove_entity.set_on_empty_changed(Some( NativeFunction::from_copy_closure(|_,args,_|{
+            afx_enable_on_remove_entity(!args[0].as_boolean().unwrap());
+            Ok(JsValue::undefined())
+        }) ));
+
         Self {
-            on_record_start: RefCell::<Option<JsObject>>::new(None),
-            on_record_end: RefCell::<Option<JsObject>>::new(None),
-            on_game_event: RefCell::<Option<JsObject>>::new(None),
-            on_c_view_render_setup_view: RefCell::<Option<JsObject>>::new(None),
-            on_client_frame_stage_notify: RefCell::<Option<JsObject>>::new(None),
-            on_add_entity: RefCell::<Option<JsObject>>::new(None),
-            on_remove_entity: RefCell::<Option<JsObject>>::new(None),
+            on_record_start: RefCell::<Option<JsFunction>>::new(None),
+            record_start: advancedfx::js::events::EventSource::obj_new(record_start, context),
+
+            on_record_end: RefCell::<Option<JsFunction>>::new(None),
+            record_end: advancedfx::js::events::EventSource::obj_new(record_end, context),
+
+            on_game_event: RefCell::<Option<JsFunction>>::new(None),
+            game_event: advancedfx::js::events::EventSource::obj_new(game_event, context),
+
+            on_c_view_render_setup_view: RefCell::<Option<JsFunction>>::new(None),
+            c_view_render_setup_view: advancedfx::js::events::EventSource::obj_new(c_view_render_setup_view, context),
+
+            on_client_frame_stage_notify: RefCell::<Option<JsFunction>>::new(None),
+            client_frame_stage_notify:advancedfx::js::events::EventSource::obj_new(client_frame_stage_notify, context),
+
+            on_add_entity: RefCell::<Option<JsFunction>>::new(None),
+            add_entity: advancedfx::js::events::EventSource::obj_new(add_entity, context),
+
+            on_remove_entity: RefCell::<Option<JsFunction>>::new(None),
+            remove_entity: advancedfx::js::events::EventSource::obj_new(remove_entity, context),
         }
-    }    
+    }
+
+    fn make_object(&self, context: &mut Context) -> JsObject {
+        ObjectInitializer::new(context)
+        .property(js_string!("recordStart"), self.record_start.clone(), Attribute::all())
+        .property(js_string!("recordEnd"), self.record_end.clone(), Attribute::all())
+        .property(js_string!("gameEvent"), self.game_event.clone(), Attribute::all())
+        .property(js_string!("cViewRenderSetupView"), self.c_view_render_setup_view.clone(), Attribute::all())
+        .property(js_string!("clientFrameStageNotify"), self.client_frame_stage_notify.clone(), Attribute::all())
+        .property(js_string!("addEntity"), self.add_entity.clone(), Attribute::all())
+        .property(js_string!("removeEntity"), self.remove_entity.clone(), Attribute::all())
+        .build()
+    }
 }
 
-pub struct AfxHookSource2Rs {
-    loader: Rc<AfxSimpleModuleLoader>,
-    context: Rc<advancedfx::js::ContextHolder>,
+pub struct AfxHookSource2Rs<'a> {
+    jobs_group: RefCell<FutureGroup<BoxedFuture<'a>>>,
+    jobs_fr_group: RefCell<FutureGroup<BoxedFuture<'a>>>,
+    context: Rc<advancedfx::js::BoxedContext>,
     events: Rc<MirvEvents>
 }
 
-pub fn afx_hooks_source_2_rs_ptr_to_ref<'a>(ptr: * mut AfxHookSource2Rs) -> &'a mut AfxHookSource2Rs {
+pub fn afx_hooks_source_2_rs_ptr_to_ref<'a>(ptr: * mut AfxHookSource2Rs<'a>) -> &'a mut AfxHookSource2Rs<'a> {
     unsafe{&mut *ptr}
 }
 
 #[derive(Trace, Finalize, JsData)]
 struct MirvStruct {
-    #[unsafe_ignore_trace]
-    loader: Rc<AfxSimpleModuleLoader>,
-    
     #[unsafe_ignore_trace]
     events: Rc<MirvEvents>,
 
@@ -1010,7 +1444,7 @@ fn afx_print_error(error: &JsError, indent: usize, context: &mut Context) -> JsR
         let mut s = String::new();
         writeln!(&mut s, "{:>indent$}Uncaught error `{}`","",error).map_err(JsError::from_rust)?;
         afx_warning(s);
-        match &native_error.kind {
+        match &native_error.kind() {
             JsNativeErrorKind::Aggregate(errors) => {
                 for sub_error in errors {
                     afx_print_error(&sub_error, indent+1, context)?;
@@ -1046,11 +1480,11 @@ fn afx_on_error(error: &JsError, context: &mut Context) -> JsResult<()> {
 }
 
 fn mirv_trace(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let trace = context.stack_trace().map(|frame| JsValue::String(frame.code_block().name().clone()))
+    let trace = context.stack_trace().map(|frame| js_value!(frame.code_block().name().clone()))
     .collect::<Vec<_>>()
     .into_iter();
 
-    Ok(JsValue::Object(JsObject::from(JsArray::from_iter(trace,context))))
+    Ok(js_value!(JsObject::from(JsArray::from_iter(trace,context))))
 }
 
 fn mirv_message(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1064,7 +1498,7 @@ fn mirv_message(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
             }
         }
     }
-    return Ok(JsValue::Undefined)
+    return Ok(JsValue::undefined())
 }
 
 fn mirv_warning(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1078,7 +1512,7 @@ fn mirv_warning(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
             }
         }
     }
-    return Ok(JsValue::Undefined)
+    return Ok(JsValue::undefined())
 }
 
 fn mirv_exec(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1092,7 +1526,7 @@ fn mirv_exec(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResu
             }
         }
     }
-    return Ok(JsValue::Undefined)
+    return Ok(JsValue::undefined())
 }
 
 // --- MirvInput direct control JS bindings ---
@@ -1200,21 +1634,52 @@ fn mirv_get_last_camera_data(_this: &JsValue, _args: &[JsValue], context: &mut C
     Ok(JsValue::Object(obj))
 }
 
+
+const MIRV_ON_RECORD_START_STR: &'static str = "AdvancedfxMirv.onRecordStart";
+
 fn mirv_set_on_record_start(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(object) = this.as_object() {
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             if 0 < args.len() {
-                match &args[0] {
-                    JsValue::Undefined => {
+                match &args[0].variant() {
+                    JsVariant::Undefined => {
+                        advancedfx::js::events::EventSource::obj_off(&mirv.events.record_start, context, MIRV_ON_RECORD_START_STR.to_string(), Some(-1.0));
                         mirv.events.on_record_start.replace(None);
-                        afx_enable_on_record_start(false);
-                        return Ok(JsValue::Undefined); 
+                        return Ok(JsValue::undefined()); 
                     }
-                    JsValue::Object(object) => {
-                        if object.is_callable() {
-                            mirv.events.on_record_start.replace(Some(object.clone()));
-                            afx_enable_on_record_start(true);
-                            return Ok(JsValue::Undefined); 
+                    JsVariant::Object(object) => {
+                        if let Some(callback) = JsFunction::from_object(object.clone()) {
+                            mirv.events.on_record_start.replace(Some(callback.clone()));
+                            let wrapper = NativeFunction::from_copy_closure_with_captures(
+                                |_,args,callback,context| {
+                                    if 1 <= args.len() {
+                                        let arg0 = &args[0];
+                                        if let Some(object) = arg0.as_object() {
+                                            if let Ok(take_folder) = object.get(js_string!("takeFolder"), context) {
+                                                let event_args = ObjectInitializer::new(context)
+                                                    .property(js_string!("takeFolder"), take_folder, Attribute::all())
+                                                    .build();
+
+                                                if let Err(e) = callback.call(&JsValue::undefined(), &[js_value!(event_args)], context) {
+                                                    return Err(e);
+                                                }
+
+                                                return Ok(JsValue::undefined());
+                                            }
+                                        }
+                                    }
+                                    Err(advancedfx::js::errors::error_type(context).into())
+                                },
+                                callback
+                            );
+
+                            advancedfx::js::events::EventSource::obj_on(&mirv.events.record_start,
+                                context,
+                                MIRV_ON_RECORD_START_STR.to_string(),
+                                wrapper.to_js_function(context.realm()),
+                                Some(-1.0)
+                            );
+                            return Ok(JsValue::undefined()); 
                         }
                     }
                     _ => {
@@ -1231,10 +1696,10 @@ fn mirv_get_on_record_start(this: &JsValue, _args: &[JsValue], context: &mut Con
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             match & *mirv.events.on_record_start.borrow() {
                 None => {
-                    return Ok(JsValue::Undefined);
+                    return Ok(JsValue::undefined());
                 }
-                Some(js_object) => {
-                    return Ok(JsValue::Object(js_object.clone()));
+                Some(callback) => {
+                    return Ok(js_value!(callback.clone()));
                 }
             }
         }
@@ -1242,21 +1707,40 @@ fn mirv_get_on_record_start(this: &JsValue, _args: &[JsValue], context: &mut Con
     Err(advancedfx::js::errors::error_type(context).into())
 }
 
+
+const MIRV_ON_RECORD_END_STR: &'static str = "AdvancedfxMirv.onRecordEnd";
+
 fn mirv_set_on_record_end(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(object) = this.as_object() {
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             if 0 < args.len() {
-                match &args[0] {
-                    JsValue::Undefined => {
+                match &args[0].variant() {
+                    JsVariant::Undefined => {
+                        advancedfx::js::events::EventSource::obj_off(&mirv.events.record_end, context, MIRV_ON_RECORD_END_STR.to_string(), Some(-1.0));
                         mirv.events.on_record_end.replace(None);
-                        afx_enable_on_record_end(false);
-                        return Ok(JsValue::Undefined); 
+                        return Ok(JsValue::undefined()); 
                     }
-                    JsValue::Object(object) => {
-                        if object.is_callable() {
-                            mirv.events.on_record_end.replace(Some(object.clone()));
-                            afx_enable_on_record_end(true);
-                            return Ok(JsValue::Undefined); 
+                    JsVariant::Object(object) => {
+                        if let Some(callback) = JsFunction::from_object(object.clone()) {
+                            mirv.events.on_record_end.replace(Some(callback.clone()));
+                            let wrapper = NativeFunction::from_copy_closure_with_captures(
+                                |_,_args,callback,context| {
+                                    if let Err(e) = callback.call(&JsValue::undefined(), &[], context) {
+                                        return Err(e);
+                                    }
+
+                                    return Ok(JsValue::undefined());
+                                },
+                                callback
+                            );
+
+                            advancedfx::js::events::EventSource::obj_on(&mirv.events.record_end,
+                                context,
+                                MIRV_ON_RECORD_END_STR.to_string(),
+                                wrapper.to_js_function(context.realm()),
+                                Some(-1.0)
+                            );
+                            return Ok(JsValue::undefined()); 
                         }
                     }
                     _ => {
@@ -1273,10 +1757,10 @@ fn mirv_get_on_record_end(this: &JsValue, _args: &[JsValue], context: &mut Conte
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             match & *mirv.events.on_record_end.borrow() {
                 None => {
-                    return Ok(JsValue::Undefined);
+                    return Ok(JsValue::undefined());
                 }
-                Some(js_object) => {
-                    return Ok(JsValue::Object(js_object.clone()));
+                Some(callback) => {
+                    return Ok(js_value!(callback.clone()));
                 }
             }
         }
@@ -1284,21 +1768,58 @@ fn mirv_get_on_record_end(this: &JsValue, _args: &[JsValue], context: &mut Conte
     Err(advancedfx::js::errors::error_type(context).into())
 }
 
+
+const MIRV_ON_GAME_EVENT_STR: &'static str = "AdvancedfxMirv.onGameEvent";
+
 fn mirv_set_on_game_event(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(object) = this.as_object() {
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             if 0 < args.len() {
-                match &args[0] {
-                    JsValue::Undefined => {
+                match &args[0].variant() {
+                    JsVariant::Undefined => {
+                        advancedfx::js::events::EventSource::obj_off(&mirv.events.game_event, context, MIRV_ON_GAME_EVENT_STR.to_string(), Some(-1.0));
                         mirv.events.on_game_event.replace(None);
-                        afx_enable_on_game_event(false);
-                        return Ok(JsValue::Undefined); 
+                        return Ok(JsValue::undefined()); 
                     }
-                    JsValue::Object(object) => {
-                        if object.is_callable() {
-                            mirv.events.on_game_event.replace(Some(object.clone()));
-                            afx_enable_on_game_event(true);
-                            return Ok(JsValue::Undefined); 
+                    JsVariant::Object(object) => {
+                        if let Some(callback) = JsFunction::from_object(object.clone()) {
+                            mirv.events.on_game_event.replace(Some(callback.clone()));
+                            let wrapper = NativeFunction::from_copy_closure_with_captures(
+                                |_,args,callback,context| {
+                                    if 1 <= args.len() {
+                                        let arg0 = &args[0];
+                                        if let Some(object) = arg0.as_object() {
+                                            if let Ok(name) = object.get(js_string!("name"), context) {
+                                                if let Ok(id) = object.get(js_string!("id"), context) {
+                                                    if let Ok(data) = object.get(js_string!("data"), context) {
+                                                        let event_args = ObjectInitializer::new(context)
+                                                            .property(js_string!("name"), name, Attribute::all())
+                                                            .property(js_string!("id"), id, Attribute::all())
+                                                            .property(js_string!("data"), data, Attribute::all())
+                                                            .build();
+
+                                                        if let Err(e) = callback.call(&JsValue::undefined(), &[js_value!(event_args)], context) {
+                                                            return Err(e);
+                                                        }
+
+                                                        return Ok(JsValue::undefined());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(advancedfx::js::errors::error_type(context).into())
+                                },
+                                callback
+                            );
+
+                            advancedfx::js::events::EventSource::obj_on(&mirv.events.game_event,
+                                context,
+                                MIRV_ON_GAME_EVENT_STR.to_string(),
+                                wrapper.to_js_function(context.realm()),
+                                Some(-1.0)
+                            );
+                            return Ok(JsValue::undefined()); 
                         }
                     }
                     _ => {
@@ -1315,10 +1836,10 @@ fn mirv_get_on_game_event(this: &JsValue, _args: &[JsValue], context: &mut Conte
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             match & *mirv.events.on_game_event.borrow() {
                 None => {
-                    return Ok(JsValue::Undefined);
+                    return Ok(JsValue::undefined());
                 }
-                Some(js_object) => {
-                    return Ok(JsValue::Object(js_object.clone()));
+                Some(callback) => {
+                    return Ok(js_value!(callback.clone()));
                 }
             }
         }
@@ -1326,21 +1847,122 @@ fn mirv_get_on_game_event(this: &JsValue, _args: &[JsValue], context: &mut Conte
     Err(advancedfx::js::errors::error_type(context).into())
 }
 
+
+const MIRV_ON_C_VIEW_RENDER_SETUP_VIEW_STR: &'static str = "AdvancedfxMirv.onCViewRenderSetupView";
+
+fn mirv_set_on_c_view_render_setup_view_wrap_event(event: JsObject, context: &mut Context) -> JsResult<JsObject> {
+    let js_value_cur_time = event.get(js_string!("curTime"), context)?;
+    let js_value_abs_time = event.get(js_string!("absTime"), context)?;
+    let js_value_last_abs_time = event.get(js_string!("lastAbsTime"), context)?;
+    let js_object_current_view = event.get(js_string!("currentView"), context)?.as_object().ok_or_else(|| JsError::from_native(advancedfx::js::errors::error_type(context)))?;
+    let js_object_game_view = event.get(js_string!("gameView"), context)?.as_object().ok_or_else(|| JsError::from_native(advancedfx::js::errors::error_type(context)))?;
+    let js_object_last_view = event.get(js_string!("lastView"), context)?.as_object().ok_or_else(|| JsError::from_native(advancedfx::js::errors::error_type(context)))?;
+    let js_value_width = event.get(js_string!("width"), context)?;
+    let js_value_height = event.get(js_string!("height"), context)?;
+
+    let js_value_current_view_x = js_object_current_view.get(js_string!("x"), context)?;
+    let js_value_current_view_y = js_object_current_view.get(js_string!("y"), context)?;
+    let js_value_current_view_z = js_object_current_view.get(js_string!("z"), context)?;
+    let js_value_current_view_rx = js_object_current_view.get(js_string!("rX"), context)?;
+    let js_value_current_view_ry = js_object_current_view.get(js_string!("rY"), context)?;
+    let js_value_current_view_rz = js_object_current_view.get(js_string!("rZ"), context)?;
+    let js_value_current_view_fov = js_object_current_view.get(js_string!("fov"), context)?;
+
+    let js_value_game_view_x = js_object_game_view.get(js_string!("x"), context)?;
+    let js_value_game_view_y = js_object_game_view.get(js_string!("y"), context)?;
+    let js_value_game_view_z = js_object_game_view.get(js_string!("z"), context)?;
+    let js_value_game_view_rx = js_object_game_view.get(js_string!("rX"), context)?;
+    let js_value_game_view_ry = js_object_game_view.get(js_string!("rY"), context)?;
+    let js_value_game_view_rz = js_object_game_view.get(js_string!("rZ"), context)?;
+    let js_value_game_view_fov = js_object_game_view.get(js_string!("fov"), context)?;
+
+    let js_value_last_view_x = js_object_last_view.get(js_string!("x"), context)?;
+    let js_value_last_view_y = js_object_last_view.get(js_string!("y"), context)?;
+    let js_value_last_view_z = js_object_last_view.get(js_string!("z"), context)?;
+    let js_value_last_view_rx = js_object_last_view.get(js_string!("rX"), context)?;
+    let js_value_last_view_ry = js_object_last_view.get(js_string!("rY"), context)?;
+    let js_value_last_view_rz = js_object_last_view.get(js_string!("rZ"), context)?;
+    let js_value_last_view_fov = js_object_last_view.get(js_string!("fov"), context)?;
+
+    let js_object_current_view = ObjectInitializer::new(context)
+    .property(js_string!("x"), js_value_current_view_x, Attribute::all())
+    .property(js_string!("y"), js_value_current_view_y, Attribute::all())
+    .property(js_string!("z"), js_value_current_view_z, Attribute::all())
+    .property(js_string!("rX"), js_value_current_view_rx, Attribute::all())
+    .property(js_string!("rY"), js_value_current_view_ry, Attribute::all())
+    .property(js_string!("rZ"), js_value_current_view_rz, Attribute::all())
+    .property(js_string!("fov"), js_value_current_view_fov, Attribute::all())
+    .build();
+
+    let js_object_game_view = ObjectInitializer::new(context)
+    .property(js_string!("x"), js_value_game_view_x, Attribute::all())
+    .property(js_string!("y"), js_value_game_view_y, Attribute::all())
+    .property(js_string!("z"), js_value_game_view_z, Attribute::all())
+    .property(js_string!("rX"), js_value_game_view_rx, Attribute::all())
+    .property(js_string!("rY"), js_value_game_view_ry, Attribute::all())
+    .property(js_string!("rZ"), js_value_game_view_rz, Attribute::all())
+    .property(js_string!("fov"), js_value_game_view_fov, Attribute::all())
+    .build();
+
+    let js_object_last_view = ObjectInitializer::new(context)
+    .property(js_string!("x"), js_value_last_view_x, Attribute::all())
+    .property(js_string!("y"), js_value_last_view_y, Attribute::all())
+    .property(js_string!("z"), js_value_last_view_z, Attribute::all())
+    .property(js_string!("rX"), js_value_last_view_rx, Attribute::all())
+    .property(js_string!("rY"), js_value_last_view_ry, Attribute::all())
+    .property(js_string!("rZ"), js_value_last_view_rz, Attribute::all())
+    .property(js_string!("fov"), js_value_last_view_fov, Attribute::all())
+    .build();
+
+    let js_object = ObjectInitializer::new(context)
+    .property(js_string!("curTime"), js_value_cur_time, Attribute::all())
+    .property(js_string!("absTime"), js_value_abs_time, Attribute::all())
+    .property(js_string!("lastAbsTime"), js_value_last_abs_time, Attribute::all())
+    .property(js_string!("currentView"), js_value!(js_object_current_view), Attribute::all())
+    .property(js_string!("gameView"), js_value!(js_object_game_view), Attribute::all())
+    .property(js_string!("lastView"), js_value!(js_object_last_view), Attribute::all())
+    .property(js_string!("width"), js_value_width, Attribute::all())
+    .property(js_string!("height"), js_value_height, Attribute::all())
+    .build();
+
+    Ok(js_object)
+}
+
 fn mirv_set_on_c_view_render_setup_view(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(object) = this.as_object() {
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             if 0 < args.len() {
-                match &args[0] {
-                    JsValue::Undefined => {
+                match &args[0].variant() {
+                    JsVariant::Undefined => {
+                        advancedfx::js::events::EventSource::obj_off(&mirv.events.c_view_render_setup_view, context, MIRV_ON_C_VIEW_RENDER_SETUP_VIEW_STR.to_string(), Some(-1.0));
                         mirv.events.on_c_view_render_setup_view.replace(None);
-                        afx_enable_on_c_view_render_setup_view(false);
-                        return Ok(JsValue::Undefined); 
+                        return Ok(JsValue::undefined()); 
                     }
-                    JsValue::Object(object) => {
-                        if object.is_callable() {
-                            mirv.events.on_c_view_render_setup_view.replace(Some(object.clone()));
-                            afx_enable_on_c_view_render_setup_view(true);
-                            return Ok(JsValue::Undefined); 
+                    JsVariant::Object(object) => {
+                        if let Some(callback) = JsFunction::from_object(object.clone()) {
+                            mirv.events.on_c_view_render_setup_view.replace(Some(callback.clone()));
+                            let wrapper = NativeFunction::from_copy_closure_with_captures(
+                                |_,args,callback,context| {
+                                    if 1 <= args.len() {
+                                        let arg0 = &args[0];
+                                        if let Some(object) = arg0.as_object() {
+                                            if let Ok(wrapped_object) = mirv_set_on_c_view_render_setup_view_wrap_event(object, context) {
+                                                return callback.call(&JsValue::undefined(), &[js_value!(wrapped_object)], context);
+                                            }
+                                        }
+                                    }
+                                    Err(advancedfx::js::errors::error_type(context).into())
+                                },
+                                callback
+                            );
+
+                            advancedfx::js::events::EventSource::obj_on(&mirv.events.c_view_render_setup_view,
+                                context,
+                                MIRV_ON_C_VIEW_RENDER_SETUP_VIEW_STR.to_string(),
+                                wrapper.to_js_function(context.realm()),
+                                Some(-1.0)
+                            );
+                            return Ok(JsValue::undefined()); 
                         }
                     }
                     _ => {
@@ -1357,10 +1979,10 @@ fn mirv_get_on_c_view_render_setup_view(this: &JsValue, _args: &[JsValue], conte
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             match & *mirv.events.on_c_view_render_setup_view.borrow() {
                 None => {
-                    return Ok(JsValue::Undefined);
+                    return Ok(JsValue::undefined());
                 }
-                Some(js_object) => {
-                    return Ok(JsValue::Object(js_object.clone()));
+                Some(callback) => {
+                    return Ok(js_value!(callback.clone()));
                 }
             }
         }
@@ -1368,21 +1990,55 @@ fn mirv_get_on_c_view_render_setup_view(this: &JsValue, _args: &[JsValue], conte
     Err(advancedfx::js::errors::error_type(context).into())
 }
 
+
+const MIRV_ON_CLIENT_FRAME_STAGE_NOTIFY_STR: &'static str = "AdvancedfxMirv.onClientFrameStageNotify";
+
 fn mirv_set_on_client_frame_stage_notify(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(object) = this.as_object() {
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             if 0 < args.len() {
-                match &args[0] {
-                    JsValue::Undefined => {
+                match &args[0].variant() {
+                    JsVariant::Undefined => {
+                        advancedfx::js::events::EventSource::obj_off(&mirv.events.client_frame_stage_notify, context, MIRV_ON_CLIENT_FRAME_STAGE_NOTIFY_STR.to_string(), Some(-1.0));
                         mirv.events.on_client_frame_stage_notify.replace(None);
-                        afx_enable_on_client_frame_stage_notify(false);
-                        return Ok(JsValue::Undefined); 
+                        return Ok(JsValue::undefined()); 
                     }
-                    JsValue::Object(object) => {
-                        if object.is_callable() {
-                            mirv.events.on_client_frame_stage_notify.replace(Some(object.clone()));
-                            afx_enable_on_client_frame_stage_notify(true);
-                            return Ok(JsValue::Undefined); 
+                    JsVariant::Object(object) => {
+                        if let Some(callback) = JsFunction::from_object(object.clone()) {
+                            mirv.events.on_client_frame_stage_notify.replace(Some(callback.clone()));
+                            let wrapper = NativeFunction::from_copy_closure_with_captures(
+                                |_,args,callback,context| {
+                                    if 1 <= args.len() {
+                                        let arg0 = &args[0];
+                                        if let Some(object) = arg0.as_object() {
+                                            if let Ok(cur_stage) = object.get(js_string!("curStage"), context) {
+                                                if let Ok(is_before) = object.get(js_string!("isBefore"), context) {
+                                                    let event_args = ObjectInitializer::new(context)
+                                                        .property(js_string!("curStage"), cur_stage, Attribute::all())
+                                                        .property(js_string!("isBefore"), is_before, Attribute::all())
+                                                        .build();
+
+                                                    if let Err(e) = callback.call(&JsValue::undefined(), &[js_value!(event_args)], context) {
+                                                        return Err(e);
+                                                    }
+
+                                                    return Ok(JsValue::undefined());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(advancedfx::js::errors::error_type(context).into())
+                                },
+                                callback
+                            );
+
+                            advancedfx::js::events::EventSource::obj_on(&mirv.events.client_frame_stage_notify,
+                                context,
+                                MIRV_ON_CLIENT_FRAME_STAGE_NOTIFY_STR.to_string(),
+                                wrapper.to_js_function(context.realm()),
+                                Some(-1.0)
+                            );
+                            return Ok(JsValue::undefined()); 
                         }
                     }
                     _ => {
@@ -1399,10 +2055,10 @@ fn mirv_get_on_client_frame_stage_notify(this: &JsValue, _args: &[JsValue], cont
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             match & *mirv.events.on_client_frame_stage_notify.borrow() {
                 None => {
-                    return Ok(JsValue::Undefined);
+                    return Ok(JsValue::undefined());
                 }
                 Some(js_object) => {
-                    return Ok(JsValue::Object(js_object.clone()));
+                    return Ok(js_value!(js_object.clone()));
                 }
             }
         }
@@ -1410,27 +2066,24 @@ fn mirv_get_on_client_frame_stage_notify(this: &JsValue, _args: &[JsValue], cont
     Err(advancedfx::js::errors::error_type(context).into())
 }
 
-fn mirv_run_jobs(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    context.run_jobs();
-    Ok(JsValue::Undefined)
+fn mirv_run_jobs(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
 }
 
-fn mirv_run_jobs_async(_this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    let task = context.run_jobs_async();
-    futures::executor::block_on(task);    
-    Ok(JsValue::Undefined)
+fn mirv_run_jobs_async(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::undefined())
 }
 
 #[derive(Trace, Finalize, JsData)]
 struct MirvWsResult {
     #[unsafe_ignore_trace]
-    state: RefCell<Option<Vec<u8>>>,
+    state: RefCell<Option<Bytes>>,
 }
 
 impl MirvWsResult {
     #[must_use]
     fn new() -> Self {
-        let state = RefCell::<Option<Vec<u8>>>::new(None);
+        let state = RefCell::<Option<Bytes>>::new(None);
         Self { state }
     }
 
@@ -1458,7 +2111,8 @@ impl MirvWsResult {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvWsResult>() {
                 if let Some(bin) = mirv.state.replace(None)  {
-                        match JsArrayBuffer::from_byte_block(bin,context) {
+                        // I am aware we are copying here now, but there's not too much we can do about that currently.
+                        match JsArrayBuffer::from_byte_block(AlignedVec::<u8>::from_slice(64, bin.borrow()),context) {
                             Ok(buffer) => {
                                 return Ok(JsValue::from(buffer));
                             }
@@ -1476,7 +2130,7 @@ impl MirvWsResult {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvWsResult>() {
                 if let Some(bin) = &mut *mirv.state.borrow_mut()  {
-                        match JsArrayBuffer::from_byte_block(bin.clone(),context) {
+                        match JsArrayBuffer::from_byte_block(AlignedVec::<u8>::from_slice(64, bin.clone().borrow()),context) {
                             Ok(buffer) => {
                                 return Ok(JsValue::from(buffer));
                             }
@@ -1491,41 +2145,16 @@ impl MirvWsResult {
     }
 }
 
-macro_rules! afx_make_async_error {
-    (StandardError: $macro: expr, $context_ptr_option: ident) => {
-        if let Some(context_ptr) = $context_ptr_option {
-            if let Some(context) = context_ptr.get() {
-                $macro(context)
-            } else {
-                advancedfx::js::errors::error_resolve_wrapper_failed()
-            }
-        } else {
-            advancedfx::js::errors::error_resolve_wrapper_failed()
-        }        
-    };
-    (CustomError: $js_native_error: expr, $message: expr, $context_ptr_option: ident) => {
-        if let Some(context_ptr) = $context_ptr_option {
-            if let Some(context) = context_ptr.get() {
-                advancedfx::js::errors::make_error!($js_native_error, $message, context)
-            } else {
-                advancedfx::js::errors::error_resolve_wrapper_failed()
-            }            
-        } else {
-            advancedfx::js::errors::error_resolve_wrapper_failed()
-        }
-    };
-}
-
 #[derive(Trace, Finalize, JsData)]
 struct MirvWsWrite {
     #[unsafe_ignore_trace]
-    state: RefCell<Option<SplitSink<WebSocketStream<ConnectStream>, Message>>>,
+    state: RefCell<Option<WebSocketSender<TcpStream>>>,
 }
 
 impl MirvWsWrite {
     #[must_use]
     fn new() -> Self {
-        let state = RefCell::<Option<SplitSink<WebSocketStream<ConnectStream>, Message>>>::new(None);
+        let state = RefCell::<Option<WebSocketSender<TcpStream>>>::new(None);
         Self { state }
     }
 
@@ -1565,26 +2194,22 @@ impl MirvWsWrite {
     }
 
 
-    fn close(this: &JsValue, _args: &[JsValue], context: &mut Context) -> impl Future<Output = JsResult<JsValue>> {
-        let this_clone = (*this).clone();
-        let context_ptr_option: Option<advancedfx::js::ContextMutRef> = context.get_data::<advancedfx::js::ContextMutRef>().map(|x| x.clone());
-        async move {
-            if let Some(object) = this_clone.as_object() {
-                if let Some(mirv_ws_write) = object.downcast_ref::<MirvWsWrite>() {
-                    if let Ok(mut borrow_mut) = mirv_ws_write.state.try_borrow_mut() {
-                        if let Some(ws_write) = &mut *borrow_mut  {
-                            if let Err(e) = ws_write.close().await {
-                                return Err(afx_make_async_error!(CustomError: JsNativeError::error(), e.to_string(), context_ptr_option).into());
-                            }
-                            return Ok(JsValue::Undefined);
+    async fn close(this: &JsValue, _args: &[JsValue], context: &RefCell<&mut Context>) -> JsResult<JsValue> {
+        if let Some(object) = this.as_object() {
+            if let Some(mirv_ws_write) = object.downcast_ref::<MirvWsWrite>() {
+                if let Ok(mut borrow_mut) = mirv_ws_write.state.try_borrow_mut() {
+                    if let Some(ws_write) = &mut *borrow_mut  {
+                        if let Err(e) = ws_write.close(None).await {
+                            return Err(advancedfx::js::errors::make_error!(JsNativeError::error(), e.to_string(), &mut context.borrow_mut()).into());
                         }
-                    } else {
-                        return Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_async_conflict, context_ptr_option).into());
+                        return Ok(JsValue::undefined());
                     }
+                } else {
+                    return Err(advancedfx::js::errors::error_async_conflict(&mut context.borrow_mut()).into());
                 }
             }
-            Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_type, context_ptr_option).into())
         }
+        Err(advancedfx::js::errors::error_type(&mut context.borrow_mut()).into())
     }
 
     fn drop(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -1594,127 +2219,113 @@ impl MirvWsWrite {
                     return Err(advancedfx::js::errors::error_async_conflict(context).into());
                 }
                 drop(mirv_ws_write.state.replace(None));
-                return Ok(JsValue::Undefined);         
+                return Ok(JsValue::undefined());         
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
     }
 
-    fn feed(this: &JsValue, args: &[JsValue], context: &mut Context) -> impl Future<Output = JsResult<JsValue>> {
-        let args_clone: Vec<_> = args.iter().cloned().collect();
-        let this_clone = (*this).clone();
-        let context_ptr_option: Option<advancedfx::js::ContextMutRef> = context.get_data::<advancedfx::js::ContextMutRef>().map(|x| x.clone());
-        async move {
-            if let Some(object) = this_clone.as_object() {
-                if let Some(mirv_ws_write) = object.downcast_ref::<MirvWsWrite>() {
-                    if let Ok(mut borrow_mut) = mirv_ws_write.state.try_borrow_mut() {
-                        if let Some(ws_write) = &mut *borrow_mut  {
-                            for x in args_clone {
-                                match x {
-                                    JsValue::String(js_string) => {
-                                        if let Err(e) = ws_write.feed(Message::text(js_string.to_std_string_escaped())).await {
-                                            return Err(afx_make_async_error!(CustomError: JsNativeError::error(),e.to_string(),context_ptr_option).into());
-                                        }
+    async fn feed(this: &JsValue, args: &[JsValue], context: &RefCell<&mut Context>) -> JsResult<JsValue> {
+        if let Some(object) = this.as_object() {
+            if let Some(mirv_ws_write) = object.downcast_ref::<MirvWsWrite>() {
+                if let Ok(mut borrow_mut) = mirv_ws_write.state.try_borrow_mut() {
+                    if let Some(ws_write) = &mut *borrow_mut  {
+                        for x in args {
+                            match x.variant() {
+                                JsVariant::String(js_string) => {
+                                    if let Err(e) = ws_write.feed(Message::text(js_string.to_std_string_escaped())).await {
+                                        return Err(advancedfx::js::errors::make_error!(JsNativeError::error(), e.to_string(), &mut context.borrow_mut()).into());
                                     }
-                                    JsValue::Object(js_object) => {
-                                        if let Ok(array_buffer) = JsArrayBuffer::from_object(js_object.clone()) {
-                                            if let Ok(data) = array_buffer.detach(&JsValue::undefined()) {
-                                                if let Err(e) = ws_write.feed(Message::binary(data)).await {
-                                                    return Err(afx_make_async_error!(CustomError: JsNativeError::error(),e.to_string(),context_ptr_option).into());
-                                                }
+                                }
+                                JsVariant::Object(js_object) => {
+                                    if let Ok(array_buffer) = JsArrayBuffer::from_object(js_object.clone()) {
+                                        if let Ok(data) = array_buffer.detach(&JsValue::undefined()) {
+                                            if let Err(e) = ws_write.feed(Message::binary(Bytes::from_owner(data))).await {
+                                                return Err(advancedfx::js::errors::make_error!(JsNativeError::error(), e.to_string(), &mut context.borrow_mut()).into());
                                             }
                                         }
                                     }
-                                    _ => {
-                                        return Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_arguments, context_ptr_option).into());
-                                    }
+                                }
+                                _ => {
+                                    return Err(advancedfx::js::errors::error_arguments(&mut context.borrow_mut()).into());
                                 }
                             }
-                            return Ok(JsValue::Undefined)
                         }
-                    } else {
-                        return Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_async_conflict, context_ptr_option).into());
+                        return Ok(JsValue::undefined())
                     }
+                } else {
+                    return Err(advancedfx::js::errors::error_async_conflict(&mut context.borrow_mut()).into());
                 }
             }
-            Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_type, context_ptr_option).into())
         }
+        Err(advancedfx::js::errors::error_type(&mut context.borrow_mut()).into())
     }
 
-    fn flush(this: &JsValue, _args: &[JsValue], context: &mut Context) -> impl Future<Output = JsResult<JsValue>> {
-        let this_clone = (*this).clone();
-        let context_ptr_option: Option<advancedfx::js::ContextMutRef> = context.get_data::<advancedfx::js::ContextMutRef>().map(|x| x.clone());
-        async move {
-            if let Some(object) = this_clone.as_object() {
-                if let Some(mirv_ws_write) = object.downcast_ref::<MirvWsWrite>() {
-                    if let Ok(mut borrow_mut) = mirv_ws_write.state.try_borrow_mut() {
-                        if let Some(ws_write) = &mut *borrow_mut  {
-                            if let Err(e) = ws_write.flush().await {
-                                return Err(afx_make_async_error!(CustomError: JsNativeError::error(),e.to_string(),context_ptr_option).into());
-                            }
-                            return Ok(JsValue::Undefined);
+    async fn flush(this: &JsValue, _args: &[JsValue], context: &RefCell<&mut Context>)-> JsResult<JsValue> {
+        if let Some(object) = this.as_object() {
+            if let Some(mirv_ws_write) = object.downcast_ref::<MirvWsWrite>() {
+                if let Ok(mut borrow_mut) = mirv_ws_write.state.try_borrow_mut() {
+                    if let Some(ws_write) = &mut *borrow_mut  {
+                        if let Err(e) = ws_write.flush().await {
+                            return Err(advancedfx::js::errors::make_error!(JsNativeError::error(), e.to_string(), &mut context.borrow_mut()).into());
                         }
-                    } else {
-                        return Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_async_conflict, context_ptr_option).into());
-                    }                        
-                }
+                        return Ok(JsValue::undefined());
+                    }
+                } else {
+                    return Err(advancedfx::js::errors::error_async_conflict(&mut context.borrow_mut()).into());
+                }                        
             }
-            Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_type, context_ptr_option).into())
         }
+        Err(advancedfx::js::errors::error_type(&mut context.borrow_mut()).into())
     }
 
-    fn send(this: &JsValue, args: &[JsValue], context: &mut Context) -> impl Future<Output = JsResult<JsValue>> {
-        let args_clone: Vec<_> = args.iter().cloned().collect();
-        let this_clone = (*this).clone();
-        let context_ptr_option: Option<advancedfx::js::ContextMutRef> = context.get_data::<advancedfx::js::ContextMutRef>().map(|x| x.clone());
-        async move {
-            if let Some(object) = this_clone.as_object() {
-                if let Some(mirv_ws_write) = object.downcast_ref::<MirvWsWrite>() {
-                    if let Ok(mut borrow_mut) = mirv_ws_write.state.try_borrow_mut() {
-                        if let Some(ws_write) = &mut *borrow_mut  {
-                            for x in args_clone {
-                                match x {
-                                    JsValue::String(js_string) => {
-                                        if let Err(e) = ws_write.send(Message::text(js_string.to_std_string_escaped())).await {
-                                            return Err(afx_make_async_error!(CustomError: JsNativeError::error(),e.to_string(), context_ptr_option).into());
-                                        }
+    async fn send(this: &JsValue, args: &[JsValue], context: &RefCell<&mut Context>) -> JsResult<JsValue> {
+        if let Some(object) = this.as_object() {
+            if let Some(mirv_ws_write) = object.downcast_ref::<MirvWsWrite>() {
+                if let Ok(mut borrow_mut) = mirv_ws_write.state.try_borrow_mut() {
+                    if let Some(ws_write) = &mut *borrow_mut  {
+                        for x in args {
+                            match x.variant() {
+                                JsVariant::String(js_string) => {
+                                    if let Err(e) = ws_write.send(Message::text(js_string.to_std_string_escaped())).await {
+                                        return Err(advancedfx::js::errors::make_error!(JsNativeError::error(), e.to_string(), &mut context.borrow_mut()).into());
                                     }
-                                    JsValue::Object(js_object) => {
-                                        if let Ok(array_buffer) = JsArrayBuffer::from_object(js_object.clone()) {
-                                            if let Ok(data) = array_buffer.detach(&JsValue::undefined()) {
-                                                if let Err(e) = ws_write.send(Message::binary(data)).await {
-                                                    return Err(afx_make_async_error!(CustomError: JsNativeError::error(),e.to_string(), context_ptr_option).into());
-                                                }
+                                }
+                                JsVariant::Object(js_object) => {
+                                    if let Ok(array_buffer) = JsArrayBuffer::from_object(js_object.clone()) {
+                                        if let Ok(data) = array_buffer.detach(&JsValue::undefined()) {
+                                            if let Err(e) = ws_write.send(Message::binary(Bytes::from_owner(data))).await {
+                                                return Err(advancedfx::js::errors::make_error!(JsNativeError::error(), e.to_string(), &mut context.borrow_mut()).into());
                                             }
                                         }
                                     }
-                                    _ => {
-                                        return Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_arguments, context_ptr_option).into());
-                                    }
+                                }
+                                _ => {
+                                    return Err(advancedfx::js::errors::error_arguments(&mut context.borrow_mut()).into());
                                 }
                             }
-                            return Ok(JsValue::Undefined)
                         }
-                    } else {
-                        return Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_async_conflict, context_ptr_option).into());
+                        return Ok(JsValue::undefined())
                     }
+                } else {
+                    return Err(advancedfx::js::errors::error_async_conflict(&mut context.borrow_mut()).into());
                 }
             }
-            Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_type, context_ptr_option).into())
         }
+        Err(advancedfx::js::errors::error_type(&mut context.borrow_mut()).into())
     }
 }
 
 #[derive(Trace, Finalize, JsData)]
 struct MirvWsRead {
     #[unsafe_ignore_trace]
-    state: RefCell<Option<SplitStream<WebSocketStream<ConnectStream>>>>,
+    state: RefCell<Option<WebSocketReceiver<TcpStream>>>,
 }
 
 impl MirvWsRead {
     #[must_use]
     fn new() -> Self {
-        let state = RefCell::<Option<SplitStream<WebSocketStream<ConnectStream>>>>::new(None);
+        let state = RefCell::<Option<WebSocketReceiver<TcpStream>>>::new(None);
         Self { state }
     }
 
@@ -1745,104 +2356,94 @@ impl MirvWsRead {
                     return Err(advancedfx::js::errors::error_async_conflict(context).into());
                 }
                 drop(mirv_ws_read.state.replace(None));
-                return Ok(JsValue::Undefined);         
+                return Ok(JsValue::undefined());         
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
     }    
     
-    fn next(this: &JsValue, args: &[JsValue], context: &mut Context) -> impl Future<Output = JsResult<JsValue>> {
-        let this_clone = (*this).clone();
-        let mirv_result = MirvWsResult::create(this,args,context);
-        let context_ptr_option: Option<advancedfx::js::ContextMutRef> = context.get_data::<advancedfx::js::ContextMutRef>().map(|x| x.clone());
-        async move {
-            if let Some(object) = this_clone.as_object() {
-                if let Some(mirv_ws_read) = object.downcast_ref::<MirvWsRead>() {
-                    if let Ok(mut borrow_mut) = mirv_ws_read.state.try_borrow_mut() {
-                        if let Some(ws_read) = &mut *borrow_mut  {
-                            match ws_read.next().await {
-                                Some(result) => {
-                                    match result {
-                                        Ok(message) => {
-                                            match message {
-                                                Message::Text(text) => {
-                                                    return Ok(JsValue::String(js_string!(text)));
-                                                }
-                                                Message::Binary(bin) => {
-                                                    drop(mirv_result.downcast_ref::<MirvWsResult>().unwrap().state.replace(Some(bin)));
-                                                    return Ok(JsValue::Object(mirv_result));
-                                                }
-                                                Message::Close(_) => {
-                                                    return Ok(JsValue::null());
-                                                }
-                                                _ => {
-                                                    return Err(afx_make_async_error!(CustomError: JsNativeError::error(),"Unexpected websocket message", context_ptr_option).into());
-                                                }
+    async fn next(this: &JsValue, args: &[JsValue], context: &RefCell<&mut Context>) -> JsResult<JsValue> {
+        let mirv_result = MirvWsResult::create(this,args,&mut context.borrow_mut());
+        if let Some(object) = this.as_object() {
+            if let Some(mirv_ws_read) = object.downcast_ref::<MirvWsRead>() {
+                if let Ok(mut borrow_mut) = mirv_ws_read.state.try_borrow_mut() {
+                    if let Some(ws_read) = &mut *borrow_mut  {
+                        match ws_read.next().await {
+                            Some(result) => {
+                                match result {
+                                    Ok(message) => {
+                                        match message {
+                                            Message::Text(text) => {
+                                                return Ok(js_value!(js_string!(text.as_str())));
+                                            }
+                                            Message::Binary(bin) => {
+                                                drop(mirv_result.downcast_ref::<MirvWsResult>().unwrap().state.replace(Some(bin)));
+                                                return Ok(js_value!(mirv_result));
+                                            }
+                                            Message::Close(_) => {
+                                                return Ok(JsValue::null());
+                                            }
+                                            _ => {
+                                                return Err(advancedfx::js::errors::make_error!(JsNativeError::error(),"Unexpected websocket message", &mut context.borrow_mut()).into());
                                             }
                                         }
-                                        Err(e) => {
-                                            return Err(afx_make_async_error!(CustomError: JsNativeError::error(),e.to_string(), context_ptr_option).into());
-                                        }
+                                    }
+                                    Err(e) => {
+                                        return Err(advancedfx::js::errors::make_error!(JsNativeError::error(), e.to_string(), &mut context.borrow_mut()).into());
                                     }
                                 }
-                                None => {
-                                    return Ok(JsValue::null());
-                                }
+                            }
+                            None => {
+                                return Ok(JsValue::null());
                             }
                         }
-                    } else {
-                        return Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_async_conflict, context_ptr_option).into());
                     }
+                } else {
+                    return Err(advancedfx::js::errors::error_async_conflict(&mut context.borrow_mut()).into());
                 }
             }
-            Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_type, context_ptr_option).into())
         }
+        Err(advancedfx::js::errors::error_type(&mut context.borrow_mut()).into())
     }    
 }
 
-fn mirv_connect_async(this: &JsValue, args: &[JsValue], context: &mut Context) -> impl Future<Output = JsResult<JsValue>> {
+async fn mirv_connect_async(this: &JsValue, args: &[JsValue], context: &RefCell<&mut Context>)-> JsResult<JsValue> {
+     
+    let mirv_ws_read_object = MirvWsRead::create(this,args, &mut context.borrow_mut());
+    let mirv_ws_write_object = MirvWsWrite::create(this,args, &mut context.borrow_mut());
 
-    let args_clone: Vec<_> = args.iter().cloned().collect();
-
-    let mirv_ws_read_object = MirvWsRead::create(this,args,context);
-    let mirv_ws_write_object = MirvWsWrite::create(this,args,context);
-
-    let in_out_object = ObjectInitializer::new(context)
+    let in_out_object = ObjectInitializer::new(&mut context.borrow_mut())
         .property(js_string!("in"), mirv_ws_read_object.clone(), Attribute::all())
         .property(js_string!("out"), mirv_ws_write_object.clone(), Attribute::all())
         .build();
 
-    let context_ptr_option: Option<advancedfx::js::ContextMutRef> = context.get_data::<advancedfx::js::ContextMutRef>().map(|x| x.clone());
-
-    async move {
-        if 0 < args_clone.len() {
-            if let JsValue::String(js_string) = &args_clone[0] {
-                let connect_addr = js_string.to_std_string_escaped();
-                let result = async_tungstenite::async_std::connect_async(connect_addr).await;
-                match result {
-                    Ok((ws,_)) => {
-                        let (ws_write,ws_read) = ws.split();
-                        drop(mirv_ws_read_object.downcast_ref::<MirvWsRead>().unwrap().state.replace(Some(ws_read)));
-                        drop(mirv_ws_write_object.downcast_ref::<MirvWsWrite>().unwrap().state.replace(Some(ws_write)));
-                        return Ok(JsValue::Object(in_out_object));
-                    }
-                    Err(e) => {
-                        use std::fmt::Write as _;
-                        let mut s = String::new();
-                        write!(&mut s, "{e} in ").unwrap();
-                        return Err(afx_make_async_error!(CustomError: JsNativeError::error(),s, context_ptr_option).into());
-                    }
+    if 0 < args.len() {
+        if let Some(js_string) = args[0].as_string() {
+            let connect_addr = js_string.to_std_string_escaped();
+            let result = async_tungstenite::async_std::connect_async(connect_addr).await;
+            match result {
+                Ok((ws,_)) => {
+                    let (ws_write,ws_read) = ws.split();
+                    drop(mirv_ws_read_object.downcast_ref::<MirvWsRead>().unwrap().state.replace(Some(ws_read)));
+                    drop(mirv_ws_write_object.downcast_ref::<MirvWsWrite>().unwrap().state.replace(Some(ws_write)));
+                    return Ok(js_value!(in_out_object));
                 }
-            } else { return Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_arguments, context_ptr_option).into()); }
-        } else { return Err(afx_make_async_error!(StandardError: advancedfx::js::errors::error_arguments, context_ptr_option).into()); }
-    }
+                Err(e) => {
+                    use std::fmt::Write as _;
+                    let mut s = String::new();
+                    write!(&mut s, "{e} in ").unwrap();
+                    return Err(advancedfx::js::errors::make_error!(JsNativeError::error(), s, &mut context.borrow_mut()).into());
+                }
+            }
+        } else { return Err(advancedfx::js::errors::error_arguments(&mut context.borrow_mut()).into()); }
+    } else { return Err(advancedfx::js::errors::error_arguments(&mut context.borrow_mut()).into()); }
 }
 
 fn mirv_make_handle(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if args.len() == 2 {
         if let Some(entry_index) = args[0].as_number() {
             if let Some(serial_number) = args[1].as_number() {
-                return Ok(JsValue::Integer(afx_make_handle(entry_index as i32,serial_number as i32)));
+                return Ok(js_value!(afx_make_handle(entry_index as i32,serial_number as i32)));
             }
         }
     }
@@ -1852,7 +2453,7 @@ fn mirv_make_handle(_this: &JsValue, args: &[JsValue], context: &mut Context) ->
 fn mirv_is_handle_valid(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if args.len() == 1 {
         if let Some(handle) = args[0].as_number() {
-            return Ok(JsValue::Boolean(afx_is_handle_valid(handle as i32)));
+            return Ok(js_value!(afx_is_handle_valid(handle as i32)));
         }
     }
     return Err(advancedfx::js::errors::error_arguments(context).into());
@@ -1861,7 +2462,7 @@ fn mirv_is_handle_valid(_this: &JsValue, args: &[JsValue], context: &mut Context
 fn mirv_get_handle_entry_index(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if args.len() == 1 {
         if let Some(handle) = args[0].as_number() {
-            return Ok(JsValue::Integer(afx_get_handle_entry_index(handle as i32)));
+            return Ok(js_value!(afx_get_handle_entry_index(handle as i32)));
         }
     }
     return Err(advancedfx::js::errors::error_arguments(context).into());
@@ -1870,14 +2471,14 @@ fn mirv_get_handle_entry_index(_this: &JsValue, args: &[JsValue], context: &mut 
 fn mirv_get_handle_serial_number(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if args.len() == 1 {
         if let Some(handle) = args[0].as_number() {
-            return Ok(JsValue::Integer(afx_get_handle_serial_number(handle as i32)));
+            return Ok(js_value!(afx_get_handle_serial_number(handle as i32)));
         }
     }
     return Err(advancedfx::js::errors::error_arguments(context).into());
 }
 
 fn mirv_get_highest_entity_index(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
-    return Ok(JsValue::Integer(afx_get_highest_entity_index()));
+    return Ok(js_value!(afx_get_highest_entity_index()));
 }
 
 #[derive(Trace, JsData)]
@@ -2023,7 +2624,7 @@ impl MirvEntityRef {
     fn is_valid(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::Boolean(afx_get_entity_ref_is_valid(mirv.entity_ref)));
+                return Ok(js_value!(afx_get_entity_ref_is_valid(mirv.entity_ref)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2032,7 +2633,7 @@ impl MirvEntityRef {
     fn get_name(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::String(js_string!(afx_get_entity_ref_name(mirv.entity_ref))));
+                return Ok(js_value!(js_string!(afx_get_entity_ref_name(mirv.entity_ref))));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2042,7 +2643,7 @@ impl MirvEntityRef {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
                 if let Some(str) = afx_get_entity_ref_debug_name(mirv.entity_ref) {
-                    return Ok(JsValue::String(js_string!(str)));
+                    return Ok(js_value!(js_string!(str)));
                 }
                 return Ok(JsValue::null());
             }
@@ -2054,7 +2655,7 @@ impl MirvEntityRef {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
                 if let Some(str) = afx_get_entity_ref_player_name(mirv.entity_ref) {
-                    return Ok(JsValue::String(js_string!(str)));
+                    return Ok(js_value!(js_string!(str)));
                 }
                 return Ok(JsValue::null());
             }
@@ -2066,7 +2667,7 @@ impl MirvEntityRef {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
                 if let Some(str) = afx_get_entity_ref_sanitized_player_name(mirv.entity_ref) {
-                    return Ok(JsValue::String(js_string!(str)));
+                    return Ok(js_value!(js_string!(str)));
                 }
                 return Ok(JsValue::null());
             }
@@ -2077,7 +2678,7 @@ impl MirvEntityRef {
     fn get_class_name(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::String(js_string!(afx_get_entity_ref_class_name(mirv.entity_ref))));
+                return Ok(js_value!(js_string!(afx_get_entity_ref_class_name(mirv.entity_ref))));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2087,7 +2688,7 @@ impl MirvEntityRef {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
                 if let Some(str) = afx_get_entity_ref_client_class_name(mirv.entity_ref) {
-                    return Ok(JsValue::String(js_string!(str)));
+                    return Ok(js_value!(js_string!(str)));
                 }
                 return Ok(JsValue::null());
             }
@@ -2098,7 +2699,7 @@ impl MirvEntityRef {
     fn is_player_pawn(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::Boolean(afx_get_entity_ref_is_player_pawn(mirv.entity_ref)));
+                return Ok(js_value!(afx_get_entity_ref_is_player_pawn(mirv.entity_ref)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2107,7 +2708,7 @@ impl MirvEntityRef {
     fn get_player_pawn_handle(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::Integer(afx_get_entity_ref_player_pawn_handle(mirv.entity_ref)));
+                return Ok(js_value!(afx_get_entity_ref_player_pawn_handle(mirv.entity_ref)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2116,7 +2717,7 @@ impl MirvEntityRef {
     fn is_player_controller(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::Boolean(afx_get_entity_ref_is_player_controller(mirv.entity_ref)));
+                return Ok(js_value!(afx_get_entity_ref_is_player_controller(mirv.entity_ref)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2125,7 +2726,7 @@ impl MirvEntityRef {
     fn get_player_controller_handle(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::Integer(afx_get_entity_ref_player_controller_handle(mirv.entity_ref)));
+                return Ok(js_value!(afx_get_entity_ref_player_controller_handle(mirv.entity_ref)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2134,7 +2735,7 @@ impl MirvEntityRef {
     fn get_health(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::Integer(afx_get_entity_ref_health(mirv.entity_ref)));
+                return Ok(js_value!(afx_get_entity_ref_health(mirv.entity_ref)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2143,7 +2744,7 @@ impl MirvEntityRef {
     fn get_team(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::Integer(afx_get_entity_ref_team(mirv.entity_ref)));
+                return Ok(js_value!(afx_get_entity_ref_team(mirv.entity_ref)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2159,11 +2760,11 @@ impl MirvEntityRef {
                 afx_get_entity_ref_origin(mirv.entity_ref,&mut x, &mut y, &mut z);
 
                 let js_array = JsArray::from_iter(
-                    [JsValue::Rational(x.into()),JsValue::Rational(y.into()),JsValue::Rational(z.into())],
+                    [js_value!(x),js_value!(y),js_value!(z)],
                     context
                 );
 
-                return Ok(JsValue::Object(JsObject::from(js_array)));
+                return Ok(js_value!(JsObject::from(js_array)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2179,11 +2780,11 @@ impl MirvEntityRef {
                 afx_get_entity_ref_render_eye_origin(mirv.entity_ref,&mut x, &mut y, &mut z);
 
                 let js_array = JsArray::from_iter(
-                    [JsValue::Rational(x.into()),JsValue::Rational(y.into()),JsValue::Rational(z.into())],
+                    [js_value!(x),js_value!(y),js_value!(z)],
                     context
                 );
 
-                return Ok(JsValue::Object(JsObject::from(js_array)));
+                return Ok(js_value!(JsObject::from(js_array)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2199,11 +2800,11 @@ impl MirvEntityRef {
                 afx_get_entity_ref_render_eye_angles(mirv.entity_ref,&mut x, &mut y, &mut z);
 
                 let js_array = JsArray::from_iter(
-                    [JsValue::Rational(x.into()),JsValue::Rational(y.into()),JsValue::Rational(z.into())],
+                    [js_value!(x),js_value!(y),js_value!(z)],
                     context
                 );
 
-                return Ok(JsValue::Object(JsObject::from(js_array)));
+                return Ok(js_value!(JsObject::from(js_array)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2212,7 +2813,7 @@ impl MirvEntityRef {
     fn get_view_entity_handle(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::Integer(afx_get_entity_ref_view_entity_handle(mirv.entity_ref)));
+                return Ok(js_value!(afx_get_entity_ref_view_entity_handle(mirv.entity_ref)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2221,7 +2822,7 @@ impl MirvEntityRef {
     fn get_active_weapon_handle(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::Integer(afx_get_entity_ref_active_weapon_handle(mirv.entity_ref)));
+                return Ok(js_value!(afx_get_entity_ref_active_weapon_handle(mirv.entity_ref)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2248,7 +2849,7 @@ impl MirvEntityRef {
     fn get_observer_target_handle(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         if let Some(object) = this.as_object() {
             if let Some(mirv) = object.downcast_ref::<MirvEntityRef>() {
-                return Ok(JsValue::Integer(afx_get_entity_ref_observer_target_handle(mirv.entity_ref)));
+                return Ok(js_value!(afx_get_entity_ref_observer_target_handle(mirv.entity_ref)));
             }
         }
         Err(advancedfx::js::errors::error_type(context).into())
@@ -2278,7 +2879,7 @@ impl MirvEntityRef {
 
                 Ok(JsValue::from(out))
             },
-            false => Ok(JsValue::Null)
+            false => Ok(JsValue::null())
         }
     }
 }
@@ -2291,7 +2892,7 @@ fn mirv_get_entity_ref_from_index(_this: &JsValue, args: &[JsValue], context: &m
             if entity_ref.is_null() {
                 return Ok(JsValue::null());
             }
-            return Ok(JsValue::Object(MirvEntityRef::create(entity_ref,context)));
+            return Ok(js_value!(MirvEntityRef::create(entity_ref,context)));
         }
     }
     return Err(advancedfx::js::errors::error_arguments(context).into());
@@ -2306,27 +2907,57 @@ fn mirv_get_entity_ref_from_split_screen_player(_this: &JsValue, args: &[JsValue
             if entity_ref.is_null() {
                 return Ok(JsValue::null());
             }
-            return Ok(JsValue::Object(MirvEntityRef::create(entity_ref,context)));
+            return Ok(js_value!(MirvEntityRef::create(entity_ref,context)));
         }
     }
     return Err(advancedfx::js::errors::error_arguments(context).into());
 }
 
+
+const MIRV_ON_ADD_ENTITY_STR: &'static str = "AdvancedfxMirv.onAddEntity";
+
 fn mirv_set_on_add_entity(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(object) = this.as_object() {
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             if 0 < args.len() {
-                match &args[0] {
-                    JsValue::Undefined => {
+                match &args[0].variant() {
+                    JsVariant::Undefined => {
+                        advancedfx::js::events::EventSource::obj_off(&mirv.events.add_entity, context, MIRV_ON_ADD_ENTITY_STR.to_string(), Some(-1.0));
                         mirv.events.on_add_entity.replace(None);
-                        afx_enable_on_add_entity(false);
-                        return Ok(JsValue::Undefined); 
+                        return Ok(JsValue::undefined()); 
                     }
-                    JsValue::Object(object) => {
-                        if object.is_callable() {
-                            mirv.events.on_add_entity.replace(Some(object.clone()));
-                            afx_enable_on_add_entity(true);
-                            return Ok(JsValue::Undefined); 
+                    JsVariant::Object(object) => {
+                        if let Some(callback) = JsFunction::from_object(object.clone()) {
+                            mirv.events.on_add_entity.replace(Some(callback.clone()));
+                            let wrapper = NativeFunction::from_copy_closure_with_captures(
+                                |_,args,callback,context| {
+                                    if 1 <= args.len() {
+                                        let arg0 = &args[0];
+                                        if let Some(object) = arg0.as_object() {
+                                            if let Ok(entity) = object.get(js_string!("entity"), context) {
+                                                if let Ok(handle) = object.get(js_string!("handle"), context) {
+
+                                                    if let Err(e) = callback.call(&JsValue::undefined(), &[entity,handle], context) {
+                                                        return Err(e);
+                                                    }
+
+                                                    return Ok(JsValue::undefined());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(advancedfx::js::errors::error_type(context).into())
+                                },
+                                callback
+                            );
+
+                            advancedfx::js::events::EventSource::obj_on(&mirv.events.add_entity,
+                                context,
+                                MIRV_ON_ADD_ENTITY_STR.to_string(),
+                                wrapper.to_js_function(context.realm()),
+                                Some(-1.0)
+                            );
+                            return Ok(JsValue::undefined()); 
                         }
                     }
                     _ => {
@@ -2343,10 +2974,10 @@ fn mirv_get_on_add_entity(this: &JsValue, _args: &[JsValue], context: &mut Conte
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             match & *mirv.events.on_add_entity.borrow() {
                 None => {
-                    return Ok(JsValue::Undefined);
+                    return Ok(JsValue::undefined());
                 }
-                Some(js_object) => {
-                    return Ok(JsValue::Object(js_object.clone()));
+                Some(callback) => {
+                    return Ok(js_value!(callback.clone()));
                 }
             }
         }
@@ -2355,21 +2986,50 @@ fn mirv_get_on_add_entity(this: &JsValue, _args: &[JsValue], context: &mut Conte
 }
 
 
+const MIRV_ON_REMOVE_ENTITY_STR: &'static str = "AdvancedfxMirv.onRemoveEntity";
+
 fn mirv_set_on_remove_entity(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(object) = this.as_object() {
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             if 0 < args.len() {
-                match &args[0] {
-                    JsValue::Undefined => {
+                match &args[0].variant() {
+                    JsVariant::Undefined => {
+                        advancedfx::js::events::EventSource::obj_off(&mirv.events.remove_entity, context, MIRV_ON_REMOVE_ENTITY_STR.to_string(), Some(-1.0));
                         mirv.events.on_remove_entity.replace(None);
-                        afx_enable_on_remove_entity(false);
-                        return Ok(JsValue::Undefined); 
+                        return Ok(JsValue::undefined()); 
                     }
-                    JsValue::Object(object) => {
-                        if object.is_callable() {
-                            mirv.events.on_remove_entity.replace(Some(object.clone()));
-                            afx_enable_on_remove_entity(true);
-                            return Ok(JsValue::Undefined); 
+                    JsVariant::Object(object) => {
+                        if let Some(callback) = JsFunction::from_object(object.clone()) {
+                            mirv.events.on_remove_entity.replace(Some(callback.clone()));
+                            let wrapper = NativeFunction::from_copy_closure_with_captures(
+                                |_,args,callback,context| {
+                                    if 1 <= args.len() {
+                                        let arg0 = &args[0];
+                                        if let Some(object) = arg0.as_object() {
+                                            if let Ok(entity) = object.get(js_string!("entity"), context) {
+                                                if let Ok(handle) = object.get(js_string!("handle"), context) {
+
+                                                    if let Err(e) = callback.call(&JsValue::undefined(), &[entity,handle], context) {
+                                                        return Err(e);
+                                                    }
+
+                                                    return Ok(JsValue::undefined());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(advancedfx::js::errors::error_type(context).into())
+                                },
+                                callback
+                            );
+
+                            advancedfx::js::events::EventSource::obj_on(&mirv.events.remove_entity,
+                                context,
+                                MIRV_ON_REMOVE_ENTITY_STR.to_string(),
+                                wrapper.to_js_function(context.realm()),
+                                Some(-1.0)
+                            );
+                            return Ok(JsValue::undefined()); 
                         }
                     }
                     _ => {
@@ -2386,10 +3046,10 @@ fn mirv_get_on_remove_entity(this: &JsValue, _args: &[JsValue], context: &mut Co
         if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
             match & *mirv.events.on_remove_entity.borrow() {
                 None => {
-                    return Ok(JsValue::Undefined);
+                    return Ok(JsValue::undefined());
                 }
-                Some(js_object) => {
-                    return Ok(JsValue::Object(js_object.clone()));
+                Some(callback) => {
+                    return Ok(js_value!(callback.clone()));
                 }
             }
         }
@@ -2397,7 +3057,7 @@ fn mirv_get_on_remove_entity(this: &JsValue, _args: &[JsValue], context: &mut Co
     Err(advancedfx::js::errors::error_type(context).into())
 }
 
-fn afx_load_module(specifier: &JsString, afx_loader: Rc<AfxSimpleModuleLoader>, context: &mut Context) -> Result<JsPromise,JsError> {
+fn afx_load_module(specifier: &JsString, afx_loader: Rc<AfxSimpleModuleLoader>, context: &mut Context) -> JsResult<JsPromise> {
 
     let referrer = Referrer::Realm(context.realm().clone());  
 
@@ -2429,7 +3089,7 @@ fn afx_load_module(specifier: &JsString, afx_loader: Rc<AfxSimpleModuleLoader>, 
     return Err(advancedfx::js::errors::make_error!(JsNativeError::error(), format!("could not resolve path `{err_path}`"), context).into());
 }
 
-fn afx_load(file_path: &JsString, afx_loader: Rc<AfxSimpleModuleLoader>, context: &mut Context) -> Result<JsPromise,JsError> {
+fn afx_load(file_path: &JsString, afx_loader: Rc<AfxSimpleModuleLoader>, context: &mut Context) -> JsResult<JsPromise> {
 
     if file_path.to_std_string_lossy().ends_with("mjs") {
         return afx_load_module(file_path,afx_loader,context);
@@ -2442,7 +3102,7 @@ fn afx_load(file_path: &JsString, afx_loader: Rc<AfxSimpleModuleLoader>, context
             Ok(js_source) => {
                 match context.eval(js_source) {
                     Ok(res) => {
-                        return Ok(JsPromise::resolve(res,context))
+                        return JsPromise::resolve(res,context);
                     }
                     Err(err) => {
                         return Err(advancedfx::js::errors::make_error!(JsNativeError::syntax(),format!("Error evaluating script `{}`",path.display()),context)
@@ -2460,33 +3120,31 @@ fn afx_load(file_path: &JsString, afx_loader: Rc<AfxSimpleModuleLoader>, context
     return Err(advancedfx::js::errors::make_error!(JsNativeError::error(), format!("could not resolve path `{err_path}`"), context).into());  
 }
 
-fn mirv_load(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-    if let Some(object) = this.as_object() {
-        if let Some(mirv) = object.downcast_ref::<MirvStruct>() {
-            if 1 == args.len() {
-                if let Some(js_file_path) = args[0].as_string() {
-                    match afx_load(&js_file_path, mirv.loader.clone(), context) {
-                        Ok(js_promise) => {
-                            return Ok(JsValue::Object(JsObject::from(js_promise)));
-                        }
-                        Err(e) => {
-                            return Err(e);
-                        }
+fn mirv_load(_this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    if let Some(loader) = context.downcast_module_loader::<AfxSimpleModuleLoader>() {
+        if 1 == args.len() {
+            if let Some(js_file_path) = args[0].as_string() {
+                match afx_load(&js_file_path, loader, context) {
+                    Ok(js_promise) => {
+                        return Ok(js_value!(JsObject::from(js_promise)));
+                    }
+                    Err(e) => {
+                        return Err(e);
                     }
                 }
             }
-            return Err(advancedfx::js::errors::error_arguments(context).into());
         }
+        return Err(advancedfx::js::errors::error_arguments(context).into());
     }
     Err(advancedfx::js::errors::error_type(context).into())    
 }
 
 fn mirv_is_playing_demo(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
-   return Ok(JsValue::Boolean(afx_is_playing_demo()));
+   return Ok(js_value!(afx_is_playing_demo()));
 }
 
 fn mirv_is_demo_paused(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
-   return Ok(JsValue::Boolean(afx_is_demo_paused()));
+   return Ok(js_value!(afx_is_demo_paused()));
 }
 
 fn mirv_get_main_campath(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -2497,10 +3155,10 @@ fn mirv_get_main_campath(this: &JsValue, _args: &[JsValue], context: &mut Contex
             } else {
                 match advancedfx::js::campath::Campath::from_data(advancedfx::js::campath::Campath::new(advancedfx::campath::Campath::new_shared(unsafe{
                     afx_hook_source2_get_main_campath()
-                })), context) {
+                }), context), context) {
                     Ok(result_object) => {
-                        mirv.main_campath = Some(JsValue::Object(result_object.clone()));
-                        return Ok(JsValue::Object(result_object.clone()));
+                        mirv.main_campath = Some(js_value!(result_object.clone()));
+                        return Ok(js_value!(result_object.clone()));
                     }
                     Err(e) => {
                         return Err(e);
@@ -2518,8 +3176,8 @@ fn mirv_get_demo_tick(_this: &JsValue, _args: &[JsValue], _context: &mut Context
     let result = unsafe { afx_hook_source2_get_demo_tick(&mut out_tick) };
 
     match result {
-        true => Ok(JsValue::Integer(out_tick)),
-        false => Ok(JsValue::Undefined)
+        true => Ok(js_value!(out_tick)),
+        false => Ok(JsValue::undefined())
     }
 }
 
@@ -2529,8 +3187,8 @@ fn mirv_get_demo_time(_this: &JsValue, _args: &[JsValue], _context: &mut Context
     let result = unsafe { afx_hook_source2_get_demo_time(&mut out_time) };
 
     match result {
-        true => Ok(JsValue::Rational(out_time)),
-        false => Ok(JsValue::Undefined)
+        true => Ok(js_value!(out_time)),
+        false => Ok(JsValue::undefined())
     }
 }
 
@@ -2539,23 +3197,27 @@ fn mirv_get_cur_time(_this: &JsValue, _args: &[JsValue], _context: &mut Context)
 
     unsafe { afx_hook_source2_get_cur_time(&mut out_time) };
 
-    Ok(JsValue::Rational(out_time))
+    Ok(js_value!(out_time))
 }
 
-impl AfxHookSource2Rs {
+use boa_runtime::interval;
+
+impl<'a> AfxHookSource2Rs<'a> {
     pub fn new() -> Self {
-
-        let loader = Rc::new(AfxSimpleModuleLoader::new());
-
         let mut context = ContextBuilder::default()
-            .job_queue(AsyncJobQueue::new().into())
-            .module_loader(loader.clone())
-            .build().unwrap();
+            .job_executor(Rc::new(AfxSimpleJobExecutor::new()))
+            .module_loader(Rc::new(AfxSimpleModuleLoader::new()))
+            .build()
+            .unwrap();
 
-        let console = Console::init_with_logger(&mut context, AfxLogger);
+        let console = Console::init_with_logger(AfxLogger, &mut context);
         context
             .register_global_property(Console::NAME, console, Attribute::all())
-            .expect("the console builtin shouldn't exist"); 
+            .expect("the console builtin shouldn't exist");
+
+        interval::register(&mut context).unwrap();
+
+        advancedfx::js::events::register_global_classes(&mut context);
 
         advancedfx::js::math::Vector3::add_to_context(&mut context);
         advancedfx::js::math::QEulerAngles::add_to_context(&mut context);
@@ -2571,10 +3233,9 @@ impl AfxHookSource2Rs {
         ConCommandsArgs::add_to_context(&mut context);
         ConCommandBox::add_to_context(&mut context);
 
-        let events = Rc::<MirvEvents>::new(MirvEvents::new());
+        let events = Rc::<MirvEvents>::new(MirvEvents::new(&mut context));
 
         let mirv = MirvStruct {
-            loader: loader.clone(),
             events: Rc::clone(&events),
             main_campath: None
         };
@@ -2593,6 +3254,8 @@ impl AfxHookSource2Rs {
         let fn_mirv_get_on_add_entity = NativeFunction::from_fn_ptr(mirv_get_on_add_entity).to_js_function(context.realm());
         let fn_mirv_set_on_remove_entity = NativeFunction::from_fn_ptr(mirv_set_on_remove_entity).to_js_function(context.realm());
         let fn_mirv_get_on_remove_entity = NativeFunction::from_fn_ptr(mirv_get_on_remove_entity).to_js_function(context.realm());
+
+        let events_object = events.make_object(&mut context);
       
         let object = ObjectInitializer::with_native_data::<MirvStruct>(mirv, &mut context)
         .function(
@@ -2849,16 +3512,22 @@ impl AfxHookSource2Rs {
             NativeFunction::from_fn_ptr(mirv_trace),
             js_string!("trace"),
             0,
-        )        
+        )
+        .property(js_string!("events"), events_object, Attribute::all())
+
         .build();
 
         context
         .register_global_property(js_string!("mirv"), object, Attribute::all())
         .expect("property mirv shouldn't exist");
 
+        let boxed_context_rc = Rc::<advancedfx::js::BoxedContext>::new(advancedfx::js::BoxedContext::new(context));
+        advancedfx::js::ContextRef::add_to_context(boxed_context_rc.clone());
+
         Self {
-            loader: loader,
-            context: advancedfx::js::ContextHolder::new(context),
+            jobs_group:  RefCell::<FutureGroup::<BoxedFuture<'a>>>::new(FutureGroup::<BoxedFuture<'a>>::new()),
+            jobs_fr_group:  RefCell::<FutureGroup::<BoxedFuture<'a>>>::new(FutureGroup::<BoxedFuture<'a>>::new()),
+            context: boxed_context_rc,
             events: Rc::clone(&events)
         }
     }    
@@ -2869,28 +3538,43 @@ use boa_engine::{Finalize, JsData, Trace};
 
 //fn(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue>;
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_new() -> * mut AfxHookSource2Rs { 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_new<'a>() -> * mut AfxHookSource2Rs<'a> { 
     Box::into_raw(Box::new(AfxHookSource2Rs::new()))
 }
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_run_jobs(this_ptr: *mut AfxHookSource2Rs) {
-    let task = afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context.get().run_jobs_async();
-    futures::executor::block_on(task);
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_run_jobs<'a>(this_ptr: *mut AfxHookSource2Rs<'a>) {
+    let context = (*afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context).get();
+    let jobs_group = &afx_hooks_source_2_rs_ptr_to_ref(this_ptr).jobs_group;
+    let jobs_fr_group = &afx_hooks_source_2_rs_ptr_to_ref(this_ptr).jobs_fr_group;
+    let result = future::block_on(context
+        .downcast_job_executor::<AfxSimpleJobExecutor>()
+        .unwrap()
+        .afx_run_jobs_async(
+            &RefCell::<&mut Context>::new(context)
+            , &mut jobs_group.borrow_mut()
+            , &mut jobs_fr_group.borrow_mut()
+        )
+    );
+    if let Err(err) = result {
+        let _ = jobs_group.replace(FutureGroup::<BoxedFuture<'a>>::new()); // Empty the jobs_group on error.
+        let _ = jobs_fr_group.replace(FutureGroup::<BoxedFuture<'a>>::new()); // Empty the jobs_fr_group on error.
+        let _ = afx_on_error(&err, context);
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_destroy(this_ptr: *mut AfxHookSource2Rs) {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_destroy<'a>(this_ptr: *mut AfxHookSource2Rs<'a>) {
     if this_ptr.is_null() {
         return;
     }
-     drop(unsafe{Box::from_raw(this_ptr)});
+    drop(unsafe{Box::from_raw(this_ptr)});
 }
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_execute(this_ptr: *mut AfxHookSource2Rs, p_data: *mut u8, len_data: usize) {
-    let context = &mut afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context.get();
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_execute<'a>(this_ptr: *mut AfxHookSource2Rs<'a>, p_data: *mut u8, len_data: usize) {
+    let context = (*afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context).get();
     let js_code = unsafe { std::slice::from_raw_parts(p_data, len_data) };
     match context.eval(boa_engine::Source::from_bytes(js_code)) {
         Ok(res) => {
@@ -2906,99 +3590,102 @@ pub extern "C" fn afx_hook_source2_rs_execute(this_ptr: *mut AfxHookSource2Rs, p
     };
 }
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_load(this_ptr: *mut AfxHookSource2Rs, file_path: *const c_char) {
-    let context = &mut afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context.get();
-    let str_file_path = unsafe{CStr::from_ptr(file_path)}.to_str().unwrap();
-    let js_str_path = js_string!(str_file_path);
-    match afx_load(&js_str_path, afx_hooks_source_2_rs_ptr_to_ref(this_ptr).loader.clone(), context) {
-        Ok(promise_result) => {
-
-            // push forward the promise:
-            let task = context.run_jobs_async();
-            futures::executor::block_on(task);
-
-            match promise_result.state() {
-                PromiseState::Pending => {
-                    let native_error: JsError = advancedfx::js::errors::make_error!(JsNativeError::typ(),"module didn't execute!",context).into();                    
-                    let _ = afx_on_error(&native_error, context);
-                }
-                PromiseState::Fulfilled(v) => {
-                    if let Ok(js_str) = v.to_string(context) {
+fn afx_load_and_report_promise(file_path: &JsString, afx_loader: Rc<AfxSimpleModuleLoader>, context: &mut Context) -> JsResult<JsPromise> {
+    afx_load(file_path, afx_loader, context)?
+    .then(
+        Some(
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                if 0 < args.len() {
+                    if let Ok(js_str) = args[0].to_string(context) {
                         let mut str = js_str.to_std_string_escaped();
                         str.push_str("\n");
                         afx_message(str);
                     }
                 }
-                PromiseState::Rejected(err) => {              
-                    let _ = afx_on_error(&JsError::from_opaque(err), context);
-                }
+                Ok(JsValue::undefined())
+            })
+            .to_js_function(context.realm()),
+        ),
+        None,
+        context,
+    )?
+    .catch(
+        NativeFunction::from_fn_ptr(|_, args, context| {
+            if 0 < args.len() {
+                let _ = afx_on_error(&JsError::from_opaque(args[0].clone()), context);
             }
-            return;
-        }
-        Err(e) => {
-            let _ = afx_on_error(&e, context);
-        }                
+            Ok(JsValue::undefined())
+        })
+        .to_js_function(context.realm()),
+        context,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_load<'a>(this_ptr: *mut AfxHookSource2Rs<'a>, file_path: *const c_char) {
+    let context = (*afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context).get();
+    let loader = context.downcast_module_loader::<AfxSimpleModuleLoader>().unwrap().clone();
+    let str_file_path = unsafe{CStr::from_ptr(file_path)}.to_str().unwrap();
+    let js_str_path = js_string!(str_file_path);
+    if let Err(err) = afx_load_and_report_promise(&js_str_path, loader, context) {
+        let _ = afx_on_error(&err, context);
     }
 }
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_on_record_start(this_ptr: *mut AfxHookSource2Rs, taker_folder_path: *const c_char) {
-    let context = &mut afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context.get();
-    let borrowed = afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.on_record_start.borrow();
-    let event_option_clone = borrowed.clone();
-    std::mem::drop(borrowed);
-    if let Some(event_clone) = event_option_clone {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_on_record_start<'a>(this_ptr: *mut AfxHookSource2Rs<'a>, taker_folder_path: *const c_char) {
+    let context = (*afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context).get();
 
-        let mut js_value_take_folder_path: JsValue = JsValue::null();
-        if !taker_folder_path.is_null() {
-            let str_take_folder_path = unsafe{CStr::from_ptr(taker_folder_path)}.to_str().unwrap();
-            js_value_take_folder_path = JsValue::String(js_string!(str_take_folder_path));
-        }
+    let mut js_value_take_folder_path: JsValue = JsValue::null();
+    if !taker_folder_path.is_null() {
+        let str_take_folder_path = unsafe{CStr::from_ptr(taker_folder_path)}.to_str().unwrap();
+        js_value_take_folder_path = js_value!(js_string!(str_take_folder_path));
+    }
 
-        let js_object = ObjectInitializer::new(context)
-        .property(js_string!("takeFolder"), js_value_take_folder_path, Attribute::all())
-        .build();
-
-        if let Err(e) = event_clone.call(&JsValue::undefined(), &[JsValue::Object(js_object)], context) {              
-            let _ = afx_on_error(&e, context);
-        }
+    if let Err(e) = advancedfx::js::events::EventSource::obj_dispatch(
+        &afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.record_start,
+        context,
+        JsValue::undefined(),
+        HashMap::from([
+            (js_string!("takeFolder"), js_value_take_folder_path)
+        ])
+    ) {
+        let _ = afx_on_error(&e, context);
     }
 }
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_on_record_end(this_ptr: *mut AfxHookSource2Rs) {
-    let context = &mut afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context.get();
-    let borrowed = afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.on_record_end.borrow();
-    let event_option_clone = borrowed.clone();
-    std::mem::drop(borrowed);
-    if let Some(event_clone) = event_option_clone {
-        if let Err(e) = event_clone.call(&JsValue::undefined(), &[], context) {
-            let _ = afx_on_error(&e, context);
-        }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_on_record_end<'a>(this_ptr: *mut AfxHookSource2Rs<'a>) {
+    let context = (*afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context).get();
+
+    if let Err(e) = advancedfx::js::events::EventSource::obj_dispatch(
+        &afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.record_end,
+        context,
+        JsValue::undefined(),
+        HashMap::from([])
+    ) {
+        let _ = afx_on_error(&e, context);
     }
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_on_game_event<'a>(this_ptr: *mut AfxHookSource2Rs<'a>, event_name: *const c_char, event_id: i32, json: *const c_char) {
+    let context = (*afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context).get();
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_on_game_event(this_ptr: *mut AfxHookSource2Rs, event_name: *const c_char, event_id: i32, json: *const c_char) {
-    let context = &mut afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context.get();
-    let borrowed = afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.on_game_event.borrow();
-    let event_option_clone = borrowed.clone();
-    std::mem::drop(borrowed);
-    if let Some(event_clone) = event_option_clone {
-        let str_event_name = unsafe{CStr::from_ptr(event_name)}.to_str().unwrap();
-        let str_json = unsafe{CStr::from_ptr(json)}.to_str().unwrap();
+    let str_event_name = unsafe{CStr::from_ptr(event_name)}.to_str().unwrap();
+    let str_json = unsafe{CStr::from_ptr(json)}.to_str().unwrap();
 
-        let js_object = ObjectInitializer::new(context)
-        .property(js_string!("name"), JsValue::String(js_string!(str_event_name)), Attribute::all())
-        .property(js_string!("id"), JsValue::Integer(event_id), Attribute::all())
-        .property(js_string!("data"), JsValue::String(js_string!(str_json)), Attribute::all())
-        .build();
-
-        if let Err(e) = event_clone.call(&JsValue::undefined(), &[JsValue::Object(js_object)], context) {
-            let _ = afx_on_error(&e, context);
-        }
+    if let Err(e) = advancedfx::js::events::EventSource::obj_dispatch(
+        &afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.game_event,
+        context,
+        JsValue::undefined(),
+        HashMap::from([
+            (js_string!("name"), js_value!(js_string!(str_event_name))),
+            (js_string!("id"),  js_value!(event_id)),
+            (js_string!("data"), js_value!(js_string!(str_json)))
+        ])
+    ) {
+        let _ = afx_on_error(&e, context);
     }
 }
 
@@ -3012,146 +3699,153 @@ pub struct AfxHookSourceRsView {
     fov: c_float
 }
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_on_c_view_render_setup_view(this_ptr: *mut AfxHookSource2Rs, cur_time: c_float, abs_time: c_float, last_abs_time: c_float, current_view: &mut AfxHookSourceRsView , game_view: &AfxHookSourceRsView, last_view: &AfxHookSourceRsView, width: i32, height: i32) -> bool {
-    let context = &mut afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context.get();
-    let borrowed = afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.on_c_view_render_setup_view.borrow();
-    let event_option_clone = borrowed.clone();
-    std::mem::drop(borrowed);  
-    if let Some(event_clone) = event_option_clone {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_on_c_view_render_setup_view<'a>(this_ptr: *mut AfxHookSource2Rs<'a>, cur_time: c_float, abs_time: c_float, last_abs_time: c_float, current_view: &mut AfxHookSourceRsView , game_view: &AfxHookSourceRsView, last_view: &AfxHookSourceRsView, width: i32, height: i32) -> bool {
+    let context = (*afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context).get();
 
-        let js_object_current_view = ObjectInitializer::new(context)
-        .property(js_string!("x"), JsValue::Rational(current_view.x.into()), Attribute::all())
-        .property(js_string!("y"), JsValue::Rational(current_view.y.into()), Attribute::all())
-        .property(js_string!("z"), JsValue::Rational(current_view.z.into()), Attribute::all())
-        .property(js_string!("rX"), JsValue::Rational(current_view.rx.into()), Attribute::all())
-        .property(js_string!("rY"), JsValue::Rational(current_view.ry.into()), Attribute::all())
-        .property(js_string!("rZ"), JsValue::Rational(current_view.rz.into()), Attribute::all())
-        .property(js_string!("fov"), JsValue::Rational(current_view.fov.into()), Attribute::all())
-        .build();
-        let js_object_game_view = ObjectInitializer::new(context)
-        .property(js_string!("x"), JsValue::Rational(game_view.x.into()), Attribute::all())
-        .property(js_string!("y"), JsValue::Rational(game_view.y.into()), Attribute::all())
-        .property(js_string!("z"), JsValue::Rational(game_view.z.into()), Attribute::all())
-        .property(js_string!("rX"), JsValue::Rational(game_view.rx.into()), Attribute::all())
-        .property(js_string!("rY"), JsValue::Rational(game_view.ry.into()), Attribute::all())
-        .property(js_string!("rZ"), JsValue::Rational(game_view.rz.into()), Attribute::all())
-        .property(js_string!("fov"), JsValue::Rational(game_view.fov.into()), Attribute::all())
-        .build();
-        let js_object_last_view = ObjectInitializer::new(context)
-        .property(js_string!("x"), JsValue::Rational(last_view.x.into()), Attribute::all())
-        .property(js_string!("y"), JsValue::Rational(last_view.y.into()), Attribute::all())
-        .property(js_string!("z"), JsValue::Rational(last_view.z.into()), Attribute::all())
-        .property(js_string!("rX"), JsValue::Rational(last_view.rx.into()), Attribute::all())
-        .property(js_string!("rY"), JsValue::Rational(last_view.ry.into()), Attribute::all())
-        .property(js_string!("rZ"), JsValue::Rational(last_view.rz.into()), Attribute::all())
-        .property(js_string!("fov"), JsValue::Rational(last_view.fov.into()), Attribute::all())
-        .build();        
+    let js_object_current_view = ObjectInitializer::new(context)
+    .property(js_string!("x"), js_value!(current_view.x), Attribute::all())
+    .property(js_string!("y"), js_value!(current_view.y), Attribute::all())
+    .property(js_string!("z"), js_value!(current_view.z), Attribute::all())
+    .property(js_string!("rX"), js_value!(current_view.rx), Attribute::all())
+    .property(js_string!("rY"), js_value!(current_view.ry), Attribute::all())
+    .property(js_string!("rZ"), js_value!(current_view.rz), Attribute::all())
+    .property(js_string!("fov"), js_value!(current_view.fov), Attribute::all())
+    .build();
+    let js_object_game_view = ObjectInitializer::new(context)
+    .property(js_string!("x"), js_value!(game_view.x), Attribute::all())
+    .property(js_string!("y"), js_value!(game_view.y), Attribute::all())
+    .property(js_string!("z"), js_value!(game_view.z), Attribute::all())
+    .property(js_string!("rX"), js_value!(game_view.rx), Attribute::all())
+    .property(js_string!("rY"), js_value!(game_view.ry), Attribute::all())
+    .property(js_string!("rZ"), js_value!(game_view.rz), Attribute::all())
+    .property(js_string!("fov"), js_value!(game_view.fov), Attribute::all())
+    .build();
+    let js_object_last_view = ObjectInitializer::new(context)
+    .property(js_string!("x"), js_value!(last_view.x), Attribute::all())
+    .property(js_string!("y"), js_value!(last_view.y), Attribute::all())
+    .property(js_string!("z"), js_value!(last_view.z), Attribute::all())
+    .property(js_string!("rX"), js_value!(last_view.rx), Attribute::all())
+    .property(js_string!("rY"), js_value!(last_view.ry), Attribute::all())
+    .property(js_string!("rZ"), js_value!(last_view.rz), Attribute::all())
+    .property(js_string!("fov"), js_value!(last_view.fov), Attribute::all())
+    .build();
 
-        let js_object = ObjectInitializer::new(context)
-        .property(js_string!("curTime"), JsValue::Rational(cur_time.into()), Attribute::all())
-        .property(js_string!("absTime"), JsValue::Rational(abs_time.into()), Attribute::all())
-        .property(js_string!("lastAbsTime"), JsValue::Rational(last_abs_time.into()), Attribute::all())
-        .property(js_string!("currentView"), JsValue::Object(js_object_current_view), Attribute::all())
-        .property(js_string!("gameView"), JsValue::Object(js_object_game_view), Attribute::all())
-        .property(js_string!("lastView"), JsValue::Object(js_object_last_view), Attribute::all())
-        .property(js_string!("width"), JsValue::Integer(width), Attribute::all())
-        .property(js_string!("height"), JsValue::Integer(height), Attribute::all())
-        .build();
-
-        match event_clone.call(&JsValue::undefined(), &[JsValue::Object(js_object)], context) {
-            Ok(js_value) => {
-                if let JsValue::Object(js_object) = js_value {
-                    if let Ok(js_val_x) = js_object.get(js_string!("x"), context) {
-                        if let Some(x) = js_val_x.as_number() {
-                            current_view.x = x as f32;
-                        }
+    match advancedfx::js::events::EventSource::obj_dispatch(
+        &afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.c_view_render_setup_view,
+        context,
+        JsValue::undefined(),
+        HashMap::from([
+            (js_string!("curTime"), js_value!(cur_time)),
+            (js_string!("absTime"), js_value!(abs_time)),
+            (js_string!("lastAbsTime"), js_value!(last_abs_time)),
+            (js_string!("currentView"), js_value!(js_object_current_view)),
+            (js_string!("gameView"), js_value!(js_object_game_view)),
+            (js_string!("lastView"), js_value!(js_object_last_view)),
+            (js_string!("width"), js_value!(width)),
+            (js_string!("height"), js_value!(height)),
+        ])
+    ) {
+        Ok(js_value) => {
+            if let Some(js_object) = js_value.as_object() {
+                if let Ok(js_val_x) = js_object.get(js_string!("x"), context) {
+                    if let Some(x) = js_val_x.as_number() {
+                        current_view.x = x as f32;
                     }
-                    if let Ok(js_val_y) = js_object.get(js_string!("y"), context) {
-                        if let Some(y) = js_val_y.as_number() {
-                            current_view.y = y as f32;
-                        }
-                    }
-                    if let Ok(js_val_z) = js_object.get(js_string!("z"), context) {
-                        if let Some(z) = js_val_z.as_number() {
-                            current_view.z = z as f32;
-                        }
-                    }
-                    if let Ok(js_val_rx) = js_object.get(js_string!("rX"), context) {
-                        if let Some(rx) = js_val_rx.as_number() {
-                            current_view.rx = rx as f32;
-                        }
-                    }
-                    if let Ok(js_val_ry) = js_object.get(js_string!("rY"), context) {
-                        if let Some(ry) = js_val_ry.as_number() {
-                            current_view.ry = ry as f32;
-                        }
-                    }
-                    if let Ok(js_val_rz) = js_object.get(js_string!("rZ"), context) {
-                        if let Some(rz) = js_val_rz.as_number() {
-                            current_view.rz = rz as f32;
-                        }
-                    }
-                    if let Ok(js_val_fov) = js_object.get(js_string!("fov"), context) {
-                        if let Some(fov) = js_val_fov.as_number() {
-                            current_view.fov = fov as f32;
-                        }
-                    }
-                    return true;
                 }
+                if let Ok(js_val_y) = js_object.get(js_string!("y"), context) {
+                    if let Some(y) = js_val_y.as_number() {
+                        current_view.y = y as f32;
+                    }
+                }
+                if let Ok(js_val_z) = js_object.get(js_string!("z"), context) {
+                    if let Some(z) = js_val_z.as_number() {
+                        current_view.z = z as f32;
+                    }
+                }
+                if let Ok(js_val_rx) = js_object.get(js_string!("rX"), context) {
+                    if let Some(rx) = js_val_rx.as_number() {
+                        current_view.rx = rx as f32;
+                    }
+                }
+                if let Ok(js_val_ry) = js_object.get(js_string!("rY"), context) {
+                    if let Some(ry) = js_val_ry.as_number() {
+                        current_view.ry = ry as f32;
+                    }
+                }
+                if let Ok(js_val_rz) = js_object.get(js_string!("rZ"), context) {
+                    if let Some(rz) = js_val_rz.as_number() {
+                        current_view.rz = rz as f32;
+                    }
+                }
+                if let Ok(js_val_fov) = js_object.get(js_string!("fov"), context) {
+                    if let Some(fov) = js_val_fov.as_number() {
+                        current_view.fov = fov as f32;
+                    }
+                }
+                return true;
             }
-            Err(e) =>  {
-                let _ = afx_on_error(&e, context);
-            }
+        }
+        Err(e) =>  {
+            let _ = afx_on_error(&e, context);
         }
     }
     return false;
 }
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_on_client_frame_stage_notify(this_ptr: *mut AfxHookSource2Rs, event_id: i32, is_before: bool) {
-    let context = &mut afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context.get();
-    let borrowed = afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.on_client_frame_stage_notify.borrow();
-    let event_option_clone = borrowed.clone();
-    std::mem::drop(borrowed);
-    if let Some(event_clone) = event_option_clone {
-        let js_object = ObjectInitializer::new(context)
-        .property(js_string!("curStage"), JsValue::Integer(event_id), Attribute::all())
-        .property(js_string!("isBefore"), JsValue::Boolean(is_before), Attribute::all())
-        .build();
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_on_client_frame_stage_notify<'a>(this_ptr: *mut AfxHookSource2Rs<'a>, event_id: i32, is_before: bool) {
+    let context = (*afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context).get();
 
-        if let Err(e) = event_clone.call(&JsValue::undefined(), &[JsValue::Object(js_object)], context) {
-            let _ = afx_on_error(&e, context);
-        }
+    if let Err(e) = advancedfx::js::events::EventSource::obj_dispatch(
+        &afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.client_frame_stage_notify,
+        context,
+        JsValue::undefined(),
+        HashMap::from([
+            (js_string!("curStage"), js_value!(event_id)),
+            (js_string!("isBefore"), js_value!(is_before))
+        ])
+    ) {
+        let _ = afx_on_error(&e, context);
     }
 }
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_on_add_entity(this_ptr: *mut AfxHookSource2Rs, p_ref: * mut AfxEntityRef, handle: i32) {
-    let context = &mut afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context.get();
-    let borrowed = afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.on_add_entity.borrow();
-    let event_option_clone = borrowed.clone();
-    std::mem::drop(borrowed);
-    if let Some(event_clone) = event_option_clone {
-        afx_add_ref_entity_ref(p_ref);
-        let entity_ref = MirvEntityRef::create(p_ref, context);
-        if let Err(e) = event_clone.call(&JsValue::undefined(), &[JsValue::Object(entity_ref),JsValue::Integer(handle)], context) {
-            let _ = afx_on_error(&e, context);
-        }
-    }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_on_add_entity<'a>(this_ptr: *mut AfxHookSource2Rs<'a>, p_ref: * mut AfxEntityRef, handle: i32) {
+    let context = (*afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context).get();
+
+    afx_add_ref_entity_ref(p_ref);
+    let entity_ref = MirvEntityRef::create(p_ref, context);
+
+    if let Err(e) = advancedfx::js::events::EventSource::obj_dispatch(
+        &afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.add_entity,
+        context,
+        JsValue::undefined(),
+        HashMap::from([
+            (js_string!("entity"), js_value!(entity_ref)),
+            (js_string!("handle"),  js_value!(handle))
+        ])
+    ) {
+        let _ = afx_on_error(&e, context);
+    }    
 }
 
-#[no_mangle]
-pub extern "C" fn afx_hook_source2_rs_on_remove_entity(this_ptr: *mut AfxHookSource2Rs, p_ref: * mut AfxEntityRef, handle: i32) {
-    let context = &mut afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context.get();
-    let borrowed = afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.on_remove_entity.borrow();
-    let event_option_clone = borrowed.clone();
-    std::mem::drop(borrowed);
-    if let Some(event_clone) = event_option_clone {
-        afx_add_ref_entity_ref(p_ref);
-        let entity_ref = MirvEntityRef::create(p_ref, context);
-        if let Err(e) = event_clone.call(&JsValue::undefined(), &[JsValue::Object(entity_ref),JsValue::Integer(handle)], context) {
-            let _ = afx_on_error(&e, context);
-        }
-    }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn afx_hook_source2_rs_on_remove_entity<'a>(this_ptr: *mut AfxHookSource2Rs<'a>, p_ref: * mut AfxEntityRef, handle: i32) {
+    let context = (*afx_hooks_source_2_rs_ptr_to_ref(this_ptr).context).get();
+
+    afx_add_ref_entity_ref(p_ref);
+    let entity_ref = MirvEntityRef::create(p_ref, context);
+
+    if let Err(e) = advancedfx::js::events::EventSource::obj_dispatch(
+        &afx_hooks_source_2_rs_ptr_to_ref(this_ptr).events.remove_entity,
+        context,
+        JsValue::undefined(),
+        HashMap::from([
+            (js_string!("entity"), js_value!(entity_ref)),
+            (js_string!("handle"),  js_value!(handle))
+        ])
+    ) {
+        let _ = afx_on_error(&e, context);
+    }    
 }

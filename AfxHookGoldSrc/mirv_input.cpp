@@ -2,6 +2,7 @@
 
 #include "mirv_input.h"
 
+#include "AfxSteamLegacy.h"
 #include "cmdregister.h"
 #include "MirvCommandArgs.h"
 #include "filming.h"
@@ -28,7 +29,14 @@ public:
 
 private:
 	virtual bool GetSuspendMirvInput() override {
-		return g_b_SDL2_ShowCursor && !g_b_SDL2_RelativeMouseMode;
+		if(AfxSteamLegacy()) {
+			CURSORINFO ci = { sizeof(CURSORINFO) };
+			if (GetCursorInfo(&ci))
+				return ci.flags & CURSOR_SHOWING;
+			return false;
+		} else {
+			return g_b_SDL2_ShowCursor && !g_b_SDL2_RelativeMouseMode;
+		}
 	}
 
 	virtual void GetLastCameraData(double& x, double& y, double& z, double& rX, double& rY, double& rZ, double& fov) override {

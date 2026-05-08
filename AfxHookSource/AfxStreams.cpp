@@ -10236,6 +10236,7 @@ void CAfxStreams::CDrawingRecordScreenOutput::ProcessingThreadFunc() {
 
 			if (capture) {
 				if(auto buffer = capture->LockCpu()) {
+					capture->Release();
 					advancedfx::IImageBufferThreadSafe* outBuffer = advancedfx::ImageTransformer::StripAlpha(g_pThreadPool,&g_ImageBufferPoolThreadSafe,buffer);
 					buffer->Release();
 					if (outBuffer) {
@@ -10251,13 +10252,13 @@ void CAfxStreams::CDrawingRecordScreenOutput::ProcessingThreadFunc() {
 							Tier0_Warning("AFXERROR: Failed writing image for screen recording.\n");
 						}
 						outBuffer->Release();
-						outBuffer = nullptr;
 					}
 					else {
 						Tier0_Warning("AFXERROR: Could not get transform buffer for screen recording.\n");
 					}
+				} else {
+					capture->Release();
 				}
-				capture->Release();
 			}
 			
 			lock.lock();
