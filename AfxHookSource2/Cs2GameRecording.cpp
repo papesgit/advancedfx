@@ -82,6 +82,7 @@ static constexpr std::ptrdiff_t kModelBoneNamesArrayOffset = 0x168;
 static constexpr std::ptrdiff_t kModelBoneCountOffset = 0x178;
 static constexpr std::ptrdiff_t kModelBoneParentArrayOffset = 0x180;
 static constexpr std::ptrdiff_t kModelBoneFlagsArrayOffset = 0x1B0;
+static constexpr std::ptrdiff_t kCs2WeaponBaseLastShotTimeOffset = 0x18F8;
 static constexpr uint32_t kMaxReasonableBoneCount = 4096;
 static constexpr uint32_t kCs2KnownBoneFlagsMask =
 	0x00000004u // BONE_FLEX_DRIVER
@@ -208,6 +209,12 @@ static bool IsHudModelEntity(CEntityInstance* entity) {
 	return 0 == _stricmp(clientClassName, "C_CS2HudModelArms")
 		|| 0 == _stricmp(clientClassName, "C_CS2HudModelWeapon")
 		|| 0 == _stricmp(clientClassName, "C_CS2HudModelAddon");
+}
+
+static bool IsHudModelWeaponEntity(CEntityInstance* entity) {
+	if (!entity) return false;
+	const char* clientClassName = entity->GetClientClassName();
+	return clientClassName && 0 == _stricmp(clientClassName, "C_CS2HudModelWeapon");
 }
 
 static bool StringBeginsWithCaseSensitive(const char* value, const char* prefix) {
@@ -401,6 +408,12 @@ static bool TryGetEntityRenderEnabled(CEntityInstance* entity, bool& outRenderEn
 	return ReadBoolField((unsigned char*)renderComponent, g_clientDllOffsets.CRenderComponent.m_bEnableRendering, outRenderEnabled);
 }
 
+static bool IsEntityRenderEnabled(CEntityInstance* entity) {
+	bool renderEnabled = true;
+	TryGetEntityRenderEnabled(entity, renderEnabled);
+	return renderEnabled;
+}
+
 static bool TryReadEntityHandleField(CEntityInstance* entity, std::ptrdiff_t offset, SOURCESDK::CS2::CBaseHandle& outHandle) {
 	outHandle = SOURCESDK::CS2::CEntityHandle::CEntityHandle();
 	if (!entity || offset <= 0) return false;
@@ -408,6 +421,15 @@ static bool TryReadEntityHandleField(CEntityInstance* entity, std::ptrdiff_t off
 	if (IsBadReadPtr(address, sizeof(uint32_t))) return false;
 	outHandle = SOURCESDK::CS2::CEntityHandle::CEntityHandle(*(uint32_t*)address);
 	return true;
+}
+
+static bool TryReadFloatField(CEntityInstance* entity, std::ptrdiff_t offset, float& outValue) {
+	outValue = 0.0f;
+	if (!entity || offset <= 0) return false;
+	unsigned char* address = (unsigned char*)entity + offset;
+	if (IsBadReadPtr(address, sizeof(float))) return false;
+	outValue = *(float*)address;
+	return outValue == outValue && fabsf(outValue) < 10000000.0f;
 }
 
 static const char* TryGetRecordingBoneNameFromArray(unsigned char* boneNamesArray, uint32_t boneIndex) {
@@ -446,6 +468,7 @@ struct Cs2RecordedEntity {
 	bool Visible = true;
 	bool ViewModel = false;
 	bool Projectile = false;
+	bool ShotThisFrame = false;
 	SOURCESDK::matrix3x4_t Transform;
 	bool HasBones = false;
 	const Cs2SkeletonMetadata* Skeleton = nullptr;
@@ -458,6 +481,11 @@ struct Cs2RecordedFrame {
 	Cs2RecordedCamera Camera;
 	std::vector<Cs2RecordedEntity> Entities;
 	std::vector<int> HiddenEntityIds;
+};
+
+struct Cs2ShotFrame {
+	std::set<CEntityInstance*> FiredWeapons;
+	std::set<CEntityInstance*> FiredOwners;
 };
 
 class ICs2FrameSink {
@@ -830,6 +858,7 @@ private:
 		AppendU8(packet, entity.Projectile ? 1 : 0);
 		AppendU8(packet, entity.Visible ? 1 : 0);
 		AppendU8(packet, entity.ViewModel ? 1 : 0);
+		AppendU8(packet, entity.ShotThisFrame ? 1 : 0);
 		AppendMatrix3x4(packet, entity.Transform);
 		AppendU8(packet, entity.HasBones ? 1 : 0);
 		AppendU32(packet, (uint32_t)entity.LocalBoneTransforms.size());
@@ -845,6 +874,7 @@ private:
 			+ sizeof(uint8_t) // Projectile
 			+ sizeof(uint8_t) // Visible
 			+ sizeof(uint8_t) // ViewModel
+			+ sizeof(uint8_t) // ShotThisFrame
 			+ 12 * sizeof(float) // Transform
 			+ sizeof(uint8_t) // HasBones
 			+ sizeof(uint32_t) // BoneCount
@@ -889,7 +919,7 @@ private:
 		AppendU8(packet, 'F');
 		AppendU8(packet, 'X');
 		AppendU8(packet, 'L');
-		AppendU16(packet, 7);
+		AppendU16(packet, 8);
 		AppendU16(packet, packetType);
 		AppendU32(packet, sequence);
 	}
@@ -1097,7 +1127,14 @@ public:
 	}
 
 	bool SetLiveUdp(bool value) {
-		return m_UdpSink.SetEnabled(value);
+		if (!value) {
+			m_LastShotTimes.clear();
+		}
+		bool result = m_UdpSink.SetEnabled(value);
+		if (result && value) {
+			m_LastShotTimes.clear();
+		}
+		return result;
 	}
 
 	const std::string& GetLiveTargetHost() const {
@@ -1209,12 +1246,17 @@ public:
 		const float recordFrameTime = agrActive ? GetRecordFrameTime(m_PendingFrameTime) : GetLiveFrameTime(m_PendingFrameTime);
 		if (recordFrameTime <= 0.0f) return;
 
+		Cs2ShotFrame shotFrame;
+		if (m_UdpSink.IsEnabled()) {
+			BuildShotFrame(shotFrame);
+		}
+
 		Cs2RecordedFrame frame;
 		frame.FrameTime = recordFrameTime;
 		std::set<int> visibleThisFrame;
 
 		if (!agrActive && m_LiveRecordSpectated) {
-			SampleEntity(pawn, false, false, visibleThisFrame, frame.Entities);
+			SampleEntity(pawn, false, false, false, visibleThisFrame, frame.Entities);
 		}
 
 		if (m_RecordPlayers || m_RecordWeapons || m_RecordProjectiles || (!agrActive && (m_LiveRecordPlayers || m_LiveRecordWeapons || m_LiveRecordProjectiles))) {
@@ -1228,11 +1270,11 @@ public:
 
 				const char* debugName = entity->GetDebugName();
 				if (samplePlayers && IsPlayerPawnForAgr(entity)) {
-					SampleEntity(entity, false, false, visibleThisFrame, frame.Entities);
+					SampleEntity(entity, false, false, false, visibleThisFrame, frame.Entities);
 				} else if (sampleWeapons && debugName && StringBeginsWithCaseSensitive(debugName, "weapon_")) {
-					SampleEntity(entity, false, false, visibleThisFrame, frame.Entities);
+					SampleEntity(entity, false, false, shotFrame.FiredWeapons.find(entity) != shotFrame.FiredWeapons.end(), visibleThisFrame, frame.Entities);
 				} else if (sampleProjectiles && debugName && StringEndsWithCaseSensitive(debugName, "_projectile")) {
-					SampleEntity(entity, false, true, visibleThisFrame, frame.Entities);
+					SampleEntity(entity, false, true, false, visibleThisFrame, frame.Entities);
 				}
 			}
 		}
@@ -1241,7 +1283,9 @@ public:
 			std::vector<CEntityInstance*> hudModels;
 			CollectHudModelOwnersForPawn(pawn, hudModels);
 			for (CEntityInstance* hudModel : hudModels) {
-				SampleEntity(hudModel, true, false, visibleThisFrame, frame.Entities);
+				const bool isVisibleHudWeapon = IsHudModelWeaponEntity(hudModel) && IsEntityRenderEnabled(hudModel);
+				const bool shotThisFrame = isVisibleHudWeapon && shotFrame.FiredOwners.find(pawn) != shotFrame.FiredOwners.end();
+				SampleEntity(hudModel, true, false, shotThisFrame, visibleThisFrame, frame.Entities);
 			}
 		}
 
@@ -1303,6 +1347,7 @@ private:
 	std::set<int> m_VisibleLastFrame;
 	std::map<unsigned char*, Cs2SkeletonMetadata> m_SkeletonCache;
 	std::vector<SOURCESDK::matrix3x4_t> m_BoneWorldScratch;
+	std::map<CEntityInstance*, float> m_LastShotTimes;
 
 	bool HasActiveSink() {
 		return m_AgrSink.IsRecording() || m_DebugSink.IsEnabled() || m_UdpSink.IsEnabled();
@@ -1375,6 +1420,66 @@ private:
 		return clientClassName && 0 == _stricmp(clientClassName, "C_CSPlayerPawn");
 	}
 
+	bool IsShotSourceWeaponEntity(CEntityInstance* entity) {
+		if (!entity) return false;
+
+		const char* debugName = entity->GetDebugName();
+		return debugName && StringBeginsWithCaseSensitive(debugName, "weapon_");
+	}
+
+	CEntityInstance* ResolveOwnerEntity(CEntityInstance* entity) {
+		SOURCESDK::CS2::CBaseHandle ownerHandle;
+		if (!TryReadEntityHandleField(entity, g_clientDllOffsets.C_BaseEntity.m_hOwnerEntity, ownerHandle) || !ownerHandle.IsValid()) return nullptr;
+
+		const int ownerEntryIndex = ownerHandle.GetEntryIndex();
+		return ownerEntryIndex >= 0 && g_pEntityList && *g_pEntityList && g_GetEntityFromIndex
+			? (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, ownerEntryIndex)
+			: nullptr;
+	}
+
+	void BuildShotFrame(Cs2ShotFrame& outShotFrame) {
+		if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) return;
+
+		std::set<CEntityInstance*> seenEntities;
+		const int highestIndex = GetHighestEntityIndex();
+		for (int i = 0; i <= highestIndex; ++i) {
+			CEntityInstance* entity = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, i);
+			ScanShotSourceWeapon(entity, seenEntities, outShotFrame);
+		}
+
+		for (std::map<CEntityInstance*, float>::iterator it = m_LastShotTimes.begin(); it != m_LastShotTimes.end();) {
+			if (seenEntities.find(it->first) == seenEntities.end()) {
+				it = m_LastShotTimes.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+
+	void ScanShotSourceWeapon(CEntityInstance* entity, std::set<CEntityInstance*>& seenEntities, Cs2ShotFrame& outShotFrame) {
+		if (!IsShotSourceWeaponEntity(entity)) return;
+		if (!seenEntities.insert(entity).second) return;
+
+		float lastShotTime = 0.0f;
+		if (!TryReadFloatField(entity, kCs2WeaponBaseLastShotTimeOffset, lastShotTime)) return;
+
+		std::map<CEntityInstance*, float>::iterator it = m_LastShotTimes.find(entity);
+		if (it == m_LastShotTimes.end()) {
+			m_LastShotTimes[entity] = lastShotTime;
+			return;
+		}
+
+		if (fabsf(it->second - lastShotTime) <= 0.000001f) return;
+
+		it->second = lastShotTime;
+		outShotFrame.FiredWeapons.insert(entity);
+
+		CEntityInstance* owner = ResolveOwnerEntity(entity);
+		if (owner && owner != entity) {
+			outShotFrame.FiredOwners.insert(owner);
+		}
+	}
+
 	int GetEntityId(CEntityInstance* entity) {
 		std::map<CEntityInstance*, int>::iterator it = m_EntityIds.find(entity);
 		if (it != m_EntityIds.end()) return it->second;
@@ -1444,7 +1549,7 @@ private:
 		return &m_SkeletonCache[modelImp];
 	}
 
-	bool SampleEntity(CEntityInstance* entity, bool viewModel, bool projectile, std::set<int>& visibleThisFrame, std::vector<Cs2RecordedEntity>& outEntities) {
+	bool SampleEntity(CEntityInstance* entity, bool viewModel, bool projectile, bool shotThisFrame, std::set<int>& visibleThisFrame, std::vector<Cs2RecordedEntity>& outEntities) {
 		unsigned char* baseSceneNode = nullptr;
 		const char* baseModelName = nullptr;
 		if (!TryGetEntityModelBaseInfo(entity, baseSceneNode, baseModelName)) return false;
@@ -1466,6 +1571,7 @@ private:
 		sampledEntity.Visible = visible;
 		sampledEntity.ViewModel = viewModel;
 		sampledEntity.Projectile = projectile;
+		sampledEntity.ShotThisFrame = shotThisFrame;
 		sampledEntity.Transform = entityTransform;
 
 		SOURCESDK::CS2::CBaseHandle ownerHandle;
