@@ -2351,6 +2351,8 @@ void HookClientDll(HMODULE clientDll) {
 	} else ErrorBox(MkErrStr(__FILE__, __LINE__));*/
 
 	if(!Hook_CGameEventManager((void*)clientDll)) ErrorBox(MkErrStr(__FILE__, __LINE__));
+	Cs2BloodEffect_Init((void*)clientDll);
+	Cs2FireBullets_Init((void*)clientDll);
 /*
 	if(void ** vtable = (void**)Afx::BinUtils::FindClassVtable(clientDll,".?AVCCSGOVScriptGameSystem@@", 0, 0x10)) {
 		g_Old_CCSGOVScriptGameSystem_UnkAddon = (CCSGOVScriptGameSystem_UnkAddon_t)vtable[0] ;

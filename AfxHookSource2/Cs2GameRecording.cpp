@@ -6,14 +6,17 @@
 #include "../deps/release/prop/AfxHookSource/SourceInterfaces.h"
 
 #include "ClientEntitySystem.h"
+#include "Globals.h"
 #include "SchemaSystem.h"
 #include "WrpConsole.h"
 
 #include "../shared/AfxConsole.h"
 #include "../shared/AfxGameRecord.h"
+#include "../shared/binutils.h"
 #include "../shared/StringTools.h"
 
 #include <winsock.h>
+#include "../deps/release/Detours/src/detours.h"
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -82,7 +85,10 @@ static constexpr std::ptrdiff_t kModelBoneNamesArrayOffset = 0x168;
 static constexpr std::ptrdiff_t kModelBoneCountOffset = 0x178;
 static constexpr std::ptrdiff_t kModelBoneParentArrayOffset = 0x180;
 static constexpr std::ptrdiff_t kModelBoneFlagsArrayOffset = 0x1B0;
-static constexpr std::ptrdiff_t kCs2WeaponBaseLastShotTimeOffset = 0x18F8;
+static constexpr std::ptrdiff_t kCEffectDataOriginOffset = 0x08;
+static constexpr std::ptrdiff_t kCEffectDataNormalOffset = 0x20;
+static constexpr std::ptrdiff_t kCEffectDataEntityOffset = 0x38;
+static constexpr std::ptrdiff_t kCEffectDataMagnitudeOffset = 0x44;
 static constexpr uint32_t kMaxReasonableBoneCount = 4096;
 static constexpr uint32_t kCs2KnownBoneFlagsMask =
 	0x00000004u // BONE_FLEX_DRIVER
@@ -209,12 +215,6 @@ static bool IsHudModelEntity(CEntityInstance* entity) {
 	return 0 == _stricmp(clientClassName, "C_CS2HudModelArms")
 		|| 0 == _stricmp(clientClassName, "C_CS2HudModelWeapon")
 		|| 0 == _stricmp(clientClassName, "C_CS2HudModelAddon");
-}
-
-static bool IsHudModelWeaponEntity(CEntityInstance* entity) {
-	if (!entity) return false;
-	const char* clientClassName = entity->GetClientClassName();
-	return clientClassName && 0 == _stricmp(clientClassName, "C_CS2HudModelWeapon");
 }
 
 static bool StringBeginsWithCaseSensitive(const char* value, const char* prefix) {
@@ -423,15 +423,6 @@ static bool TryReadEntityHandleField(CEntityInstance* entity, std::ptrdiff_t off
 	return true;
 }
 
-static bool TryReadFloatField(CEntityInstance* entity, std::ptrdiff_t offset, float& outValue) {
-	outValue = 0.0f;
-	if (!entity || offset <= 0) return false;
-	unsigned char* address = (unsigned char*)entity + offset;
-	if (IsBadReadPtr(address, sizeof(float))) return false;
-	outValue = *(float*)address;
-	return outValue == outValue && fabsf(outValue) < 10000000.0f;
-}
-
 static const char* TryGetRecordingBoneNameFromArray(unsigned char* boneNamesArray, uint32_t boneIndex) {
 	if (!boneNamesArray) return nullptr;
 	unsigned char* entry = boneNamesArray + (size_t)boneIndex * sizeof(void*);
@@ -468,11 +459,28 @@ struct Cs2RecordedEntity {
 	bool Visible = true;
 	bool ViewModel = false;
 	bool Projectile = false;
-	bool ShotThisFrame = false;
 	SOURCESDK::matrix3x4_t Transform;
 	bool HasBones = false;
 	const Cs2SkeletonMetadata* Skeleton = nullptr;
 	std::vector<SOURCESDK::matrix3x4_t> LocalBoneTransforms;
+};
+
+struct Cs2RecordedBloodEvent {
+	int VictimEntityId = -1;
+	SOURCESDK::Vector Origin;
+	SOURCESDK::Vector Normal;
+	float Magnitude = 0.0f;
+};
+
+struct Cs2RecordedShotPellet {
+	SOURCESDK::Vector Direction;
+};
+
+struct Cs2RecordedShotEvent {
+	int ShooterEntityId = -1;
+	int WeaponEntityId = -1;
+	SOURCESDK::Vector Origin;
+	std::vector<Cs2RecordedShotPellet> Pellets;
 };
 
 struct Cs2RecordedFrame {
@@ -481,11 +489,8 @@ struct Cs2RecordedFrame {
 	Cs2RecordedCamera Camera;
 	std::vector<Cs2RecordedEntity> Entities;
 	std::vector<int> HiddenEntityIds;
-};
-
-struct Cs2ShotFrame {
-	std::set<CEntityInstance*> FiredWeapons;
-	std::set<CEntityInstance*> FiredOwners;
+	std::vector<Cs2RecordedBloodEvent> BloodEvents;
+	std::vector<Cs2RecordedShotEvent> ShotEvents;
 };
 
 class ICs2FrameSink {
@@ -654,6 +659,7 @@ public:
 		if (!OpenSocket()) return false;
 		m_Enabled = true;
 		m_Sequence = 0;
+		m_FrameId = 0;
 		m_SentSkeletons.clear();
 		return true;
 	}
@@ -735,7 +741,12 @@ private:
 	void SendFramePackets(const Cs2RecordedFrame& frame) {
 		const uint32_t frameId = m_FrameId++;
 		const size_t basePacketBytes = 12 + sizeof(float) + sizeof(uint32_t) + 2 * sizeof(uint16_t) + 2 * sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint8_t);
-		const size_t finalOnlyBytes = frame.HiddenEntityIds.size() * sizeof(int32_t) + (frame.HasCamera ? 7 * sizeof(float) : 0);
+		const size_t finalOnlyBytes = frame.HiddenEntityIds.size() * sizeof(int32_t)
+			+ sizeof(uint16_t)
+			+ frame.BloodEvents.size() * GetBloodEventPacketSize()
+			+ sizeof(uint16_t)
+			+ GetShotEventsPacketSize(frame)
+			+ (frame.HasCamera ? 7 * sizeof(float) : 0);
 		if (basePacketBytes + finalOnlyBytes > kMaxPacketBytes) {
 			WarnPacketTooLarge(basePacketBytes + finalOnlyBytes);
 			return;
@@ -774,9 +785,13 @@ private:
 			}
 			if (isFinalChunk) {
 				AppendHiddenIds(packet, frame);
+				AppendBloodEvents(packet, frame);
+				AppendShotEvents(packet, frame);
 				AppendCamera(packet, frame);
 			} else {
 				AppendU32(packet, 0);
+				AppendU16(packet, 0);
+				AppendU16(packet, 0);
 				AppendU8(packet, 0);
 			}
 			SendPacket(packet, "frame");
@@ -858,7 +873,6 @@ private:
 		AppendU8(packet, entity.Projectile ? 1 : 0);
 		AppendU8(packet, entity.Visible ? 1 : 0);
 		AppendU8(packet, entity.ViewModel ? 1 : 0);
-		AppendU8(packet, entity.ShotThisFrame ? 1 : 0);
 		AppendMatrix3x4(packet, entity.Transform);
 		AppendU8(packet, entity.HasBones ? 1 : 0);
 		AppendU32(packet, (uint32_t)entity.LocalBoneTransforms.size());
@@ -874,7 +888,6 @@ private:
 			+ sizeof(uint8_t) // Projectile
 			+ sizeof(uint8_t) // Visible
 			+ sizeof(uint8_t) // ViewModel
-			+ sizeof(uint8_t) // ShotThisFrame
 			+ 12 * sizeof(float) // Transform
 			+ sizeof(uint8_t) // HasBones
 			+ sizeof(uint32_t) // BoneCount
@@ -886,6 +899,61 @@ private:
 		for (std::vector<int>::const_iterator it = frame.HiddenEntityIds.begin(); it != frame.HiddenEntityIds.end(); ++it) {
 			AppendI32(packet, *it);
 		}
+	}
+
+	static void AppendBloodEvents(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame) {
+		const size_t cappedSize = std::min<size_t>(frame.BloodEvents.size(), 65535);
+		AppendU16(packet, (uint16_t)cappedSize);
+		for (size_t i = 0; i < cappedSize; ++i) {
+			const Cs2RecordedBloodEvent& bloodEvent = frame.BloodEvents[i];
+			AppendI32(packet, bloodEvent.VictimEntityId);
+			AppendFloat(packet, bloodEvent.Origin.x);
+			AppendFloat(packet, bloodEvent.Origin.y);
+			AppendFloat(packet, bloodEvent.Origin.z);
+			AppendFloat(packet, bloodEvent.Normal.x);
+			AppendFloat(packet, bloodEvent.Normal.y);
+			AppendFloat(packet, bloodEvent.Normal.z);
+			AppendFloat(packet, bloodEvent.Magnitude);
+		}
+	}
+
+	static size_t GetBloodEventPacketSize() {
+		return sizeof(int32_t)
+			+ 7 * sizeof(float);
+	}
+
+	static void AppendShotEvents(std::vector<unsigned char>& packet, const Cs2RecordedFrame& frame) {
+		const size_t cappedSize = std::min<size_t>(frame.ShotEvents.size(), 65535);
+		AppendU16(packet, (uint16_t)cappedSize);
+		for (size_t i = 0; i < cappedSize; ++i) {
+			const Cs2RecordedShotEvent& shotEvent = frame.ShotEvents[i];
+			const size_t cappedPelletCount = std::min<size_t>(shotEvent.Pellets.size(), 65535);
+			AppendI32(packet, shotEvent.ShooterEntityId);
+			AppendI32(packet, shotEvent.WeaponEntityId);
+			AppendFloat(packet, shotEvent.Origin.x);
+			AppendFloat(packet, shotEvent.Origin.y);
+			AppendFloat(packet, shotEvent.Origin.z);
+			AppendU16(packet, (uint16_t)cappedPelletCount);
+			for (size_t pelletIndex = 0; pelletIndex < cappedPelletCount; ++pelletIndex) {
+				const SOURCESDK::Vector& direction = shotEvent.Pellets[pelletIndex].Direction;
+				AppendFloat(packet, direction.x);
+				AppendFloat(packet, direction.y);
+				AppendFloat(packet, direction.z);
+			}
+		}
+	}
+
+	static size_t GetShotEventsPacketSize(const Cs2RecordedFrame& frame) {
+		size_t result = 0;
+		const size_t cappedSize = std::min<size_t>(frame.ShotEvents.size(), 65535);
+		for (size_t i = 0; i < cappedSize; ++i) {
+			result += sizeof(int32_t) // ShooterEntityId
+				+ sizeof(int32_t) // WeaponEntityId
+				+ 3 * sizeof(float) // Origin
+				+ sizeof(uint16_t); // PelletCount
+			result += std::min<size_t>(frame.ShotEvents[i].Pellets.size(), 65535) * 3 * sizeof(float);
+		}
+		return result;
 	}
 
 	void ForgetHiddenSkeletons(const Cs2RecordedFrame& frame) {
@@ -919,7 +987,7 @@ private:
 		AppendU8(packet, 'F');
 		AppendU8(packet, 'X');
 		AppendU8(packet, 'L');
-		AppendU16(packet, 8);
+		AppendU16(packet, 11);
 		AppendU16(packet, packetType);
 		AppendU32(packet, sequence);
 	}
@@ -1030,6 +1098,8 @@ public:
 		m_NextId = 1;
 		m_EntityIds.clear();
 		m_VisibleLastFrame.clear();
+		m_PendingBloodEvents.clear();
+		m_PendingShotEvents.clear();
 		return m_AgrSink.Start(fileName);
 	}
 
@@ -1040,6 +1110,8 @@ public:
 		m_FpsAccumulator = 0.0;
 		m_HasWrittenFrame = false;
 		m_HasPendingSetupView = false;
+		m_PendingBloodEvents.clear();
+		m_PendingShotEvents.clear();
 	}
 
 	bool IsRecording() {
@@ -1128,11 +1200,13 @@ public:
 
 	bool SetLiveUdp(bool value) {
 		if (!value) {
-			m_LastShotTimes.clear();
+			m_PendingBloodEvents.clear();
+			m_PendingShotEvents.clear();
 		}
 		bool result = m_UdpSink.SetEnabled(value);
 		if (result && value) {
-			m_LastShotTimes.clear();
+			m_PendingBloodEvents.clear();
+			m_PendingShotEvents.clear();
 		}
 		return result;
 	}
@@ -1231,6 +1305,36 @@ public:
 		m_HasPendingSetupView = true;
 	}
 
+	void QueueBloodEffect(unsigned char* effectData) {
+		if (!m_UdpSink.IsEnabled() || !effectData) return;
+		if (IsBadReadPtr(effectData + kCEffectDataOriginOffset, sizeof(SOURCESDK::Vector))) return;
+		if (IsBadReadPtr(effectData + kCEffectDataNormalOffset, sizeof(SOURCESDK::Vector))) return;
+		if (IsBadReadPtr(effectData + kCEffectDataEntityOffset, sizeof(uint32_t))) return;
+		if (IsBadReadPtr(effectData + kCEffectDataMagnitudeOffset, sizeof(float))) return;
+
+		const uint32_t rawEntityHandle = *(uint32_t*)(effectData + kCEffectDataEntityOffset);
+		SOURCESDK::CS2::CBaseHandle entityHandle = SOURCESDK::CS2::CEntityHandle::CEntityHandle(rawEntityHandle);
+		if (!entityHandle.IsValid()) return;
+
+		const int entityEntryIndex = entityHandle.GetEntryIndex();
+		CEntityInstance* entity = entityEntryIndex >= 0 && g_pEntityList && *g_pEntityList && g_GetEntityFromIndex
+			? (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, entityEntryIndex)
+			: nullptr;
+		if (!entity) return;
+
+		Cs2RecordedBloodEvent event;
+		event.VictimEntityId = GetEntityId(entity);
+		event.Origin = *(SOURCESDK::Vector*)(effectData + kCEffectDataOriginOffset);
+		event.Normal = *(SOURCESDK::Vector*)(effectData + kCEffectDataNormalOffset);
+		event.Magnitude = *(float*)(effectData + kCEffectDataMagnitudeOffset);
+		if (!(event.Magnitude == event.Magnitude)) event.Magnitude = 0.0f;
+		m_PendingBloodEvents.push_back(event);
+	}
+
+	void QueueShotTrace(CEntityInstance* shooterEntity, CEntityInstance* weaponEntity, const SOURCESDK::Vector& origin, const SOURCESDK::Vector& angles, float spreadX, float spreadY) {
+		QueueShotEvent(shooterEntity, weaponEntity, origin, GetShotDirectionFromAnglesAndSpread(angles, spreadX, spreadY));
+	}
+
 	void OnMainRenderFrame() {
 		if (!HasActiveSink()) return;
 		if (!m_HasPendingSetupView) return;
@@ -1246,17 +1350,12 @@ public:
 		const float recordFrameTime = agrActive ? GetRecordFrameTime(m_PendingFrameTime) : GetLiveFrameTime(m_PendingFrameTime);
 		if (recordFrameTime <= 0.0f) return;
 
-		Cs2ShotFrame shotFrame;
-		if (m_UdpSink.IsEnabled()) {
-			BuildShotFrame(shotFrame);
-		}
-
 		Cs2RecordedFrame frame;
 		frame.FrameTime = recordFrameTime;
 		std::set<int> visibleThisFrame;
 
 		if (!agrActive && m_LiveRecordSpectated) {
-			SampleEntity(pawn, false, false, false, visibleThisFrame, frame.Entities);
+			SampleEntity(pawn, false, false, visibleThisFrame, frame.Entities);
 		}
 
 		if (m_RecordPlayers || m_RecordWeapons || m_RecordProjectiles || (!agrActive && (m_LiveRecordPlayers || m_LiveRecordWeapons || m_LiveRecordProjectiles))) {
@@ -1270,11 +1369,11 @@ public:
 
 				const char* debugName = entity->GetDebugName();
 				if (samplePlayers && IsPlayerPawnForAgr(entity)) {
-					SampleEntity(entity, false, false, false, visibleThisFrame, frame.Entities);
+					SampleEntity(entity, false, false, visibleThisFrame, frame.Entities);
 				} else if (sampleWeapons && debugName && StringBeginsWithCaseSensitive(debugName, "weapon_")) {
-					SampleEntity(entity, false, false, shotFrame.FiredWeapons.find(entity) != shotFrame.FiredWeapons.end(), visibleThisFrame, frame.Entities);
+					SampleEntity(entity, false, false, visibleThisFrame, frame.Entities);
 				} else if (sampleProjectiles && debugName && StringEndsWithCaseSensitive(debugName, "_projectile")) {
-					SampleEntity(entity, false, true, false, visibleThisFrame, frame.Entities);
+					SampleEntity(entity, false, true, visibleThisFrame, frame.Entities);
 				}
 			}
 		}
@@ -1283,9 +1382,7 @@ public:
 			std::vector<CEntityInstance*> hudModels;
 			CollectHudModelOwnersForPawn(pawn, hudModels);
 			for (CEntityInstance* hudModel : hudModels) {
-				const bool isVisibleHudWeapon = IsHudModelWeaponEntity(hudModel) && IsEntityRenderEnabled(hudModel);
-				const bool shotThisFrame = isVisibleHudWeapon && shotFrame.FiredOwners.find(pawn) != shotFrame.FiredOwners.end();
-				SampleEntity(hudModel, true, false, shotThisFrame, visibleThisFrame, frame.Entities);
+				SampleEntity(hudModel, true, false, visibleThisFrame, frame.Entities, pawn);
 			}
 		}
 
@@ -1306,6 +1403,9 @@ public:
 			}
 		}
 		m_VisibleLastFrame.swap(visibleThisFrame);
+
+		frame.BloodEvents.swap(m_PendingBloodEvents);
+		frame.ShotEvents.swap(m_PendingShotEvents);
 
 		DispatchFrame(frame);
 	}
@@ -1347,7 +1447,8 @@ private:
 	std::set<int> m_VisibleLastFrame;
 	std::map<unsigned char*, Cs2SkeletonMetadata> m_SkeletonCache;
 	std::vector<SOURCESDK::matrix3x4_t> m_BoneWorldScratch;
-	std::map<CEntityInstance*, float> m_LastShotTimes;
+	std::vector<Cs2RecordedBloodEvent> m_PendingBloodEvents;
+	std::vector<Cs2RecordedShotEvent> m_PendingShotEvents;
 
 	bool HasActiveSink() {
 		return m_AgrSink.IsRecording() || m_DebugSink.IsEnabled() || m_UdpSink.IsEnabled();
@@ -1420,66 +1521,6 @@ private:
 		return clientClassName && 0 == _stricmp(clientClassName, "C_CSPlayerPawn");
 	}
 
-	bool IsShotSourceWeaponEntity(CEntityInstance* entity) {
-		if (!entity) return false;
-
-		const char* debugName = entity->GetDebugName();
-		return debugName && StringBeginsWithCaseSensitive(debugName, "weapon_");
-	}
-
-	CEntityInstance* ResolveOwnerEntity(CEntityInstance* entity) {
-		SOURCESDK::CS2::CBaseHandle ownerHandle;
-		if (!TryReadEntityHandleField(entity, g_clientDllOffsets.C_BaseEntity.m_hOwnerEntity, ownerHandle) || !ownerHandle.IsValid()) return nullptr;
-
-		const int ownerEntryIndex = ownerHandle.GetEntryIndex();
-		return ownerEntryIndex >= 0 && g_pEntityList && *g_pEntityList && g_GetEntityFromIndex
-			? (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, ownerEntryIndex)
-			: nullptr;
-	}
-
-	void BuildShotFrame(Cs2ShotFrame& outShotFrame) {
-		if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) return;
-
-		std::set<CEntityInstance*> seenEntities;
-		const int highestIndex = GetHighestEntityIndex();
-		for (int i = 0; i <= highestIndex; ++i) {
-			CEntityInstance* entity = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, i);
-			ScanShotSourceWeapon(entity, seenEntities, outShotFrame);
-		}
-
-		for (std::map<CEntityInstance*, float>::iterator it = m_LastShotTimes.begin(); it != m_LastShotTimes.end();) {
-			if (seenEntities.find(it->first) == seenEntities.end()) {
-				it = m_LastShotTimes.erase(it);
-			} else {
-				++it;
-			}
-		}
-	}
-
-	void ScanShotSourceWeapon(CEntityInstance* entity, std::set<CEntityInstance*>& seenEntities, Cs2ShotFrame& outShotFrame) {
-		if (!IsShotSourceWeaponEntity(entity)) return;
-		if (!seenEntities.insert(entity).second) return;
-
-		float lastShotTime = 0.0f;
-		if (!TryReadFloatField(entity, kCs2WeaponBaseLastShotTimeOffset, lastShotTime)) return;
-
-		std::map<CEntityInstance*, float>::iterator it = m_LastShotTimes.find(entity);
-		if (it == m_LastShotTimes.end()) {
-			m_LastShotTimes[entity] = lastShotTime;
-			return;
-		}
-
-		if (fabsf(it->second - lastShotTime) <= 0.000001f) return;
-
-		it->second = lastShotTime;
-		outShotFrame.FiredWeapons.insert(entity);
-
-		CEntityInstance* owner = ResolveOwnerEntity(entity);
-		if (owner && owner != entity) {
-			outShotFrame.FiredOwners.insert(owner);
-		}
-	}
-
 	int GetEntityId(CEntityInstance* entity) {
 		std::map<CEntityInstance*, int>::iterator it = m_EntityIds.find(entity);
 		if (it != m_EntityIds.end()) return it->second;
@@ -1487,6 +1528,66 @@ private:
 		int result = m_NextId++;
 		m_EntityIds[entity] = result;
 		return result;
+	}
+
+	static bool NearlySameVector(const SOURCESDK::Vector& a, const SOURCESDK::Vector& b, float epsilon) {
+		return fabsf(a.x - b.x) <= epsilon
+			&& fabsf(a.y - b.y) <= epsilon
+			&& fabsf(a.z - b.z) <= epsilon;
+	}
+
+	static SOURCESDK::Vector NormalizeVector(const SOURCESDK::Vector& value) {
+		const float length = sqrtf(value.x * value.x + value.y * value.y + value.z * value.z);
+		if (length <= 0.000001f || !(length == length)) return SOURCESDK::Vector(1.0f, 0.0f, 0.0f);
+		const float invLength = 1.0f / length;
+		return SOURCESDK::Vector(value.x * invLength, value.y * invLength, value.z * invLength);
+	}
+
+	static SOURCESDK::Vector GetShotDirectionFromAnglesAndSpread(const SOURCESDK::Vector& angles, float spreadX, float spreadY) {
+		const float pitch = angles.x * (float)(M_PI / 180.0);
+		const float yaw = angles.y * (float)(M_PI / 180.0);
+		const float roll = angles.z * (float)(M_PI / 180.0);
+		const float sp = sinf(pitch);
+		const float cp = cosf(pitch);
+		const float sy = sinf(yaw);
+		const float cy = cosf(yaw);
+		const float sr = sinf(roll);
+		const float cr = cosf(roll);
+
+		const SOURCESDK::Vector forward(cp * cy, cp * sy, -sp);
+		const SOURCESDK::Vector right((-sr * sp * cy) + (-cr * -sy), (-sr * sp * sy) + (-cr * cy), -sr * cp);
+		const SOURCESDK::Vector up((cr * sp * cy) + (-sr * -sy), (cr * sp * sy) + (-sr * cy), cr * cp);
+		return NormalizeVector(SOURCESDK::Vector(
+			forward.x + right.x * spreadX + up.x * spreadY,
+			forward.y + right.y * spreadX + up.y * spreadY,
+			forward.z + right.z * spreadX + up.z * spreadY));
+	}
+
+	void QueueShotEvent(CEntityInstance* shooterEntity, CEntityInstance* weaponEntity, const SOURCESDK::Vector& origin, const SOURCESDK::Vector& direction) {
+		if (!m_UdpSink.IsEnabled() || !shooterEntity) return;
+
+		const int shooterEntityId = GetEntityId(shooterEntity);
+		const int weaponEntityId = weaponEntity ? GetEntityId(weaponEntity) : -1;
+
+		for (std::vector<Cs2RecordedShotEvent>::iterator it = m_PendingShotEvents.begin(); it != m_PendingShotEvents.end(); ++it) {
+			if (it->ShooterEntityId == shooterEntityId
+				&& it->WeaponEntityId == weaponEntityId
+				&& NearlySameVector(it->Origin, origin, 0.001f)) {
+				Cs2RecordedShotPellet pellet;
+				pellet.Direction = direction;
+				it->Pellets.push_back(pellet);
+				return;
+			}
+		}
+
+		Cs2RecordedShotEvent event;
+		event.ShooterEntityId = shooterEntityId;
+		event.WeaponEntityId = weaponEntityId;
+		event.Origin = origin;
+		Cs2RecordedShotPellet pellet;
+		pellet.Direction = direction;
+		event.Pellets.push_back(pellet);
+		m_PendingShotEvents.push_back(event);
 	}
 
 	const Cs2SkeletonMetadata* GetSkeletonMetadata(
@@ -1549,7 +1650,7 @@ private:
 		return &m_SkeletonCache[modelImp];
 	}
 
-	bool SampleEntity(CEntityInstance* entity, bool viewModel, bool projectile, bool shotThisFrame, std::set<int>& visibleThisFrame, std::vector<Cs2RecordedEntity>& outEntities) {
+	bool SampleEntity(CEntityInstance* entity, bool viewModel, bool projectile, std::set<int>& visibleThisFrame, std::vector<Cs2RecordedEntity>& outEntities, CEntityInstance* ownerOverride = nullptr) {
 		unsigned char* baseSceneNode = nullptr;
 		const char* baseModelName = nullptr;
 		if (!TryGetEntityModelBaseInfo(entity, baseSceneNode, baseModelName)) return false;
@@ -1571,17 +1672,20 @@ private:
 		sampledEntity.Visible = visible;
 		sampledEntity.ViewModel = viewModel;
 		sampledEntity.Projectile = projectile;
-		sampledEntity.ShotThisFrame = shotThisFrame;
 		sampledEntity.Transform = entityTransform;
 
-		SOURCESDK::CS2::CBaseHandle ownerHandle;
-		if (TryReadEntityHandleField(entity, g_clientDllOffsets.C_BaseEntity.m_hOwnerEntity, ownerHandle) && ownerHandle.IsValid()) {
-			int ownerEntryIndex = ownerHandle.GetEntryIndex();
-			CEntityInstance* ownerEntity = ownerEntryIndex >= 0 && g_pEntityList && *g_pEntityList && g_GetEntityFromIndex
-				? (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, ownerEntryIndex)
-				: nullptr;
-			if (ownerEntity && ownerEntity != entity) {
-				sampledEntity.OwnerId = GetEntityId(ownerEntity);
+		if (ownerOverride && ownerOverride != entity) {
+			sampledEntity.OwnerId = GetEntityId(ownerOverride);
+		} else {
+			SOURCESDK::CS2::CBaseHandle ownerHandle;
+			if (TryReadEntityHandleField(entity, g_clientDllOffsets.C_BaseEntity.m_hOwnerEntity, ownerHandle) && ownerHandle.IsValid()) {
+				int ownerEntryIndex = ownerHandle.GetEntryIndex();
+				CEntityInstance* ownerEntity = ownerEntryIndex >= 0 && g_pEntityList && *g_pEntityList && g_GetEntityFromIndex
+					? (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, ownerEntryIndex)
+					: nullptr;
+				if (ownerEntity && ownerEntity != entity) {
+					sampledEntity.OwnerId = GetEntityId(ownerEntity);
+				}
 			}
 		}
 
@@ -1663,6 +1767,181 @@ void Cs2Agr_OnSetupView(float frameTime, float x, float y, float z, float rx, fl
 
 void Cs2Agr_OnMainRenderFrame() {
 	g_Cs2AgrRecorder.OnMainRenderFrame();
+}
+
+static bool g_Cs2BloodEffectHookTried = false;
+
+typedef void(__fastcall* Cs2BloodEffect_t)(unsigned char* effectData);
+static Cs2BloodEffect_t g_Old_Cs2BloodEffect = nullptr;
+
+static void __fastcall New_Cs2BloodEffect(unsigned char* effectData) {
+	g_Cs2AgrRecorder.QueueBloodEffect(effectData);
+
+	if (g_Old_Cs2BloodEffect) {
+		g_Old_Cs2BloodEffect(effectData);
+	}
+}
+
+void Cs2BloodEffect_Init(void* clientDll) {
+	if (g_Cs2BloodEffectHookTried) return;
+	g_Cs2BloodEffectHookTried = true;
+
+	if (!clientDll) {
+		advancedfx::Warning("cs2_bloodeffect: clientDll missing, hook disabled.\n");
+		return;
+	}
+
+	Afx::BinUtils::ImageSectionsReader sections((HMODULE)clientDll);
+	Afx::BinUtils::MemRange textRange = sections.GetMemRange();
+	// CS blood impact wrapper from cstrike15/fx_cs_blood.cpp:
+	//   void wrapper(CEffectData* data) {
+	//     FX_CSBloodSpray(data->m_vStart, data->m_vOrigin, data->m_hEntity, data->m_vNormal, data->m_flMagnitude);
+	//   }
+	// Wrapper calls function showing strings like "particles/blood_impact/blood_impact_high.vpcf"
+	// In Ghidra this is the tiny function that loads RCX+0x14, RCX+0x08, RCX+0x20,
+	// [RCX+0x38], and [RCX+0x44], then tail-calls the larger blood particle selector.
+	Afx::BinUtils::MemRange result = Afx::BinUtils::FindPatternString(
+		textRange,
+		"48 83 EC 38 4C 8B C1 4C 8D 49 20 48 8D 51 08 48 83 C1 14 F3 41 0F 10 40 44 45 8B 40 38 F3 0F 11 44 24 20 E8 ?? ?? ?? ?? 48 83 C4 38 C3");
+	if (result.IsEmpty()) {
+		ErrorBox(MkErrStr(__FILE__, __LINE__));
+		return;
+	}
+
+	g_Old_Cs2BloodEffect = (Cs2BloodEffect_t)result.Start;
+	DetourTransactionBegin();
+	DetourUpdateThread(GetCurrentThread());
+	DetourAttach(&(PVOID&)g_Old_Cs2BloodEffect, New_Cs2BloodEffect);
+	if (NO_ERROR != DetourTransactionCommit()) {
+		g_Old_Cs2BloodEffect = nullptr;
+		ErrorBox(MkErrStr(__FILE__, __LINE__));
+		return;
+	}
+}
+
+static bool g_Cs2FireBulletsHookTried = false;
+
+typedef uint64_t(__fastcall* Cs2FXFireBulletTrace_t)(
+	void* param1,
+	const SOURCESDK::Vector* origin,
+	void* angles,
+	float param4,
+	uint64_t param5,
+	uint32_t param6,
+	uint8_t param7,
+	uint32_t param8,
+	uint32_t bulletIndex,
+	uint32_t param10,
+	void* player,
+	void* traceVector,
+	float spreadX,
+	float spreadY,
+	void* weaponEntity,
+	void* weaponData,
+	uint32_t param17,
+	int param18,
+	uint64_t param19);
+static Cs2FXFireBulletTrace_t g_Old_Cs2FXFireBulletTrace = nullptr;
+
+static bool TryReadVectorPointer(const SOURCESDK::Vector* value, SOURCESDK::Vector& outValue) {
+	outValue = SOURCESDK::Vector();
+	if (!value || IsBadReadPtr(value, sizeof(SOURCESDK::Vector))) return false;
+	outValue = *value;
+	return true;
+}
+
+static uint64_t __fastcall New_Cs2FXFireBulletTrace(
+	void* param1,
+	const SOURCESDK::Vector* origin,
+	void* angles,
+	float param4,
+	uint64_t param5,
+	uint32_t param6,
+	uint8_t param7,
+	uint32_t param8,
+	uint32_t bulletIndex,
+	uint32_t param10,
+	void* player,
+	void* traceVector,
+	float spreadX,
+	float spreadY,
+	void* weaponEntity,
+	void* weaponData,
+	uint32_t param17,
+	int param18,
+	uint64_t param19) {
+	SOURCESDK::Vector originValue;
+	SOURCESDK::Vector anglesValue;
+	if (TryReadVectorPointer(origin, originValue) && TryReadVectorPointer((const SOURCESDK::Vector*)angles, anglesValue)) {
+		g_Cs2AgrRecorder.QueueShotTrace((CEntityInstance*)player, (CEntityInstance*)weaponEntity, originValue, anglesValue, spreadX, spreadY);
+	}
+
+	if (g_Old_Cs2FXFireBulletTrace) {
+		return g_Old_Cs2FXFireBulletTrace(
+			param1,
+			origin,
+			angles,
+			param4,
+			param5,
+			param6,
+			param7,
+			param8,
+			bulletIndex,
+			param10,
+			player,
+			traceVector,
+			spreadX,
+			spreadY,
+			weaponEntity,
+			weaponData,
+			param17,
+			param18,
+			param19);
+	}
+
+	return 0;
+}
+
+void Cs2FireBullets_Init(void* clientDll) {
+	if (g_Cs2FireBulletsHookTried) return;
+	g_Cs2FireBulletsHookTried = true;
+
+	if (!clientDll) {
+		advancedfx::Warning("cs2_firebullets: clientDll missing, hook disabled.\n");
+		return;
+	}
+
+	Afx::BinUtils::ImageSectionsReader sections((HMODULE)clientDll);
+	Afx::BinUtils::MemRange textRange = sections.GetMemRange();
+	// Per-bullet trace/effect routine called from FX_FireBullets after spread offsets are generated.
+	// FX_FireBullets has "FX_FireBullets: " strings, with our function being called near the bottom:
+	// FUN_180806ab0(plVar9[0x28d],&local_528,&local_4f8,uVar4,uVar1,4,uVar3,local_518,
+	//               uVar19,uVar2,plVar9,local_408,
+	//               *(undefined4 *)((longlong)local_448 + uVar17),
+	//               *(undefined4 *)((longlong)local_488 + uVar17),param_2,lVar10,param_18,
+	//               param_6,0,param_20);
+	// It receives the shot origin, view angles, bullet index, and
+	// per-bullet spread offsets before tracing/applying effects.
+	Afx::BinUtils::MemRange traceResult = Afx::BinUtils::FindPatternString(
+		textRange,
+		"4C 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 56 48 8D AC 24 18 DB FF FF B8 E8 25 00 00 E8 ?? ?? ?? ?? 48 2B E0 F2 0F 10 02 4C 8D 4D 38 48 89 9C 24 E0 25 00 00");
+	if (traceResult.IsEmpty()) {
+		advancedfx::Warning("cs2_firebullets: failed to find per-bullet trace pattern.\n");
+	}
+	else {
+		g_Old_Cs2FXFireBulletTrace = (Cs2FXFireBulletTrace_t)traceResult.Start;
+	}
+
+	if (!g_Old_Cs2FXFireBulletTrace) return;
+
+	DetourTransactionBegin();
+	DetourUpdateThread(GetCurrentThread());
+	DetourAttach(&(PVOID&)g_Old_Cs2FXFireBulletTrace, New_Cs2FXFireBulletTrace);
+	if (NO_ERROR != DetourTransactionCommit()) {
+		g_Old_Cs2FXFireBulletTrace = nullptr;
+		advancedfx::Warning("cs2_firebullets: failed to attach fire bullets hook.\n");
+		return;
+	}
 }
 
 CON_COMMAND(mirv_agr, "Source 2 AGR recording") {
