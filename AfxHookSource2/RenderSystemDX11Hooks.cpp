@@ -65,8 +65,6 @@ extern void ExecuteClientCmd(const char * value);
 
 int g_iRenderContextDebug = 0;
 
-ID3D11DeviceContext * g_pImmediateContext = nullptr;
-
 CRenderCommands g_RenderCommands;
 CNvencStream g_NvencStream;
 
@@ -1747,10 +1745,8 @@ bool g_Present_Suppress = false;
 HRESULT g_Present_LastResult = S_OK;
 ID3D11Device * g_pDevice = nullptr;
 ID3D11DeviceContext * g_pOtherContext = nullptr;
-ID3D11RenderTargetView* g_pRTView = nullptr;
 int g_iDraw = 0;
 bool g_bInOwnDraw = false;
-ID3D11Resource* g_pMainRenderTargetResource = nullptr;
 bool g_bDetectSmoke = false;
 bool g_bDetectSmoke2 = false;
 bool g_bDetectedSmoke = false;
@@ -1935,15 +1931,7 @@ HRESULT STDMETHODCALLTYPE New_CreateRenderTargetView(  ID3D11Device * This,
                     g_pDevice = nullptr;
                 }
 
-                if(g_BeforeUiRT) {
-                    g_BeforeUiRT->Release();
-                    g_BeforeUiRT = nullptr;
-                }
-                g_iDraw = 0;
-
                 g_DepthCompositor.OnTargetBegin(This, pTexture);
-                g_pRTView = *ppRTView;
-                g_pMainRenderTargetResource = nullptr;
                 g_pDevice = This;
                 g_pDevice->AddRef();
                 g_CampathDrawer.BeginDevice(This);
@@ -1973,25 +1961,27 @@ ID3D11RenderTargetView * g_pCurrentRenderTargetView = nullptr;
 ID3D11DepthStencilView * g_pCurrentDepthStencilView = nullptr;
 
 void MaybeCaptureSmokeDepth() {
-    if (g_bDetectedSmoke && g_pSmokeDepthStencilView) {
-        ID3D11DepthStencilView* pCurrentDepthStencilView = nullptr;
-        ID3D11DepthStencilView* pNullDepthStencilView = nullptr;
-        g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
+    if(auto pDeviceContext = g_RenderCommands.RenderThread_GetContext()) {
+        if (g_bDetectedSmoke && g_pSmokeDepthStencilView) {
+            ID3D11DepthStencilView* pCurrentDepthStencilView = nullptr;
+            ID3D11DepthStencilView* pNullDepthStencilView = nullptr;
+            pDeviceContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
 
-        if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
-            g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pNullDepthStencilView);
+            if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
+                pDeviceContext->OMGetRenderTargets(0, nullptr, &pNullDepthStencilView);
+            }
+
+            g_DepthCompositor.CaptureSmokeDepth(pDeviceContext, g_pSmokeDepthStencilView);
+
+            if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
+                pDeviceContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
+            }
+
+            if (pCurrentDepthStencilView) pCurrentDepthStencilView->Release();
+
+            g_pSmokeDepthStencilView = nullptr;
+            g_bDetectedSmoke = false;
         }
-
-        g_DepthCompositor.CaptureSmokeDepth(g_pImmediateContext, g_pSmokeDepthStencilView);
-
-        if (pCurrentDepthStencilView == g_pSmokeDepthStencilView) {
-            g_pImmediateContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
-        }
-
-        if (pCurrentDepthStencilView) pCurrentDepthStencilView->Release();
-
-        g_pSmokeDepthStencilView = nullptr;
-        g_bDetectedSmoke = false;
     }
 }
 
@@ -2001,46 +1991,16 @@ void STDMETHODCALLTYPE New_ClearDepthStencilView( ID3D11DeviceContext * This,
     _In_  FLOAT Depth,
     _In_  UINT8 Stencil) {
 
-    if (This == g_pImmediateContext && g_bInOwnDraw == false) {
+    if (
+        This->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE
+        && g_RenderCommands.CurrentThreadIsRenderThread()
+        && !g_bInOwnDraw
+    ) {
         MaybeCaptureSmokeDepth();
     }
 
     g_Old_ClearDepthStencilView(This, pDepthStencilView, ClearFlags, Depth, Stencil);
 }
-
-typedef void (STDMETHODCALLTYPE * ResolveSubresource_t)( ID3D11DeviceContext * This,
-    /* [annotation] */ 
-    _In_  ID3D11Resource *pDstResource,
-    /* [annotation] */ 
-    _In_  UINT DstSubresource,
-    /* [annotation] */ 
-    _In_  ID3D11Resource *pSrcResource,
-    /* [annotation] */ 
-    _In_  UINT SrcSubresource,
-    /* [annotation] */ 
-    _In_  DXGI_FORMAT Format);
-
-ResolveSubresource_t g_Old_ResolveSubresource = nullptr;
-
-void STDMETHODCALLTYPE New_ResolveSubresource( ID3D11DeviceContext * This,
-    /* [annotation] */ 
-    _In_  ID3D11Resource *pDstResource,
-    /* [annotation] */ 
-    _In_  UINT DstSubresource,
-    /* [annotation] */ 
-    _In_  ID3D11Resource *pSrcResource,
-    /* [annotation] */ 
-    _In_  UINT SrcSubresource,
-    /* [annotation] */ 
-    _In_  DXGI_FORMAT Format) {
-
-    if(This == g_pImmediateContext && g_bInOwnDraw == false) {
-        g_pMainRenderTargetResource = pSrcResource;
-    }
-
-    g_Old_ResolveSubresource(This, pDstResource, DstSubresource, pSrcResource, SrcSubresource, Format);
- }
-
 
 typedef void (STDMETHODCALLTYPE * OMSetRenderTargets_t)( ID3D11DeviceContext * This,
             /* [annotation] */ 
@@ -2059,7 +2019,11 @@ void STDMETHODCALLTYPE New_OMSetRenderTargets( ID3D11DeviceContext * This,
             _In_reads_opt_(NumViews)  ID3D11RenderTargetView *const *ppRenderTargetViews,
             /* [annotation] */ 
             _In_opt_  ID3D11DepthStencilView *pDepthStencilView) {       
-    if (!g_bInOwnDraw && This->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) {
+    if (
+        This->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE
+        && g_RenderCommands.CurrentThreadIsRenderThread()
+        && !g_bInOwnDraw
+    ) {
         if (NumViews >= 1) {         
             if (g_iDraw == 0 && pDepthStencilView && ppRenderTargetViews && ppRenderTargetViews[0]) {
                 if(g_BeforeUiRT) {
@@ -2067,7 +2031,7 @@ void STDMETHODCALLTYPE New_OMSetRenderTargets( ID3D11DeviceContext * This,
                     g_BeforeUiRT = nullptr;
                 }
                 g_iDraw = 2;
-                g_pImmediateContext = This;
+                g_RenderCommands.RenderThread_SetContext(This);
                 g_pCurrentDepthStencilView = pDepthStencilView;
                 g_pCurrentRenderTargetView = ppRenderTargetViews[0];
             }
@@ -2077,11 +2041,11 @@ void STDMETHODCALLTYPE New_OMSetRenderTargets( ID3D11DeviceContext * This,
                 g_bInOwnDraw = true;
 
                 UINT numViewPorts = 1;
-                g_pImmediateContext->RSGetViewports(&numViewPorts, &g_ViewPort);
+                This->RSGetViewports(&numViewPorts, &g_ViewPort);
 
-                g_CampathDrawer.OnRenderThread_Draw(g_pImmediateContext, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
-                g_PlayerPathDrawer.OnRenderThread_Draw(g_pImmediateContext, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
-                g_MirvImageDrawer.OnRenderThread_Draw(g_pImmediateContext, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
+                g_CampathDrawer.OnRenderThread_Draw(This, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
+                g_PlayerPathDrawer.OnRenderThread_Draw(This, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
+                g_MirvImageDrawer.OnRenderThread_Draw(This, &g_ViewPort, g_pCurrentRenderTargetView, g_pCurrentDepthStencilView);
 
                 g_bInOwnDraw = false;
             }
@@ -2134,7 +2098,7 @@ public:
             After_Present();
         }
 
-        g_RenderCommands.RenderThread_BeginFrame(g_pImmediateContext);
+        g_RenderCommands.RenderThread_BeginFrame();
         delete this;
     }
 private:
@@ -2148,10 +2112,10 @@ public:
     }
 
     virtual void OnCallback(void) {
-        if (g_pImmediateContext) {
-            g_bDetectSmoke = g_ReShadeAdvancedfx.IsConnected() && g_bEnableReShade && g_bReShadeCompositeSmoke
-                || g_bCompositeSmoke;
-        }
+        g_bDetectSmoke =
+            g_ReShadeAdvancedfx.IsConnected() && g_bEnableReShade && g_bReShadeCompositeSmoke
+            || g_bCompositeSmoke
+        ;
         delete this;
     }
 private:
@@ -2165,10 +2129,8 @@ public:
     }
 
     virtual void OnCallback(void) {
-        if (g_pImmediateContext) {
-            MaybeCaptureSmokeDepth();
-            g_bDetectSmoke = false;
-        }
+        MaybeCaptureSmokeDepth();
+        g_bDetectSmoke = false;
         delete this;
     }
 private:
@@ -2183,12 +2145,12 @@ public:
     }
 
     virtual void OnCallback(void) {
-        if (g_pImmediateContext) {
+        if (auto pDeviceContext = g_RenderCommands.RenderThread_GetContext()) {
             
             if (g_ReShadeAdvancedfx.IsConnected() && g_bEnableReShade) {
                 float zNear = 0.0f;
                 float zFar = 0.0f;
-                g_DepthCompositor.CaptureNormalDepth(g_pImmediateContext, g_pCurrentDepthStencilView,
+                g_DepthCompositor.CaptureNormalDepth(pDeviceContext, g_pCurrentDepthStencilView,
                     g_bReShadeCompositeSmoke,
                     CDepthCompositor::DepthTextureType_R32F,
                     ShaderCombo_afx_depth_ps_5_0::AFXDEPTHMODE_0,
@@ -2199,7 +2161,7 @@ public:
 
                 ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
                 ID3D11DepthStencilView* pDepthStencilView = nullptr;
-                g_pImmediateContext->OMGetRenderTargets(1, &pRenderTargetViews[0], &pDepthStencilView);
+                pDeviceContext->OMGetRenderTargets(1, &pRenderTargetViews[0], &pDepthStencilView);
 
                 ID3D11Resource* pRenderTargetViewResource = nullptr;
                 //ID3D11Resource* pDepthStencilResource = nullptr;
@@ -2221,7 +2183,7 @@ public:
             }
 
             ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
-            g_pImmediateContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
+            pDeviceContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
             if (pRenderTargetViews[0]) {
                 if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
                 {
@@ -2325,7 +2287,11 @@ void STDMETHODCALLTYPE New_PSSetShader(ID3D11DeviceContext* This,
     _In_reads_opt_(NumClassInstances)  ID3D11ClassInstance* const* ppClassInstances,
     UINT NumClassInstances) {
 
-    if (This == g_pImmediateContext) {
+    if (
+        This->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE
+        && g_RenderCommands.CurrentThreadIsRenderThread()
+        && !g_bInOwnDraw        
+    ) {
         if(2 <= g_iRenderContextDebug) {
             char temp[1024];
             UINT dataSize = 1023;
@@ -2374,7 +2340,7 @@ void Hook_Context(ID3D11DeviceContext * pDeviceContext) {
         DetourDetach(&(PVOID&)g_Old_PSSetShader, New_PSSetShader);
         DetourDetach(&(PVOID&)g_Old_OMSetRenderTargets, New_OMSetRenderTargets);
         DetourDetach(&(PVOID&)g_Old_ClearDepthStencilView, New_ClearDepthStencilView);
-        DetourDetach(&(PVOID&)g_Old_ResolveSubresource, New_ResolveSubresource);
+        //DetourDetach(&(PVOID&)g_Old_ResolveSubresource, New_ResolveSubresource);
         if(NO_ERROR != DetourTransactionCommit()) {
             ErrorBox("Failed detaching on ID1D11RenderContext.");
         }
@@ -2385,12 +2351,12 @@ void Hook_Context(ID3D11DeviceContext * pDeviceContext) {
     g_Old_PSSetShader = (PSSetShader_t)vtable[9];
     g_Old_OMSetRenderTargets = (OMSetRenderTargets_t)vtable[33];
     g_Old_ClearDepthStencilView = (ClearDepthStencilView_t)vtable[53];
-    g_Old_ResolveSubresource = (ResolveSubresource_t)vtable[57];
+    //g_Old_ResolveSubresource = (ResolveSubresource_t)vtable[57];
     //DetourAttach(&(PVOID&)g_Old_PSSetShaderResources, New_PSSetShaderResources);
     DetourAttach(&(PVOID&)g_Old_PSSetShader, New_PSSetShader);
     DetourAttach(&(PVOID&)g_Old_OMSetRenderTargets, New_OMSetRenderTargets);
     DetourAttach(&(PVOID&)g_Old_ClearDepthStencilView, New_ClearDepthStencilView);
-    DetourAttach(&(PVOID&)g_Old_ResolveSubresource, New_ResolveSubresource);
+    //DetourAttach(&(PVOID&)g_Old_ResolveSubresource, New_ResolveSubresource);
     if(NO_ERROR != DetourTransactionCommit()) {
         ErrorBox("Failed attaching on ID1D11RenderContext.");
     }
@@ -2559,15 +2525,17 @@ void Before_Present() {
     }
     //NVENC and shared texture
     ID3D11Texture2D* pBackBuffer = nullptr;
-    if (g_pSwapChain && g_pImmediateContext) {
-        if (SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer))) {
-            ProcessNvencPendingCommand(pBackBuffer);
-            g_SharedTextureHost.Update(g_pImmediateContext, pBackBuffer);
-            if (g_NvencStream.IsActive()) {
-                g_NvencStream.EncodeFrame(g_pImmediateContext, pBackBuffer);
+    if (g_pSwapChain) {
+        if (auto pDeviceContext = g_RenderCommands.RenderThread_GetContext()) {
+            if (SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer))) {
+                ProcessNvencPendingCommand(pBackBuffer);
+                g_SharedTextureHost.Update(pDeviceContext, pBackBuffer);
+                if (g_NvencStream.IsActive()) {
+                    g_NvencStream.EncodeFrame(pDeviceContext, pBackBuffer);
+                }
+                pBackBuffer->Release();
+                pBackBuffer = nullptr;
             }
-            pBackBuffer->Release();
-            pBackBuffer = nullptr;
         }
     }
 }
@@ -2578,7 +2546,7 @@ void After_Present() {
         pRenderPassCommands->OnAfterPresentOrContextLossReliable();
     }
 
-    g_RenderCommands.RenderThread_EndFrame(g_pImmediateContext);    
+    g_RenderCommands.RenderThread_EndFrame();    
     g_DepthCompositor.OnEndFrame();
 
 	g_ReShadeAdvancedfx.ResetHasRendered();
@@ -2594,16 +2562,23 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
             /* [in] */ UINT SyncInterval,
             /* [in] */ UINT Flags) {
 
-    g_Present_LastSyncInterval = SyncInterval;
-    g_Present_LastPresentFlags = Flags;
- 
-    Before_Present();
-
-    HRESULT result = g_Present_Suppress ? g_Present_LastResult : (g_Present_LastResult = g_OldPresent(This, SyncInterval, Flags));
+    if(
+        g_RenderCommands.CurrentThreadIsRenderThread()
+        && !g_bInOwnDraw
+    ) {
+        g_Present_LastSyncInterval = SyncInterval;
+        g_Present_LastPresentFlags = Flags;
     
-    After_Present();
+        Before_Present();
 
-    return result;
+        HRESULT result = g_Present_Suppress ? g_Present_LastResult : (g_Present_LastResult = g_OldPresent(This, SyncInterval, Flags));
+        
+        After_Present();
+
+        return result;
+    }
+
+    return g_OldPresent(This,SyncInterval, Flags);
 }
 
 
@@ -3172,8 +3147,8 @@ void EndCapture() {
         {
             auto & queue = pRenderPassCommands.AfterPresentOrContextLossReliable;
             CAfxCapture * capture = g_ActiveCapture;
-            queue.Push([capture](IRenderPassCommands* context){
-                capture->ShutDown(context->GetContext());
+            queue.Push([capture](ID3D11DeviceContext * pDeviceContext){
+                capture->ShutDown(pDeviceContext);
             }); 
         }
         {
@@ -3416,15 +3391,15 @@ public:
                 {
                     auto & queue = pRenderPassCommands.BeforePresent;
                     CAfxCapture * capture = g_ActiveCapture;
-                    queue.Push([capture](IRenderPassCommands* context, ID3D11Texture2D * pTexture){
-                        if(!context->GetSkipFrame()) capture->OnBeforeGpuPresent(context->GetContext(), pTexture, 1.0f, 0.0f);
+                    queue.Push([capture](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture){
+                        capture->OnBeforeGpuPresent(pDeviceContext, pTexture, 1.0f, 0.0f);
                     }); 
                 }
                 {
                     auto & queue = pRenderPassCommands.AfterPresent;
                     CAfxCapture * capture = g_ActiveCapture;
-                    queue.Push([capture](IRenderPassCommands* context){
-                        if (!context->GetSkipFrame()) capture->OnAfterGpuPresent(context->GetContext());
+                    queue.Push([capture](ID3D11DeviceContext * pDeviceContext){
+                        capture->OnAfterGpuPresent(pDeviceContext);
                     }); 
                 }
             }
@@ -3474,8 +3449,8 @@ private:
             {
                 auto & queue = pRenderPassCommands.AfterPresentOrContextLossReliable;
                 CAfxCapture * capture = m_Capture;
-                queue.Push([capture](IRenderPassCommands* context){
-                    capture->ShutDown(context->GetContext());
+                queue.Push([capture](ID3D11DeviceContext * pDeviceContext){
+                    capture->ShutDown(pDeviceContext);
                 }); 
             }
             {
@@ -3543,9 +3518,9 @@ private:
                 float B = clearColor[2];
                 float A = clearColor[3];  
                 auto & renderPassCommands = g_RenderCommands.EngineThread_GetCommands();              
-                renderPassCommands.BeforeUi2.Push([R,G,B,A](IRenderPassCommands* context, ID3D11RenderTargetView * pTarget){
+                renderPassCommands.BeforeUi2.Push([R,G,B,A](ID3D11DeviceContext * pDeviceContext, ID3D11RenderTargetView * pTarget){
                     float clearColor[4] = {R,G,B,A};
-                    context->GetContext()->ClearRenderTargetView(pTarget, clearColor);
+                    pDeviceContext->ClearRenderTargetView(pTarget, clearColor);
                 });
             }
 
@@ -3564,9 +3539,7 @@ private:
             CStreamSettings::DepthMode_e depthMode = m_Settings.DepthMode;
             {
                 auto &queue = m_Settings.Capture == CStreamSettings::Capture_e::BeforeUi ? renderPassCommands.BeforeUi : renderPassCommands.BeforePresent;
-                queue.Push([capture,captureType,depthCompositeSmoke,depth24,depthVal,depthValMax,depthChannels,depthMode](IRenderPassCommands* context, ID3D11Texture2D * pTexture){
-                    ID3D11DeviceContext* pDeviceContext = context->GetContext();
-                    bool bSkipFrame = context->GetSkipFrame();
+                queue.Push([capture,captureType,depthCompositeSmoke,depth24,depthVal,depthValMax,depthChannels,depthMode](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture){
                     float zNear = depthVal;
                     float zFar = depthValMax;
 
@@ -3624,7 +3597,7 @@ private:
                         if (pRenderTargetViews[0]) pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
         
                         if (ID3D11Texture2D* pTexture = g_DepthCompositor.GetDepthTexture(captureType == CStreamSettings::CaptureType_e::DepthF ? CDepthCompositor::DepthTextureType_R32F : CDepthCompositor::DepthTextureType_RGB)) {
-                            if(!bSkipFrame) capture->OnBeforeGpuPresent(pDeviceContext, pTexture, zFar - zNear, zNear);
+                            capture->OnBeforeGpuPresent(pDeviceContext, pTexture, zFar - zNear, zNear);
                             pTexture->Release();
                         }// else capture->OnBeforeGpuPresent(pDeviceContext, nullptr);
         
@@ -3634,15 +3607,15 @@ private:
                         if (pRenderTargetViews[0]) pRenderTargetViews[0]->Release();   
                     } break;
                     default:
-                        if(!bSkipFrame) capture->OnBeforeGpuPresent(pDeviceContext, pTexture, zFar - zNear, zNear);
+                        capture->OnBeforeGpuPresent(pDeviceContext, pTexture, zFar - zNear, zNear);
                         break;
                     }                 
                 }); 
             }
             {
                 auto & queue = renderPassCommands.AfterPresent;
-                queue.Push([capture](IRenderPassCommands* context){
-                    if(!context->GetSkipFrame()) capture->OnAfterGpuPresent(context->GetContext());
+                queue.Push([capture](ID3D11DeviceContext * pDeviceContext){
+                    capture->OnAfterGpuPresent(pDeviceContext);
                 }); 
             }            
         }
@@ -3977,14 +3950,14 @@ private:
         {
             auto & queue = pRenderPassCommands.BeforePresent;
             CAfxCapture * capture = g_ActiveCapture;
-            queue.Push([capture](IRenderPassCommands* context, ID3D11Texture2D * pTexture){
+            queue.Push([capture](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture){
                 g_Present_Suppress = true;
             }); 
         }
         {
             auto & queue = pRenderPassCommands.AfterPresent;
             CAfxCapture * capture = g_ActiveCapture;
-            queue.Push([capture](IRenderPassCommands* context){
+            queue.Push([capture](ID3D11DeviceContext * pDeviceContext){
                 g_Present_Suppress = false;
             }); 
         }
@@ -3995,14 +3968,14 @@ private:
         {
             auto & queue = pRenderPassCommands.BeforePresent;
             CAfxCapture * capture = g_ActiveCapture;
-            queue.Push([capture](IRenderPassCommands* context, ID3D11Texture2D * pTexture){
+            queue.Push([capture](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture){
                 g_bExpectPresent = true;
             }); 
         }
         {
             auto & queue = pRenderPassCommands.AfterPresent;
             CAfxCapture * capture = g_ActiveCapture;
-            queue.Push([capture](IRenderPassCommands* context){
+            queue.Push([capture](ID3D11DeviceContext * pDeviceContext){
                 g_bExpectPresent = false;
             }); 
         }        
@@ -4806,7 +4779,7 @@ void CAfxStreams::RecordStart()
             auto& pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
             {
                 auto& queue = pRenderPassCommands.BeginReliable;
-                queue.Push([](IRenderPassCommands*) {
+                queue.Push([]() {
                     g_bCompositeSmoke = true;
                 });
             }
@@ -4930,7 +4903,7 @@ void RenderSystemDX11_EngineThread_Prepare() {
         auto& queue = pRenderPassCommands.BeginReliable;
         SOURCESDK::VMatrix projectionMatrix;
         g_EngineThread_ProjectionMatrix.Get(projectionMatrix);
-        queue.Push([projectionMatrix](IRenderPassCommands*) {
+        queue.Push([projectionMatrix]() {
             g_RenderThread_ProjectionMatrix.Set(projectionMatrix);
         });
     }
@@ -5564,7 +5537,7 @@ CON_COMMAND(mirv_sharedtex, "Shared texture control.")
             auto & pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
             {
                 auto & queue = pRenderPassCommands.BeginReliable;
-                queue.Push([](IRenderPassCommands*) {
+                queue.Push([]() {
                     g_SharedTextureHost.Reset();
                 });
             }
@@ -5605,7 +5578,7 @@ CON_COMMAND(mirv_reshade, "Control ReShade_advancedfx ReShade addon.")
                     auto & pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
                     {
                         auto & queue = pRenderPassCommands.BeginReliable;
-                        queue.Push([bDoEnableReShade](IRenderPassCommands*){
+                        queue.Push([bDoEnableReShade](){
                             g_bEnableReShade = bDoEnableReShade;
                         });
                     }
@@ -5629,7 +5602,7 @@ CON_COMMAND(mirv_reshade, "Control ReShade_advancedfx ReShade addon.")
                     auto & pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
                     {
                         auto & queue = pRenderPassCommands.BeginReliable;
-                        queue.Push([bNewVal](IRenderPassCommands*){
+                        queue.Push([bNewVal](){
                             g_bReShadeCompositeSmoke = bNewVal;
                         });
                     }                    

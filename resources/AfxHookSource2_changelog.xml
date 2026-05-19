@@ -6,6 +6,29 @@
 
 <release>
 <name>AfxHookSource2</name>
+<version>0.39.1</version>
+<time>2026-05-19T12:36Z</time>
+<changes>
+<change type="updated">Improved mirv_streams logic / context detection</change>
+<change type="fixed">Adjusted to CS2 update (1.41.6.2)</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
+<version>0.39.0</version>
+<time>2026-05-06T13:41Z</time>
+<changes>
+<change type="fixed">Fixed multi stream recordings crash</change>
+<change type="updated">mirv-script: updated boa to 1.0.0-dev (da570fd)</change>
+<change type="updated">mirv-script: reworked hooks to be mirv.events.xxxxx to handle conflicts, thanks to @wuXinnnn for initial ideas/discussions. See updated examples</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
 <version>0.38.9</version>
 <time>2026-04-21T23:46Z</time>
 <changes>
