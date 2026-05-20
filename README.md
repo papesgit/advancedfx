@@ -65,7 +65,7 @@ Thus the support we can provide is limited. We encourage you to read the Manual 
 
 ## Releated tools
 
-For a list of related tools see [related-tools.md](https://github.com/advancedfx/advancedfx/tree/main/related-tools.md)
+For a list of related tools see [related-tools.md](related-tools.md)
 
 ## Changelog
 
@@ -74,7 +74,7 @@ Further changelog entries can be found in the changelog XML files included in th
 
 ## Credits
 
-[CREDITS.md](https://github.com/advancedfx/advancedfx/tree/main/CREDITS.md)
+[CREDITS.md](CREDITS.md)
 
 ## License
 
@@ -82,5 +82,4 @@ This repository contains the parts of advancedfx project that are under MIT lice
 
 ## How to build
 
-[how_to_build.txt](https://raw.githubusercontent.com/advancedfx/advancedfx/main/how_to_build.txt)
-
+[BUILDING.md](BUILDING.md)
