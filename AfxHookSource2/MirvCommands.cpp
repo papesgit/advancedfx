@@ -6,11 +6,26 @@
 #include "SceneSystem.h"
 #include "SchemaSystem.h"
 
+#include <cmath>
+
 bool g_bHookedMirvCommands = false;
 
 bool g_bNoFlashEnabled = false;
 
+bool g_bMirvFlashMaxAlphaEnabled = false;
+float g_fNoFlashAmount = 0.0f;
+
 bool g_bEndOfMatchEnabled = true;
+
+static bool StringIsUnitIntervalFloat(char const * value) {
+	char * end = nullptr;
+	float parsedValue = strtof(value, &end);
+
+	return value != end
+		&& '\0' == *end
+		&& 0.0f <= parsedValue
+		&& parsedValue <= 1.0f;
+}
 
 MirvGlow g_MirvGlow;
 extern void deathMsgPlayers_PrintHelp_Console();
@@ -47,9 +62,15 @@ CON_COMMAND(mirv_endofmatch, "Disables end of match scene.")
 typedef void (__fastcall *g_Original_flashFunc_t)(u_char* param_1, u_char* param_2, float* param_3);
 g_Original_flashFunc_t g_Original_flashFunc = nullptr;
 
-void __fastcall new_flashFunc(u_char* param_1, u_char* param_2, float* param_3) {	
+void __fastcall new_flashFunc(u_char* param_1, u_char* param_2, float* param_3) {
 	if (g_bNoFlashEnabled) return;
-	else return g_Original_flashFunc(param_1, param_2, param_3);
+
+	if (g_bMirvFlashMaxAlphaEnabled && param_2) {
+		*(float*)(param_2 + g_clientDllOffsets.C_CSPlayerPawnBase.m_flFlashMaxAlpha)
+			= std::round(255 * (1.0f - g_fNoFlashAmount));
+	}
+
+	return g_Original_flashFunc(param_1, param_2, param_3);
 }
 
 void mirvNoFlash_Console(advancedfx::ICommandArgs* args) {
@@ -58,16 +79,31 @@ void mirvNoFlash_Console(advancedfx::ICommandArgs* args) {
 
 	if (2 == argc)
 	{
-		g_bNoFlashEnabled = 0 != atoi(args->ArgV(1));
+		const char* arg1 = args->ArgV(1);
+
+		if (StringIsUnitIntervalFloat(arg1) && !StringIsDigits(arg1)) {
+			g_bNoFlashEnabled = false;
+			g_bMirvFlashMaxAlphaEnabled = true;
+			g_fNoFlashAmount = atof(arg1);
+			return;
+		}
+		g_bNoFlashEnabled = 0 != atoi(arg1);
+		g_bMirvFlashMaxAlphaEnabled = false;
 		return;
 	}
 
 	advancedfx::Message(
 		"%s <0|1> - Enable (1) / disable (0) no flash.\n"
-		"Current value: %d\n"
-		, arg0, g_bNoFlashEnabled 
+		"%s <float> - Set no flash amount in range 0.0 to 1.0.\n"
+		"Current value: "
+		, arg0, arg0
 	);
-
+	if (g_bMirvFlashMaxAlphaEnabled) {
+		advancedfx::Message("%f (amount)\n", g_fNoFlashAmount);
+	}
+	else {
+		advancedfx::Message("%d\n", g_bNoFlashEnabled);
+	}
 }
 
 CON_COMMAND(mirv_noflash, "Disables flash overlay.")

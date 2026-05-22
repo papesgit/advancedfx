@@ -67,6 +67,10 @@ struct ClientDllOffsets_t {
 		ptrdiff_t m_pCameraServices = 0; // CPlayer_CameraServices*
 	} C_BasePlayerPawn;
 
+	struct C_CSPlayerPawnBase {
+		ptrdiff_t m_flFlashMaxAlpha = 0; // float32
+	} C_CSPlayerPawnBase;
+
 	struct CPlayer_CameraServices {
 		ptrdiff_t m_hViewEntity = 0; // CHandle< CBaseEntity >
 	} CPlayer_CameraServices;
