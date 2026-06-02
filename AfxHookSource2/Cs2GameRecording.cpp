@@ -231,6 +231,24 @@ static bool StringEndsWithCaseSensitive(const char* value, const char* suffix) {
 	return 0 == strcmp(value + valueLen - suffixLen, suffix);
 }
 
+static bool IsRecordableWeaponEntity(CEntityInstance* entity) {
+	if (!entity) return false;
+
+	const char* debugName = entity->GetDebugName();
+	if (debugName && StringBeginsWithCaseSensitive(debugName, "weapon_")) return true;
+
+	const char* clientClassName = entity->GetClientClassName();
+	if (clientClassName && 0 == strcmp(clientClassName, "C_PlantedC4")) return true;
+
+	unsigned char* sceneNode = nullptr;
+	const char* modelName = nullptr;
+	if (TryGetEntityModelBaseInfo(entity, sceneNode, modelName)) {
+		if (0 == strcmp(modelName, "weapons/models/defuser/defuser.vmdl")) return true;
+	}
+
+	return false;
+}
+
 static void CollectHudModelOwnersFromSceneNode(
 	unsigned char* node,
 	int depth,
@@ -455,6 +473,7 @@ struct Cs2SkeletonMetadata {
 struct Cs2RecordedEntity {
 	int Id = 0;
 	int OwnerId = -1;
+	std::string ClientClassName;
 	std::string ModelName;
 	bool Visible = true;
 	bool ViewModel = false;
@@ -873,6 +892,7 @@ private:
 		AppendU8(packet, entity.Projectile ? 1 : 0);
 		AppendU8(packet, entity.Visible ? 1 : 0);
 		AppendU8(packet, entity.ViewModel ? 1 : 0);
+		AppendString(packet, entity.ClientClassName);
 		AppendMatrix3x4(packet, entity.Transform);
 		AppendU8(packet, entity.HasBones ? 1 : 0);
 		AppendU32(packet, (uint32_t)entity.LocalBoneTransforms.size());
@@ -888,6 +908,7 @@ private:
 			+ sizeof(uint8_t) // Projectile
 			+ sizeof(uint8_t) // Visible
 			+ sizeof(uint8_t) // ViewModel
+			+ sizeof(uint16_t) + entity.ClientClassName.size()
 			+ 12 * sizeof(float) // Transform
 			+ sizeof(uint8_t) // HasBones
 			+ sizeof(uint32_t) // BoneCount
@@ -987,7 +1008,7 @@ private:
 		AppendU8(packet, 'F');
 		AppendU8(packet, 'X');
 		AppendU8(packet, 'L');
-		AppendU16(packet, 11);
+		AppendU16(packet, 12);
 		AppendU16(packet, packetType);
 		AppendU32(packet, sequence);
 	}
@@ -1370,7 +1391,7 @@ public:
 				const char* debugName = entity->GetDebugName();
 				if (samplePlayers && IsPlayerPawnForAgr(entity)) {
 					SampleEntity(entity, false, false, visibleThisFrame, frame.Entities);
-				} else if (sampleWeapons && debugName && StringBeginsWithCaseSensitive(debugName, "weapon_")) {
+				} else if (sampleWeapons && IsRecordableWeaponEntity(entity)) {
 					SampleEntity(entity, false, false, visibleThisFrame, frame.Entities);
 				} else if (sampleProjectiles && debugName && StringEndsWithCaseSensitive(debugName, "_projectile")) {
 					SampleEntity(entity, false, true, visibleThisFrame, frame.Entities);
@@ -1668,6 +1689,8 @@ private:
 
 		Cs2RecordedEntity sampledEntity;
 		sampledEntity.Id = id;
+		const char* clientClassName = entity ? entity->GetClientClassName() : nullptr;
+		sampledEntity.ClientClassName = clientClassName ? clientClassName : "";
 		sampledEntity.ModelName = baseModelName ? baseModelName : "";
 		sampledEntity.Visible = visible;
 		sampledEntity.ViewModel = viewModel;
@@ -3009,10 +3032,10 @@ CON_COMMAND(mirv_entityvis, "Debug entity render visibility fields") {
 			CEntityInstance* entity = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, i);
 			if (!entity) continue;
 			const char* debugName = entity->GetDebugName();
-			if (!debugName) continue;
 			if (weapons) {
-				if (!StringBeginsWithCaseSensitive(debugName, "weapon_")) continue;
+				if (!IsRecordableWeaponEntity(entity)) continue;
 			} else {
+				if (!debugName) continue;
 				if (!StringEndsWithCaseSensitive(debugName, "_projectile")) continue;
 			}
 
