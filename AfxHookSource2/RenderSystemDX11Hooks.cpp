@@ -40,12 +40,15 @@
 #include <map>
 #include <queue>
 #include <list>
+#include <vector>
 #include <mutex>
 #include <shared_mutex>
 #include <condition_variable>
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <string>
+#include <cstring>
 
 #include <dxgi.h>
 #include <dxgi1_4.h>
@@ -1240,6 +1243,29 @@ bool g_bDetectSmoke2 = false;
 bool g_bDetectedSmoke = false;
 ID3D11DepthStencilView* g_pSmokeDepthStencilView = nullptr;
 
+float g_SmokeVolumeAlpha = 1.0f;
+bool g_SmokeOverlayDraw = true;
+std::string g_CurrentPixelShaderName;
+ID3D11PixelShader* g_CurrentPixelShader = nullptr;
+
+struct SmokeOutputProducer
+{
+    ID3D11Resource* Resource = nullptr;
+    std::string ShaderName;
+};
+
+std::vector<SmokeOutputProducer> g_SmokeOutputProducers;
+
+struct SmokeBlendDescLess
+{
+    bool operator()(const D3D11_BLEND_DESC& lhs, const D3D11_BLEND_DESC& rhs) const
+    {
+        return std::memcmp(&lhs, &rhs, sizeof(D3D11_BLEND_DESC)) < 0;
+    }
+};
+
+std::map<D3D11_BLEND_DESC, ID3D11BlendState*, SmokeBlendDescLess> g_SmokeBlendStates;
+
 extern void ErrorBox(char const * messageText);
 
 /*
@@ -1531,6 +1557,241 @@ void STDMETHODCALLTYPE New_OMSetRenderTargets( ID3D11DeviceContext * This,
     g_Old_OMSetRenderTargets(This, NumViews, ppRenderTargetViews, pDepthStencilView);
 }
 
+static bool SmokeFeatureActive()
+{
+    return g_SmokeVolumeAlpha < 0.999f || !g_SmokeOverlayDraw;
+}
+
+static void SetSmokeVolumeAlpha(float value)
+{
+    if (value < 0.0f) value = 0.0f;
+    if (value > 1.0f) value = 1.0f;
+    g_SmokeVolumeAlpha = value;
+}
+
+static void SetSmokeOverlay(bool value)
+{
+    g_SmokeOverlayDraw = value;
+}
+
+static void ClearSmokeOutputProducers()
+{
+    for (auto& producer : g_SmokeOutputProducers) {
+        if (producer.Resource) producer.Resource->Release();
+    }
+    g_SmokeOutputProducers.clear();
+}
+
+static void ClearSmokeBlendStates()
+{
+    for (auto& entry : g_SmokeBlendStates) {
+        if (entry.second) entry.second->Release();
+    }
+    g_SmokeBlendStates.clear();
+}
+
+static bool GetShaderDebugName(ID3D11PixelShader* pPixelShader, std::string& outName)
+{
+    outName.clear();
+    char name[1024];
+    UINT size = sizeof(name) - 1;
+    if (
+        pPixelShader
+        && SUCCEEDED(pPixelShader->GetPrivateData(WKPDID_D3DDebugObjectName, &size, name))
+        && size < sizeof(name)
+    ) {
+        name[size] = '\0';
+        outName = name;
+        return true;
+    }
+    return false;
+}
+
+static bool CurrentRenderTargetIsMain(ID3D11DeviceContext* ctx)
+{
+    if (!ctx) return false;
+
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    if (!rtv) return false;
+
+    bool result = rtv == g_pCurrentRenderTargetView || (g_BeforeUiRT && rtv == g_BeforeUiRT);
+    rtv->Release();
+    return result;
+}
+
+static void RememberCurrentShaderOutput(ID3D11DeviceContext* ctx)
+{
+    if (g_SmokeVolumeAlpha >= 0.999f) return;
+    if (g_CurrentPixelShaderName.empty()) return;
+
+    ID3D11RenderTargetView* rtv = nullptr;
+    ctx->OMGetRenderTargets(1, &rtv, nullptr);
+    if (!rtv) return;
+
+    ID3D11Resource* resource = nullptr;
+    rtv->GetResource(&resource);
+    if (resource) {
+        for (auto& producer : g_SmokeOutputProducers) {
+            if (producer.Resource == resource) {
+                producer.ShaderName = g_CurrentPixelShaderName;
+                resource->Release();
+                rtv->Release();
+                return;
+            }
+        }
+
+        resource->AddRef();
+        g_SmokeOutputProducers.push_back({ resource, g_CurrentPixelShaderName });
+
+        if (g_SmokeOutputProducers.size() > 256) {
+            if (g_SmokeOutputProducers.front().Resource) {
+                g_SmokeOutputProducers.front().Resource->Release();
+            }
+            g_SmokeOutputProducers.erase(g_SmokeOutputProducers.begin());
+        }
+
+        resource->Release();
+    }
+
+    rtv->Release();
+}
+
+static const SmokeOutputProducer* FindSmokeProducer(ID3D11Resource* resource)
+{
+    if (!resource) return nullptr;
+
+    for (auto it = g_SmokeOutputProducers.rbegin(); it != g_SmokeOutputProducers.rend(); ++it) {
+        if (it->Resource == resource) return &(*it);
+    }
+
+    return nullptr;
+}
+
+static bool ShouldScaleSmokeVolumeDraw(ID3D11DeviceContext* ctx)
+{
+    if (g_SmokeVolumeAlpha >= 0.999f) return false;
+    if (g_CurrentPixelShaderName != "mboit_mixed_combine.vfx_ps") return false;
+
+    ID3D11ShaderResourceView* srvs[16] = {};
+    ctx->PSGetShaderResources(0, 16, srvs);
+
+    bool result = false;
+    for (UINT i = 0; i < 16; ++i) {
+        if (!srvs[i]) continue;
+
+        ID3D11Resource* resource = nullptr;
+        srvs[i]->GetResource(&resource);
+
+        const SmokeOutputProducer* producer = FindSmokeProducer(resource);
+        if (producer && producer->ShaderName == "smoke_volume_mask.vfx_ps") {
+            result = true;
+        }
+
+        if (resource) resource->Release();
+        srvs[i]->Release();
+    }
+
+    return result;
+}
+
+static ID3D11BlendState* GetSmokeAlphaBlendState(ID3D11DeviceContext* ctx, ID3D11BlendState* original)
+{
+    D3D11_BLEND_DESC desc = {};
+
+    if (original) {
+        original->GetDesc(&desc);
+    }
+    else {
+        desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    }
+
+    auto& rt = desc.RenderTarget[0];
+    rt.BlendEnable = TRUE;
+    rt.SrcBlend = D3D11_BLEND_BLEND_FACTOR;
+    rt.DestBlend = D3D11_BLEND_ONE;
+    rt.BlendOp = D3D11_BLEND_OP_ADD;
+    rt.SrcBlendAlpha = D3D11_BLEND_BLEND_FACTOR;
+    rt.DestBlendAlpha = D3D11_BLEND_ONE;
+    rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+
+    auto cached = g_SmokeBlendStates.find(desc);
+    if (cached != g_SmokeBlendStates.end()) {
+        if (cached->second) cached->second->AddRef();
+        return cached->second;
+    }
+
+    ID3D11Device* device = nullptr;
+    ctx->GetDevice(&device);
+    if (!device) return original;
+
+    ID3D11BlendState* state = nullptr;
+    HRESULT hr = device->CreateBlendState(&desc, &state);
+    device->Release();
+
+    if (FAILED(hr) || !state) return original;
+
+    state->AddRef();
+    g_SmokeBlendStates.emplace(desc, state);
+    return state;
+}
+
+struct SmokeAlphaOverride
+{
+    bool Active = false;
+    ID3D11BlendState* OriginalBlend = nullptr;
+    FLOAT OriginalFactor[4] = {};
+    UINT OriginalMask = 0xffffffff;
+    ID3D11BlendState* TempBlend = nullptr;
+};
+
+static void BeginSmokeAlphaDraw(ID3D11DeviceContext* ctx, SmokeAlphaOverride& state)
+{
+    if (!ShouldScaleSmokeVolumeDraw(ctx)) return;
+
+    ctx->OMGetBlendState(&state.OriginalBlend, state.OriginalFactor, &state.OriginalMask);
+
+    FLOAT factor[4] = {
+        g_SmokeVolumeAlpha,
+        g_SmokeVolumeAlpha,
+        g_SmokeVolumeAlpha,
+        g_SmokeVolumeAlpha
+    };
+
+    state.TempBlend = GetSmokeAlphaBlendState(ctx, state.OriginalBlend);
+    ctx->OMSetBlendState(state.TempBlend, factor, state.OriginalMask);
+    state.Active = true;
+}
+
+static void EndSmokeAlphaDraw(ID3D11DeviceContext* ctx, SmokeAlphaOverride& state)
+{
+    if (!state.Active) return;
+
+    ctx->OMSetBlendState(state.OriginalBlend, state.OriginalFactor, state.OriginalMask);
+
+    if (state.OriginalBlend) state.OriginalBlend->Release();
+    if (state.TempBlend && state.TempBlend != state.OriginalBlend) state.TempBlend->Release();
+
+    state = {};
+}
+
+static bool ShouldBlockSmokeOverlayDraw(ID3D11DeviceContext* ctx)
+{
+    if (g_SmokeOverlayDraw) return false;
+    if (g_CurrentPixelShaderName != "overlay_smoke.vfx_ps") return false;
+
+    return CurrentRenderTargetIsMain(ctx);
+}
+
+static bool ShouldHandleSmokeDraw(ID3D11DeviceContext* ctx)
+{
+    return SmokeFeatureActive()
+        && ctx
+        && ctx->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE
+        && g_RenderCommands.CurrentThreadIsRenderThread()
+        && !g_bInOwnDraw;
+}
+
 
 class IRenderThreadCallback abstract {
 public:
@@ -1776,9 +2037,110 @@ void STDMETHODCALLTYPE New_PSSetShader(ID3D11DeviceContext* This,
                 }
             }
         }
+
+        if (SmokeFeatureActive()) {
+            if (GetShaderDebugName(pPixelShader, g_CurrentPixelShaderName)) {
+                g_CurrentPixelShader = pPixelShader;
+            }
+            else {
+                g_CurrentPixelShaderName.clear();
+                g_CurrentPixelShader = nullptr;
+            }
+        }
     }
 
     g_Old_PSSetShader(This, pPixelShader, ppClassInstances, NumClassInstances);
+}
+
+typedef void (STDMETHODCALLTYPE *DrawIndexed_t)(ID3D11DeviceContext* This,
+    _In_ UINT IndexCount,
+    _In_ UINT StartIndexLocation,
+    _In_ INT BaseVertexLocation);
+
+typedef void (STDMETHODCALLTYPE *Draw_t)(ID3D11DeviceContext* This,
+    _In_ UINT VertexCount,
+    _In_ UINT StartVertexLocation);
+
+typedef void (STDMETHODCALLTYPE *DrawIndexedInstanced_t)(ID3D11DeviceContext* This,
+    _In_ UINT IndexCountPerInstance,
+    _In_ UINT InstanceCount,
+    _In_ UINT StartIndexLocation,
+    _In_ INT BaseVertexLocation,
+    _In_ UINT StartInstanceLocation);
+
+typedef void (STDMETHODCALLTYPE *DrawInstanced_t)(ID3D11DeviceContext* This,
+    _In_ UINT VertexCountPerInstance,
+    _In_ UINT InstanceCount,
+    _In_ UINT StartVertexLocation,
+    _In_ UINT StartInstanceLocation);
+
+DrawIndexed_t g_Old_DrawIndexed = nullptr;
+Draw_t g_Old_Draw = nullptr;
+DrawIndexedInstanced_t g_Old_DrawIndexedInstanced = nullptr;
+DrawInstanced_t g_Old_DrawInstanced = nullptr;
+
+void STDMETHODCALLTYPE New_DrawIndexed(ID3D11DeviceContext* This, UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
+{
+    if (!ShouldHandleSmokeDraw(This)) {
+        g_Old_DrawIndexed(This, IndexCount, StartIndexLocation, BaseVertexLocation);
+        return;
+    }
+
+    if (ShouldBlockSmokeOverlayDraw(This)) return;
+
+    SmokeAlphaOverride smokeAlpha;
+    BeginSmokeAlphaDraw(This, smokeAlpha);
+    g_Old_DrawIndexed(This, IndexCount, StartIndexLocation, BaseVertexLocation);
+    EndSmokeAlphaDraw(This, smokeAlpha);
+    RememberCurrentShaderOutput(This);
+}
+
+void STDMETHODCALLTYPE New_Draw(ID3D11DeviceContext* This, UINT VertexCount, UINT StartVertexLocation)
+{
+    if (!ShouldHandleSmokeDraw(This)) {
+        g_Old_Draw(This, VertexCount, StartVertexLocation);
+        return;
+    }
+
+    if (ShouldBlockSmokeOverlayDraw(This)) return;
+
+    SmokeAlphaOverride smokeAlpha;
+    BeginSmokeAlphaDraw(This, smokeAlpha);
+    g_Old_Draw(This, VertexCount, StartVertexLocation);
+    EndSmokeAlphaDraw(This, smokeAlpha);
+    RememberCurrentShaderOutput(This);
+}
+
+void STDMETHODCALLTYPE New_DrawIndexedInstanced(ID3D11DeviceContext* This, UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation, UINT StartInstanceLocation)
+{
+    if (!ShouldHandleSmokeDraw(This)) {
+        g_Old_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
+        return;
+    }
+
+    if (ShouldBlockSmokeOverlayDraw(This)) return;
+
+    SmokeAlphaOverride smokeAlpha;
+    BeginSmokeAlphaDraw(This, smokeAlpha);
+    g_Old_DrawIndexedInstanced(This, IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
+    EndSmokeAlphaDraw(This, smokeAlpha);
+    RememberCurrentShaderOutput(This);
+}
+
+void STDMETHODCALLTYPE New_DrawInstanced(ID3D11DeviceContext* This, UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
+{
+    if (!ShouldHandleSmokeDraw(This)) {
+        g_Old_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+        return;
+    }
+
+    if (ShouldBlockSmokeOverlayDraw(This)) return;
+
+    SmokeAlphaOverride smokeAlpha;
+    BeginSmokeAlphaDraw(This, smokeAlpha);
+    g_Old_DrawInstanced(This, VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+    EndSmokeAlphaDraw(This, smokeAlpha);
+    RememberCurrentShaderOutput(This);
 }
 
 void Hook_Context(ID3D11DeviceContext * pDeviceContext) {
@@ -1792,22 +2154,36 @@ void Hook_Context(ID3D11DeviceContext * pDeviceContext) {
     if(last_vtable) {
         //DetourDetach(&(PVOID&)g_Old_PSSetShaderResources, New_PSSetShaderResources);
         DetourDetach(&(PVOID&)g_Old_PSSetShader, New_PSSetShader);
+        DetourDetach(&(PVOID&)g_Old_DrawIndexed, New_DrawIndexed);
+        DetourDetach(&(PVOID&)g_Old_Draw, New_Draw);
+        DetourDetach(&(PVOID&)g_Old_DrawIndexedInstanced, New_DrawIndexedInstanced);
+        DetourDetach(&(PVOID&)g_Old_DrawInstanced, New_DrawInstanced);
         DetourDetach(&(PVOID&)g_Old_OMSetRenderTargets, New_OMSetRenderTargets);
         DetourDetach(&(PVOID&)g_Old_ClearDepthStencilView, New_ClearDepthStencilView);
         //DetourDetach(&(PVOID&)g_Old_ResolveSubresource, New_ResolveSubresource);
         if(NO_ERROR != DetourTransactionCommit()) {
             ErrorBox("Failed detaching on ID1D11RenderContext.");
         }
+        ClearSmokeOutputProducers();
+        ClearSmokeBlendStates();
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
     }
     //g_Old_PSSetShaderResources = (PSSetShaderResources_t)vtable[8];
     g_Old_PSSetShader = (PSSetShader_t)vtable[9];
+    g_Old_DrawIndexed = (DrawIndexed_t)vtable[12];
+    g_Old_Draw = (Draw_t)vtable[13];
+    g_Old_DrawIndexedInstanced = (DrawIndexedInstanced_t)vtable[20];
+    g_Old_DrawInstanced = (DrawInstanced_t)vtable[21];
     g_Old_OMSetRenderTargets = (OMSetRenderTargets_t)vtable[33];
     g_Old_ClearDepthStencilView = (ClearDepthStencilView_t)vtable[53];
     //g_Old_ResolveSubresource = (ResolveSubresource_t)vtable[57];
     //DetourAttach(&(PVOID&)g_Old_PSSetShaderResources, New_PSSetShaderResources);
     DetourAttach(&(PVOID&)g_Old_PSSetShader, New_PSSetShader);
+    DetourAttach(&(PVOID&)g_Old_DrawIndexed, New_DrawIndexed);
+    DetourAttach(&(PVOID&)g_Old_Draw, New_Draw);
+    DetourAttach(&(PVOID&)g_Old_DrawIndexedInstanced, New_DrawIndexedInstanced);
+    DetourAttach(&(PVOID&)g_Old_DrawInstanced, New_DrawInstanced);
     DetourAttach(&(PVOID&)g_Old_OMSetRenderTargets, New_OMSetRenderTargets);
     DetourAttach(&(PVOID&)g_Old_ClearDepthStencilView, New_ClearDepthStencilView);
     //DetourAttach(&(PVOID&)g_Old_ResolveSubresource, New_ResolveSubresource);
@@ -1917,6 +2293,12 @@ void After_Present() {
 	g_ReShadeAdvancedfx.ResetHasRendered();
 
     g_bInOwnDraw = false;
+
+    if (!SmokeFeatureActive()) {
+        ClearSmokeOutputProducers();
+        g_CurrentPixelShaderName.clear();
+        g_CurrentPixelShader = nullptr;
+    }
 
     if(g_BeforeUiRT) g_BeforeUiRT->Release();
     g_BeforeUiRT = nullptr;
@@ -4525,6 +4907,58 @@ CON_COMMAND(mirv_streams, "Access to streams system.")
 
 	advancedfx::Message(
 		"mirv_streams settings [...] - Recording settings.\n"
+    );
+}
+
+CON_COMMAND(mirv_smoke, "CS2 smoke rendering control.")
+{
+    int argc = args->ArgC();
+    const char* cmd0 = args->ArgV(0);
+
+    if (2 <= argc) {
+        const char* cmd1 = args->ArgV(1);
+
+        if (0 == _stricmp(cmd1, "volumeAlpha")) {
+            if (3 <= argc) {
+                float value = static_cast<float>(atof(args->ArgV(2)));
+                SetSmokeVolumeAlpha(value);
+                advancedfx::Message("%s volumeAlpha set to %.3f.\n", cmd0, g_SmokeVolumeAlpha);
+                return;
+            }
+
+            advancedfx::Message(
+                "%s volumeAlpha <0..1> - Scale visible volumetric smoke body alpha.\n"
+                "Current value: %.3f\n",
+                cmd0,
+                g_SmokeVolumeAlpha
+            );
+            return;
+        }
+        else if (0 == _stricmp(cmd1, "overlay")) {
+            if (3 <= argc) {
+                SetSmokeOverlay(0 != atoi(args->ArgV(2)));
+                advancedfx::Message("%s overlay set to %d.\n", cmd0, g_SmokeOverlayDraw ? 1 : 0);
+                return;
+            }
+
+            advancedfx::Message(
+                "%s overlay <0|1> - Hide/show fullscreen inside-smoke overlay.\n"
+                "Current value: %d\n",
+                cmd0,
+                g_SmokeOverlayDraw ? 1 : 0
+            );
+            return;
+        }
+    }
+
+    advancedfx::Message(
+        "%s volumeAlpha <0..1> - Scale visible volumetric smoke body alpha.\n"
+        "%s overlay <0|1> - Hide/show fullscreen inside-smoke overlay.\n"
+        "Current values: volumeAlpha %.3f overlay %d\n",
+        cmd0,
+        cmd0,
+        g_SmokeVolumeAlpha,
+        g_SmokeOverlayDraw ? 1 : 0
     );
 }
 
