@@ -7,6 +7,7 @@
 
 #include "ClientEntitySystem.h"
 #include "Globals.h"
+#include "ObsSpectatorBindings.h"
 #include "SchemaSystem.h"
 #include "WrpConsole.h"
 
@@ -473,6 +474,7 @@ struct Cs2SkeletonMetadata {
 struct Cs2RecordedEntity {
 	int Id = 0;
 	int OwnerId = -1;
+	int ObserverSlot = -1;
 	std::string ClientClassName;
 	std::string ModelName;
 	bool Visible = true;
@@ -889,6 +891,7 @@ private:
 	static void AppendFrameEntity(std::vector<unsigned char>& packet, const Cs2RecordedEntity& entity) {
 		AppendI32(packet, entity.Id);
 		AppendI32(packet, entity.OwnerId);
+		AppendI32(packet, entity.ObserverSlot);
 		AppendU8(packet, entity.Projectile ? 1 : 0);
 		AppendU8(packet, entity.Visible ? 1 : 0);
 		AppendU8(packet, entity.ViewModel ? 1 : 0);
@@ -905,6 +908,7 @@ private:
 	static size_t GetFrameEntityPacketSize(const Cs2RecordedEntity& entity) {
 		return sizeof(int32_t) // Id
 			+ sizeof(int32_t) // OwnerId
+			+ sizeof(int32_t) // ObserverSlot
 			+ sizeof(uint8_t) // Projectile
 			+ sizeof(uint8_t) // Visible
 			+ sizeof(uint8_t) // ViewModel
@@ -1258,6 +1262,9 @@ public:
 
 	void SetLiveRecordPlayers(bool value) {
 		m_LiveRecordPlayers = value;
+		if (value) {
+			RefreshSpectatorBindings();
+		}
 	}
 
 	bool GetLiveRecordWeapons() const {
@@ -1691,6 +1698,7 @@ private:
 		sampledEntity.Id = id;
 		const char* clientClassName = entity ? entity->GetClientClassName() : nullptr;
 		sampledEntity.ClientClassName = clientClassName ? clientClassName : "";
+		sampledEntity.ObserverSlot = ResolveObserverSlot(entity);
 		sampledEntity.ModelName = baseModelName ? baseModelName : "";
 		sampledEntity.Visible = visible;
 		sampledEntity.ViewModel = viewModel;
@@ -1779,6 +1787,22 @@ private:
 
 		outEntities.push_back(sampledEntity);
 		return true;
+	}
+
+	int ResolveObserverSlot(CEntityInstance* entity) const {
+		if (!entity || !entity->IsPlayerPawn()) return -1;
+
+		auto controllerHandle = entity->GetPlayerControllerHandle();
+		if (!controllerHandle.IsValid()) return -1;
+
+		const int controllerIndex = controllerHandle.GetEntryIndex();
+		for (int slot = 0; slot < 10; ++slot) {
+			if (g_SpectatorBindings[slot] == controllerIndex) {
+				return slot;
+			}
+		}
+
+		return -1;
 	}
 };
 
