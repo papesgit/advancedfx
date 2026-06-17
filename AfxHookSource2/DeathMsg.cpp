@@ -18,7 +18,8 @@
 #include "Globals.h"
 #include "ClientEntitySystem.h"
 #include "SchemaSystem.h"
-#include "MirvColors.h" 
+#include "MirvColors.h"
+#include "MirvTime.h"
 #include "ObsWebSocketServer.h"
 #include "ObsSpectatorBindings.h"
 
@@ -1143,6 +1144,7 @@ void __fastcall handleDeathnotice(u_char* hudDeathNotice, SOURCESDK::CS2::IGameE
 		const char* weapon = myWrapper.GetString(myWrapper.hashString("weapon"));
 		json payload{
 			{"type", "killfeed_event"},
+			{"game_time", g_MirvTime.curtime_get()},
 			{"attacker", makePlayerPayload(uidAttacker)},
 			{"victim", makePlayerPayload(uidVictim)},
 			{"assister", makePlayerPayload(uidAssister)},

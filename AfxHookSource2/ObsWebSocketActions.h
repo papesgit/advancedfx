@@ -166,6 +166,7 @@ void ObsWebSocket_QueueFreecamHold(bool hasMode, FreecamHoldMode mode);
 void ObsWebSocket_QueueFreecamConfig(const FreecamConfigDelta& delta, const std::string& message);
 void ObsWebSocket_QueueFreecamHandoff(const FreecamHandoffPayload& payload);
 void ObsWebSocket_QueueAttachCamera(const AttachmentCameraState& state);
+void ObsWebSocket_QueueSpectateSlot(int observerSlot);
 void ObsWebSocket_QueueRefreshBinds();
 void ObsWebSocket_QueueSetAltSpectatorBindings(bool enabled);
 void ObsWebSocket_QueueExecCommand(const std::string& cmd);

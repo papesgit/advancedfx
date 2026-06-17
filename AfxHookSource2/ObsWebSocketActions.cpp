@@ -28,6 +28,7 @@ namespace {
 		FreecamConfig,
 		FreecamHandoff,
 		AttachCamera,
+		SpectateSlot,
 		RefreshBinds,
 		SpectatorBindingsMode,
 		ExecCommand,
@@ -40,6 +41,7 @@ namespace {
 		FreecamConfigDelta configDelta;
 		FreecamHandoffPayload handoff;
 		AttachmentCameraState attachment;
+		int observerSlot = -1;
 		bool hasHoldMode = false;
 		FreecamHoldMode holdMode = FreecamHoldMode::Camera;
 		bool useAltBindings = false;
@@ -177,6 +179,14 @@ void ObsWebSocket_QueueAttachCamera(const AttachmentCameraState& state) {
 	PendingAction action;
 	action.type = ActionType::AttachCamera;
 	action.attachment = state;
+	std::lock_guard<std::mutex> lock(g_ActionMutex);
+	g_ActionQueue.push_back(std::move(action));
+}
+
+void ObsWebSocket_QueueSpectateSlot(int observerSlot) {
+	PendingAction action;
+	action.type = ActionType::SpectateSlot;
+	action.observerSlot = observerSlot;
 	std::lock_guard<std::mutex> lock(g_ActionMutex);
 	g_ActionQueue.push_back(std::move(action));
 }
@@ -328,6 +338,18 @@ void ObsWebSocket_ProcessActions() {
 			if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
 			if (g_pEngineToClient) {
 				std::string cmd = "spec_mode 2; spec_player " + std::to_string(action.attachment.controllerIndex);
+				g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
+			}
+			break;
+		case ActionType::SpectateSlot:
+			if (action.observerSlot < 0 || action.observerSlot > 9) break;
+			if (g_SpectatorBindings[action.observerSlot] == -1) break;
+			if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
+			if (g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
+			g_AttachmentCamera.active = false;
+			g_AttachmentCameraHadError = false;
+			if (g_pEngineToClient) {
+				std::string cmd = "spec_mode 2; spec_player " + std::to_string(g_SpectatorBindings[action.observerSlot]);
 				g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
 			}
 			break;
