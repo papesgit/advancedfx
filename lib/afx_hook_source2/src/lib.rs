@@ -75,8 +75,8 @@ use boa_runtime::{
 
 use futures::SinkExt;
 use futures::StreamExt;
-use async_std::net::TcpStream;
 
+use async_net::TcpStream;
 use async_tungstenite::tungstenite::Bytes;
 use async_tungstenite::tungstenite::protocol::Message;
 use async_tungstenite::WebSocketSender;
@@ -89,6 +89,8 @@ use boa_engine::context::time::JsInstant;
 use futures_lite::future;
 
 type AfxEntityRef = c_void;
+
+type AfxCBufferString = c_void;
 
 unsafe extern "C" {
     fn afx_hook_source2_message(s: *const c_char);
@@ -158,6 +160,8 @@ unsafe extern "C" {
     fn afx_hook_source2_is_demo_paused() -> bool;
 
     fn afx_hook_source2_get_demo_file_path() -> *const c_char;
+    
+    fn afx_hook_source2_get_game_directory() -> *const c_char;
 
     fn afx_hook_source2_get_main_campath() -> * mut advancedfx::campath::CampathType;
 
@@ -176,6 +180,14 @@ unsafe extern "C" {
     fn afx_hook_source2_get_cur_time(outCurTime: & mut f64);
 
     fn afx_hook_source2_get_entity_ref_attachment(p_ref: * mut AfxEntityRef, attachment_name: *const c_char, pos: * mut advancedfx::math::Vector3, angs: * mut advancedfx::math::Quaternion) -> bool;
+
+    //
+
+    fn afx_hook_source2_fs_relative_path_to_full_path(p_file_name: *const c_char) -> * mut AfxCBufferString;
+
+    fn afx_hook_source2_fs_cbufferstring_get(p_cbufferstring: * mut AfxCBufferString) -> *const c_char;
+
+    fn afx_hook_source2_fs_cbufferstring_delete(p_cbufferstring: * mut AfxCBufferString);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1170,6 +1182,20 @@ fn afx_release_entity_ref( p_ref: * mut AfxEntityRef) {
     }
 }
 
+fn afx_relative_path_to_full_path(file_name: String) -> Option<String> {
+    let cstr_file_name = std::ffi::CString::new(file_name).unwrap();
+    let full_path: * mut AfxCBufferString = unsafe { afx_hook_source2_fs_relative_path_to_full_path(cstr_file_name.as_ptr()) };
+
+    let mut str_full_path: Option<String> = None;
+
+    if !full_path.is_null() {
+        str_full_path = Some(unsafe { CStr::from_ptr( afx_hook_source2_fs_cbufferstring_get(full_path) ) }.to_str().unwrap().to_string());
+        unsafe { afx_hook_source2_fs_cbufferstring_delete(full_path); }
+    }
+    
+    str_full_path
+}
+
 fn afx_enable_on_add_entity(value: bool) {
     unsafe {
         afx_hook_source2_enable_on_add_entity(value);        
@@ -1393,7 +1419,16 @@ fn afx_get_demo_file_path() -> Option<String> {
     return Some(unsafe { CStr::from_ptr(result) }.to_str().unwrap().to_string());
 }
 
-
+fn afx_get_game_directory() -> Option<String> {
+    let result: *const c_char;
+    unsafe {
+        result = afx_hook_source2_get_game_directory();
+    }
+    if result.is_null() {
+         return None;
+    }
+    return Some(unsafe { CStr::from_ptr(result) }.to_str().unwrap().to_string());
+}
 
 #[derive(Debug, Trace, Finalize)]
 pub struct AfxLogger;
@@ -2307,7 +2342,7 @@ async fn mirv_connect_async(this: &JsValue, args: &[JsValue], context: &RefCell<
     if 0 < args.len() {
         if let Some(js_string) = args[0].as_string() {
             let connect_addr = js_string.to_std_string_escaped();
-            let result = async_tungstenite::async_std::connect_async(connect_addr).await;
+            let result = async_tungstenite::smol::connect_async(connect_addr).await;
             match result {
                 Ok((ws,_)) => {
                     let (ws_write,ws_read) = ws.split();
@@ -3041,6 +3076,21 @@ fn mirv_get_demo_file_path(_this: &JsValue, _args: &[JsValue], _context: &mut Co
     return Ok(JsValue::null());
 }
 
+fn mirv_get_game_directory(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    if let Some(str) = afx_get_game_directory() {
+        return Ok(js_value!(js_string!(str)));
+    }
+    return Ok(JsValue::null());
+}
+
+fn mirv_resolve_game_path(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let (file_name, _): (String, &[boa_engine::JsValue]) =boa_engine::interop::TryFromJsArgument::try_from_js_argument( this, args, context )?;
+
+    let full_path = afx_relative_path_to_full_path(file_name);
+
+    Ok(full_path.map_or_else(||JsValue::null(),|s|JsValue::from(js_string!(s))))
+}
+
 fn mirv_get_main_campath(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     if let Some(object) = this.as_object() {
         if let Some(mut mirv) = object.downcast_mut::<MirvStruct>() {
@@ -3098,9 +3148,11 @@ use boa_runtime::interval;
 
 impl<'a> AfxHookSource2Rs<'a> {
     pub fn new() -> Self {
+        let module_loader = Rc::new(AfxSimpleModuleLoader::new());
+
         let mut context = ContextBuilder::default()
             .job_executor(Rc::new(AfxSimpleJobExecutor::new()))
-            .module_loader(Rc::new(AfxSimpleModuleLoader::new()))
+            .module_loader(module_loader.clone())
             .build()
             .unwrap();
 
@@ -3109,7 +3161,7 @@ impl<'a> AfxHookSource2Rs<'a> {
             .register_global_property(Console::NAME, console, Attribute::all())
             .expect("the console builtin shouldn't exist");
 
-        interval::register(&mut context).unwrap();
+        interval::register(&mut context).unwrap();     
 
         advancedfx::js::events::register_global_classes(&mut context);
 
@@ -3123,6 +3175,8 @@ impl<'a> AfxHookSource2Rs<'a> {
         advancedfx::js::campath::Campath::add_to_context(&mut context);
 
         advancedfx::js::cvar::CVar::add_to_context(&mut context);
+
+        advancedfx::js::fs::register(&mut context).expect("could not register fs");
 
         ConCommandsArgs::add_to_context(&mut context);
         ConCommandBox::add_to_context(&mut context);
@@ -3218,6 +3272,16 @@ impl<'a> AfxHookSource2Rs<'a> {
             0,
         )
         .function(
+            NativeFunction::from_fn_ptr(mirv_get_game_directory),
+            js_string!("getGameDirectory"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(mirv_resolve_game_path),
+            js_string!("resolveGamePath"),
+            0,
+        )
+        .function(
             NativeFunction::from_fn_ptr(mirv_load),
             js_string!("load"),
             0,
@@ -3305,7 +3369,6 @@ impl<'a> AfxHookSource2Rs<'a> {
             0,
         )
         .property(js_string!("events"), events_object, Attribute::all())
-
         .build();
 
         context
