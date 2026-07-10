@@ -212,7 +212,7 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
       {
             MemRange result = FindPatternString(
                   textRange,
-                  "48 89 5C 24 20 48 89 4C 24 08 55 57 41 54 41 55 41 56 48 8D AC 24 10 E0 FF FF B8 F0 20 00 00 E8 ?? ?? ?? ?? 48 2B E0 44 8B 15 ?? ?? ?? ??"
+                  "48 89 54 24 10 48 89 4C 24 08 55 53 56 57 41 56 41 57 48 8D AC 24 18 DC FF FF B8 E8 24 00 00 E8 ?? ?? ?? ?? 48 2B E0 44 8B 15 ?? ?? ?? ??"
             );
 
             if (!result.IsEmpty()) {
@@ -232,7 +232,7 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
       {
             MemRange result = FindPatternString(
                   textRange,
-                  "48 8B C4 48 89 58 18 48 89 68 20 56 57 41 54 48 81 EC A0 00 00 00"
+                  "48 8B C4 48 89 58 18 55 56 57 41 54 41 56 48 8D 68 B9 48 81 EC B0 00 00 00"
             );
 
             if (!result.IsEmpty()) {
@@ -301,12 +301,12 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
       {
             MemRange result = FindPatternString(
                   textRange,
-                  "48 8B 0D ?? ?? ?? ?? 48 8D 54 24 50 4C 8B CE 4C 89 64 24 28 4D 8B C5 48 89 5C 24 20 E8 ?? ?? ?? ?? EB ??"
+                  "48 8B 0D ?? ?? ?? ?? 4C 8D 47 78 4C 8D 8F 84 00 00 00 48 8D 95 D0 00 00 00 0F 10 00 0F 11 85 D0 00 00 00 F3 0F 10 48 0C 48 8D 45 00 48 89 44 24 28 48 8D 45 B0 0F 2F CE 48 89 44 24 20 0F 97 85 F8 00 00 00 E8 ?? ?? ?? ??"
             );
 
             if (!result.IsEmpty()) {
                   const AfxAddr movContextInsn = result.Start + 0; // 48 8B 0D rel32
-                  const AfxAddr callInsn = result.Start + 28;      // E8 rel32
+                  const AfxAddr callInsn = result.Start + 68;      // E8 rel32
 
                   const AfxAddr traceContextPtr = DecodeRipRel32Target(movContextInsn, 3, 7);
                   const AfxAddr callTarget = DecodeRipRel32Target(callInsn, 1, 5);

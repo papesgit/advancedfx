@@ -449,7 +449,35 @@ void Hook_ClientEntitySystem3(HMODULE clientDll) {
 		org_LookupAttachment = (org_LookupAttachment_t)(startAddr + 5 + *(int32_t*)(startAddr + 1));
 		org_GetAttachment = (org_GetAttachment_t)(startAddr + 23 + 5 + *(int32_t*)(startAddr + 23 + 1));
 	} else ErrorBox(MkErrStr(__FILE__, __LINE__));
-	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 48 8B CF 85 C0 78 ?? 44 8B C0 48 8D 54 24 30 E8 ?? ?? ?? ??")) {
+
+    // Bone lookup / transform pair:
+    // Find a callsite that resolves the "pelvis" bone name, 
+    // then if the returned index is valid, calls GetBone with (entity, outTransform, boneIndex).
+    //
+    //                          LAB_180c11247                                   XREF[1]:     180c1123e(j)  
+    //    180c11247 48 8d 15        LEA        RDX,[s_pelvis_181b28318]                         = "pelvis"
+    //              ca 70 f1 00
+    //    180c1124e e8 7d e2        CALL       FUN_18090f4d0                                    undefined FUN_18090f4d0()
+    //              cf ff
+    //    180c11253 48 8b cf        MOV        RCX,RDI
+    //    180c11256 85 c0           TEST       EAX,EAX
+    //    180c11258 78 e6           JS         LAB_180c11240
+    //    180c1125a 44 8b c0        MOV        R8D,EAX
+    //    180c1125d 48 8d 54        LEA        RDX=>local_28,[RSP + 0x20]
+    //              24 20
+    //    180c11262 e8 b9 b0        CALL       FUN_1808fc320                                    undefined FUN_1808fc320()
+    //              ce ff
+    //
+    //   cVar2 = (**(code **)(*param_1 + 0x4d0))();
+    //   if (cVar2 == '\0') {
+    //     iVar3 = FUN_18090f4d0(param_1,"pelvis");
+    //     if (-1 < iVar3) {
+    //       puVar4 = (undefined8 *)FUN_1808fc320(param_1,local_28,iVar3);
+    //       goto LAB_180c11267;
+    //     }
+    //   }
+    
+	if (auto startAddr = getAddress(clientDll, "E8 ?? ?? ?? ?? 48 8B CF 85 C0 78 ?? 44 8B C0 48 8D 54 24 ?? E8 ?? ?? ?? ??")) {
 		org_LookupBone = (org_LookupBone_t)(startAddr + 5 + *(int32_t*)(startAddr + 1));
 		org_GetBone = (org_GetBone_t)(startAddr + 20 + 5 + *(int32_t*)(startAddr + 20 + 1));
 	} else ErrorBox(MkErrStr(__FILE__, __LINE__));

@@ -65,7 +65,7 @@ static CEntityInstance * ResolveEntityFromHandle(SOURCESDK::CS2::CBaseHandle han
 // Sizes/offsets come from native callsites and result readers:
 // - TraceRayBlob:   line type byte read/write at +0x28.
 // - TraceFilterBlob: arg5 filter struct initialized before TraceShape call.
-// - TraceResultBlob: fields read after call (normal +0x90, fraction +0xAC, startsolid +0xB7).
+// - TraceResultBlob: fields read after call (normal +0x90, fraction +0xAC, startsolid +0xBB).
 struct TraceRayBlob {
     uint8_t Data[0x29];
 };
@@ -135,7 +135,7 @@ bool TraceLine(
 
     // Result offsets from native trace result struct reads.
     const float fraction = *(float *)&traceResult.Data[0xAC];
-    const bool startSolid = 0 != traceResult.Data[0xB7];
+    const bool startSolid = 0 != traceResult.Data[0xBB];
     const bool hit = fraction < 1.0f || startSolid;
     const Vec3 normal = {
         *(float *)&traceResult.Data[0x90],
@@ -199,7 +199,7 @@ bool TraceHull(
     );
 
     const float fraction = *(float *)&traceResult.Data[0xAC];
-    const bool startSolid = 0 != traceResult.Data[0xB7];
+    const bool startSolid = 0 != traceResult.Data[0xBB];
     const bool hit = fraction < 1.0f || startSolid;
     const Vec3 normal = {
         *(float *)&traceResult.Data[0x90],
@@ -264,7 +264,7 @@ bool TraceCollideable(
     );
 
     const float fraction = *(float *)&traceResult.Data[0xAC];
-    const bool startSolid = 0 != traceResult.Data[0xB7];
+    const bool startSolid = 0 != traceResult.Data[0xBB];
     const bool hit = fraction < 1.0f || startSolid;
     const Vec3 normal = {
         *(float *)&traceResult.Data[0x90],
