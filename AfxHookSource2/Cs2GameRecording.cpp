@@ -1973,7 +1973,7 @@ void Cs2FireBullets_Init(void* clientDll) {
 		textRange,
 		"4C 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 56 48 8D AC 24 18 DB FF FF B8 E8 25 00 00 E8 ?? ?? ?? ?? 48 2B E0 F2 0F 10 02 4C 8D 4D 38 48 89 9C 24 E0 25 00 00");
 	if (traceResult.IsEmpty()) {
-		advancedfx::Warning("cs2_firebullets: failed to find per-bullet trace pattern.\n");
+		ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 	else {
 		g_Old_Cs2FXFireBulletTrace = (Cs2FXFireBulletTrace_t)traceResult.Start;
@@ -1986,7 +1986,7 @@ void Cs2FireBullets_Init(void* clientDll) {
 	DetourAttach(&(PVOID&)g_Old_Cs2FXFireBulletTrace, New_Cs2FXFireBulletTrace);
 	if (NO_ERROR != DetourTransactionCommit()) {
 		g_Old_Cs2FXFireBulletTrace = nullptr;
-		advancedfx::Warning("cs2_firebullets: failed to attach fire bullets hook.\n");
+		ErrorBox(MkErrStr(__FILE__, __LINE__));
 		return;
 	}
 }
