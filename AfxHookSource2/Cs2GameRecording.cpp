@@ -78,7 +78,7 @@ static bool GetCurrentSpectatedControllerIndex(int& outControllerIndex) {
 	return true;
 }
 
-static constexpr std::ptrdiff_t kCSkeletonInstanceModelStateOffset = 0x150;
+static constexpr std::ptrdiff_t kCSkeletonInstanceModelStateOffset = 0x140;
 static constexpr std::ptrdiff_t kCModelStateModelHandleOffset = 0xA0;
 static constexpr std::ptrdiff_t kCModelStateModelNameOffset = 0xA8;
 static constexpr std::ptrdiff_t kModelBoneNamesArrayOffset = 0x168;
@@ -211,10 +211,14 @@ static bool IsValidBoneParentArray(int16_t* boneParentArray, uint32_t boneCount)
 static bool IsHudModelEntity(CEntityInstance* entity) {
 	if (!entity) return false;
 	const char* clientClassName = entity->GetClientClassName();
-	if (!clientClassName) return false;
-	return 0 == _stricmp(clientClassName, "C_CS2HudModelArms")
+	if (clientClassName && (0 == _stricmp(clientClassName, "C_CS2HudModelArms")
 		|| 0 == _stricmp(clientClassName, "C_CS2HudModelWeapon")
-		|| 0 == _stricmp(clientClassName, "C_CS2HudModelAddon");
+		|| 0 == _stricmp(clientClassName, "C_CS2HudModelAddon"))) return true;
+
+	const char* debugName = entity->GetDebugName();
+	return debugName && (0 == _stricmp(debugName, "cs2_hudmodel_arms")
+		|| 0 == _stricmp(debugName, "cs2_hudmodel_weapon")
+		|| 0 == _stricmp(debugName, "cs2_hudmodel_addon"));
 }
 
 static bool StringBeginsWithCaseSensitive(const char* value, const char* prefix) {
@@ -1924,7 +1928,7 @@ void Cs2FireBullets_Init(void* clientDll) {
 	// per-bullet spread offsets before tracing/applying effects.
 	Afx::BinUtils::MemRange traceResult = Afx::BinUtils::FindPatternString(
 		textRange,
-		"4C 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 56 48 8D AC 24 18 DB FF FF B8 E8 25 00 00 E8 ?? ?? ?? ?? 48 2B E0 F2 0F 10 02 4C 8D 4D 38 48 89 9C 24 E0 25 00 00");
+		"4C 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 56 48 8D AC 24 28 D7 FF FF B8 D8 29 00 00 E8 ?? ?? ?? ?? 48 2B E0");
 	if (traceResult.IsEmpty()) {
 		ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
