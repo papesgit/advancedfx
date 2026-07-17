@@ -1,5 +1,7 @@
 #include "FreecamController.h"
 #include "ClientEntitySystem.h"
+#include "WrpConsole.h"
+#include "../shared/AfxConsole.h"
 #include <cmath>
 #include <algorithm>
 
@@ -58,6 +60,8 @@ Afx::Math::Quaternion NegateQuat(const Afx::Math::Quaternion& q) {
     return Afx::Math::Quaternion(-q.W, -q.X, -q.Y, -q.Z);
 }
 }
+
+extern CFreecamController* g_pFreecam;
 
 CFreecamController::CFreecamController()
     : m_bEnabled(false)
@@ -1559,4 +1563,27 @@ void CFreecamController::GetUpVector(float pitch, float yaw, float& outX, float&
     outX = sinf(pitchRad) * cosf(yawRad);
     outY = sinf(pitchRad) * sinf(yawRad);
     outZ = cosf(pitchRad);
+}
+
+CON_COMMAND(mirv_freecam, "Freecam controller")
+{
+    auto argC = args->ArgC();
+    auto arg0 = args->ArgV(0);
+
+    if (argC >= 2) {
+        const char* action = args->ArgV(1);
+
+        if (0 == _stricmp(action, "stop")) {
+            if (g_pFreecam && g_pFreecam->IsEnabled()) {
+                g_pFreecam->SetEnabled(false);
+                advancedfx::Message("Freecam disabled\n");
+            }
+            return;
+        }
+    }
+
+    advancedfx::Message(
+        "%s stop - Stop freecam\n",
+        arg0
+    );
 }
