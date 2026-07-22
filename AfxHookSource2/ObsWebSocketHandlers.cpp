@@ -985,6 +985,22 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		respond(MakeCommandResult("spectate_slot", true, "Spectator switch queued"));
 	});
 
+	g_ObsWebSocketProtocol.RegisterCommandHandler("animate_to_pov", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		if (!args.contains("observer_slot") || !args["observer_slot"].is_number_integer()) {
+			respond(MakeCommandResult("animate_to_pov", false, "Missing or invalid observer_slot"));
+			return;
+		}
+
+		const int slot = args["observer_slot"].get<int>();
+		if (slot < 0 || slot > 9 || g_SpectatorBindings[slot] == -1) {
+			respond(MakeCommandResult("animate_to_pov", false, "observer_slot not mapped to a controller"));
+			return;
+		}
+
+		ObsWebSocket_QueueAnimateToPov(slot);
+		respond(MakeCommandResult("animate_to_pov", true, "Camera animation to player POV queued"));
+	});
+
 	g_ObsWebSocketProtocol.RegisterCommandHandler("curtime_get", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
 		if (!g_pEngineToClient) {
 			respond(json{

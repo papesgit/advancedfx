@@ -1839,8 +1839,12 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 
 	// Nadecam
 	{
+		if (g_CameraPovAnimation.active && altDown) {
+			g_NadeCamSuppressUntilAltRelease = true;
+		}
+
 		// Toggle on Alt key hold
-		if (altDown && !g_NadeCamSuppressUntilAltRelease && g_pNadeCam && g_pFreecam && !g_pFreecam->IsEnabled()) {
+		if (altDown && !g_NadeCamSuppressUntilAltRelease && !g_CameraPovAnimation.active && g_pNadeCam && g_pFreecam && !g_pFreecam->IsEnabled()) {
 			if (!g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(true);
 		} else if (g_pNadeCam && g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(false, !altDown);
 
@@ -1917,6 +1921,68 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	} else if (!g_AttachmentCameraHadError) {
 			advancedfx::Warning("mirv_attach: failed to resolve attachment for controller %d.\n", g_AttachmentCamera.controllerIndex);
 			g_AttachmentCameraHadError = true;
+		}
+	}
+
+	// One-shot camera-to-POV animation
+	if (g_CameraPovAnimation.active) {
+		const double elapsed = g_MirvTime.curtime_get() - g_CameraPovAnimation.startTime;
+		const double duration = g_CameraPovAnimation.duration;
+		double progress = duration > 1.0e-9 ? elapsed / duration : 1.0;
+		if (progress < 0.0) progress = 0.0;
+		if (progress > 1.0) progress = 1.0;
+		const double alpha = EaseCurve(progress, AttachmentCameraKeyframeEasingCurve::Cubic, AttachmentCameraKeyframeEase::EaseInOut);
+		const double inheritedMotion = progress * (1.0 - progress) * (1.0 - progress);
+
+		AttachmentCameraState povState;
+		povState.active = true;
+		povState.useAttachmentIndex = false;
+		povState.attachmentName = "POV";
+		povState.fov = 90.0f;
+
+		Afx::Math::Vector3 targetOrigin;
+		Afx::Math::Quaternion targetQuat;
+		float targetFov = povState.fov;
+		if (ComputeAttachmentCameraTransform(
+			povState,
+			g_CameraPovAnimation.targetControllerIndex,
+			0.0,
+			targetOrigin,
+			targetQuat,
+			targetFov)) {
+			const Afx::Math::Vector3 startOrigin(
+				g_CameraPovAnimation.startOrigin.x,
+				g_CameraPovAnimation.startOrigin.y,
+				g_CameraPovAnimation.startOrigin.z);
+			const Afx::Math::Vector3 origin(
+				startOrigin.X + (targetOrigin.X - startOrigin.X) * alpha + g_CameraPovAnimation.startVelocity.x * duration * inheritedMotion,
+				startOrigin.Y + (targetOrigin.Y - startOrigin.Y) * alpha + g_CameraPovAnimation.startVelocity.y * duration * inheritedMotion,
+				startOrigin.Z + (targetOrigin.Z - startOrigin.Z) * alpha + g_CameraPovAnimation.startVelocity.z * duration * inheritedMotion);
+			const Afx::Math::QEulerAngles inheritedAngles(
+				g_CameraPovAnimation.startAngles.Pitch + g_CameraPovAnimation.startAngularVelocity.Pitch * duration * inheritedMotion,
+				g_CameraPovAnimation.startAngles.Yaw + g_CameraPovAnimation.startAngularVelocity.Yaw * duration * inheritedMotion,
+				g_CameraPovAnimation.startAngles.Roll + g_CameraPovAnimation.startAngularVelocity.Roll * duration * inheritedMotion);
+			const Afx::Math::Quaternion inheritedQuat = Afx::Math::Quaternion::FromQREulerAngles(
+				Afx::Math::QREulerAngles::FromQEulerAngles(inheritedAngles)
+			).Normalized();
+			const Afx::Math::QEulerAngles angles = inheritedQuat.Slerp(targetQuat, (float)alpha).Normalized().ToQREulerAngles().ToQEulerAngles();
+
+			Tx = (float)origin.X;
+			Ty = (float)origin.Y;
+			Tz = (float)origin.Z;
+			Rx = (float)angles.Pitch;
+			Ry = (float)angles.Yaw;
+			Rz = (float)angles.Roll;
+			Fov = (float)(g_CameraPovAnimation.startFov + (targetFov - g_CameraPovAnimation.startFov) * alpha + g_CameraPovAnimation.startFovVelocity * duration * inheritedMotion);
+			originOrAnglesOverriden = true;
+		}
+
+		if (elapsed >= duration) {
+			if (g_pEngineToClient) {
+				std::string cmd = "spec_mode 2; spec_player " + std::to_string(g_CameraPovAnimation.targetControllerIndex);
+				g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
+			}
+			g_CameraPovAnimation.active = false;
 		}
 	}
 

@@ -8,6 +8,19 @@
 #include <vector>
 #include <string>
 
+struct CameraPovAnimationState {
+	bool active = false;
+	double startTime = 0.0;
+	double duration = 1.0;
+	int targetControllerIndex = -1;
+	SOURCESDK::Vector startOrigin = { 0.0f, 0.0f, 0.0f };
+	Afx::Math::QEulerAngles startAngles = Afx::Math::QEulerAngles(0.0, 0.0, 0.0);
+	float startFov = 90.0f;
+	SOURCESDK::Vector startVelocity = { 0.0f, 0.0f, 0.0f };
+	Afx::Math::QEulerAngles startAngularVelocity = Afx::Math::QEulerAngles(0.0, 0.0, 0.0);
+	float startFovVelocity = 0.0f;
+};
+
 enum class AttachmentCameraTransitionEasing {
 	Linear,
 	Smoothstep,
@@ -101,3 +114,4 @@ struct AttachmentCameraState {
 
 extern AttachmentCameraState g_AttachmentCamera;
 extern bool g_AttachmentCameraHadError;
+extern CameraPovAnimationState g_CameraPovAnimation;

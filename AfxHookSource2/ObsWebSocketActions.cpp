@@ -19,6 +19,7 @@ extern CamPath g_CamPath;
 
 AttachmentCameraState g_AttachmentCamera;
 bool g_AttachmentCameraHadError = false;
+CameraPovAnimationState g_CameraPovAnimation;
 
 namespace {
 	enum class ActionType {
@@ -28,6 +29,7 @@ namespace {
 		FreecamConfig,
 		FreecamHandoff,
 		AttachCamera,
+		AnimateToPov,
 		SpectateSlot,
 		RefreshBinds,
 		SpectatorBindingsMode,
@@ -183,6 +185,14 @@ void ObsWebSocket_QueueAttachCamera(const AttachmentCameraState& state) {
 	g_ActionQueue.push_back(std::move(action));
 }
 
+void ObsWebSocket_QueueAnimateToPov(int observerSlot) {
+	PendingAction action;
+	action.type = ActionType::AnimateToPov;
+	action.observerSlot = observerSlot;
+	std::lock_guard<std::mutex> lock(g_ActionMutex);
+	g_ActionQueue.push_back(std::move(action));
+}
+
 void ObsWebSocket_QueueSpectateSlot(int observerSlot) {
 	PendingAction action;
 	action.type = ActionType::SpectateSlot;
@@ -324,6 +334,7 @@ void ObsWebSocket_ProcessActions() {
 			advancedfx::Message("Freecam handoff applied\n");
 			break;
 		case ActionType::AttachCamera:
+			g_CameraPovAnimation.active = false;
 			g_AttachmentCamera = action.attachment;
 			g_AttachmentCamera.animation.startTime = g_AttachmentCamera.animation.enabled
 				? g_MirvTime.curtime_get()
@@ -341,7 +352,55 @@ void ObsWebSocket_ProcessActions() {
 				g_pEngineToClient->ExecuteClientCmd(0, cmd.c_str(), true);
 			}
 			break;
+		case ActionType::AnimateToPov:
+			if (action.observerSlot < 0 || action.observerSlot > 9) break;
+			if (g_SpectatorBindings[action.observerSlot] == -1) break;
+			{
+				const CameraTransformSamples samples = Obs_GetRecentCameraTransforms();
+				const CameraTransform& start = samples.current;
+				g_CameraPovAnimation.active = true;
+				g_CameraPovAnimation.startTime = g_MirvTime.curtime_get();
+				g_CameraPovAnimation.duration = 1.0;
+				g_CameraPovAnimation.targetControllerIndex = g_SpectatorBindings[action.observerSlot];
+				g_CameraPovAnimation.startOrigin = { start.x, start.y, start.z };
+				g_CameraPovAnimation.startAngles = Afx::Math::QEulerAngles(start.pitch, start.yaw, start.roll);
+				g_CameraPovAnimation.startFov = start.fov;
+				g_CameraPovAnimation.startVelocity = { 0.0f, 0.0f, 0.0f };
+				g_CameraPovAnimation.startAngularVelocity = Afx::Math::QEulerAngles(0.0, 0.0, 0.0);
+				g_CameraPovAnimation.startFovVelocity = 0.0f;
+
+				// Inherit only a plausible recent rendered-camera velocity
+				if (samples.hasPrevious && samples.deltaTime > 1.0e-4f && std::isfinite(samples.deltaTime)) {
+					auto clamp = [](float value, float maximum) {
+						return value < -maximum ? -maximum : (value > maximum ? maximum : value);
+					};
+					auto angleDelta = [](float from, float to) {
+						float delta = fmodf(to - from + 180.0f, 360.0f);
+						if (delta < 0.0f) delta += 360.0f;
+						return delta - 180.0f;
+					};
+
+					const float invDeltaTime = 1.0f / samples.deltaTime;
+					g_CameraPovAnimation.startVelocity = {
+						clamp((start.x - samples.previous.x) * invDeltaTime, 1600.0f),
+						clamp((start.y - samples.previous.y) * invDeltaTime, 1600.0f),
+						clamp((start.z - samples.previous.z) * invDeltaTime, 1600.0f)
+					};
+					g_CameraPovAnimation.startAngularVelocity = Afx::Math::QEulerAngles(
+						clamp(angleDelta(samples.previous.pitch, start.pitch) * invDeltaTime, 720.0f),
+						clamp(angleDelta(samples.previous.yaw, start.yaw) * invDeltaTime, 720.0f),
+						clamp(angleDelta(samples.previous.roll, start.roll) * invDeltaTime, 720.0f));
+					g_CameraPovAnimation.startFovVelocity = clamp((start.fov - samples.previous.fov) * invDeltaTime, 90.0f);
+				}
+			}
+			if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
+			if (g_CamPath.Enabled_get()) g_CamPath.Enabled_set(false);
+			g_AttachmentCamera.active = false;
+			g_AttachmentCameraHadError = false;
+			advancedfx::Message("Animating camera to player POV\n");
+			break;
 		case ActionType::SpectateSlot:
+			g_CameraPovAnimation.active = false;
 			if (action.observerSlot < 0 || action.observerSlot > 9) break;
 			if (g_SpectatorBindings[action.observerSlot] == -1) break;
 			if (g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
