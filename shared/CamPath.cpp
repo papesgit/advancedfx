@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <fstream>
 #include <algorithm>
+#include <cfloat>
+#include <set>
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -98,6 +100,8 @@ char const * CamPath::QuaternionInterp_ToString(QuaternionInterp value)
 
 CamPathValue::CamPathValue()
 : X(0.0), Y(0.0), Z(0.0), R(), Fov(90.0), Selected(false)
+, HasDof(false), DofEnabled(false), DofNearBlurry(-100.0), DofNearCrisp(0.0)
+, DofFarCrisp(180.0), DofFarBlurry(2000.0), DofMaxBlurSize(5.0), DofRadiusScale(0.25)
 {
 }
 
@@ -108,11 +112,15 @@ CamPathValue::CamPathValue(double x, double y, double z, double pitch, double ya
 , R(Quaternion::FromQREulerAngles(QREulerAngles::FromQEulerAngles(QEulerAngles(pitch,yaw,roll))))
 , Fov(fov)
 , Selected(false)
+, HasDof(false), DofEnabled(false), DofNearBlurry(-100.0), DofNearCrisp(0.0)
+, DofFarCrisp(180.0), DofFarBlurry(2000.0), DofMaxBlurSize(5.0), DofRadiusScale(0.25)
 {
 }
 
 CamPathValue::CamPathValue(double x, double y, double z, double q_w, double q_x, double q_y, double q_z, double fov, bool selected)
-: X(x), Y(y), Z(z), R(Quaternion(q_w,q_x,q_y,q_z)), Fov(fov), Selected(selected) {
+: X(x), Y(y), Z(z), R(Quaternion(q_w,q_x,q_y,q_z)), Fov(fov), Selected(selected)
+, HasDof(false), DofEnabled(false), DofNearBlurry(-100.0), DofNearCrisp(0.0)
+, DofFarCrisp(180.0), DofFarBlurry(2000.0), DofMaxBlurSize(5.0), DofRadiusScale(0.25) {
 }
 
 CamPathIterator::CamPathIterator(CInterpolationMap<CamPathValue>::const_iterator & it) : wrapped(it)
@@ -143,6 +151,50 @@ bool CamPathIterator::operator == (CamPathIterator const &it) const
 bool CamPathIterator::operator != (CamPathIterator const &it) const
 {
 	return !(*this == it);
+}
+
+static double CurveBezier(double p0, double p1, double p2, double p3, double u)
+{
+	double inv = 1.0 - u;
+	return inv * inv * inv * p0 + 3.0 * inv * inv * u * p1 + 3.0 * inv * u * u * p2 + u * u * u * p3;
+}
+
+double CamPath::CurveChannel::Eval(double time) const
+{
+	if(Keys.empty()) return 0.0;
+	if(1 == Keys.size() || time <= Keys.front().Time) return Keys.front().Value;
+	if(time >= Keys.back().Time) return Keys.back().Value;
+
+	size_t index = 0;
+	while(index + 1 < Keys.size() && Keys[index + 1].Time < time) ++index;
+	CurveKey const & a = Keys[index];
+	CurveKey const & b = Keys[index + 1];
+	double dt = std::max(1e-9, b.Time - a.Time);
+	double u = std::max(0.0, std::min(1.0, (time - a.Time) / dt));
+	if(CI_CONSTANT == a.Interpolation) return a.Value;
+	if(CI_LINEAR == a.Interpolation) return a.Value + (b.Value - a.Value) * u;
+
+	if(a.Weighted || b.Weighted)
+	{
+		double outWeight = std::max(0.001, std::min(dt * 0.999, a.OutWeight));
+		double inWeight = std::max(0.001, std::min(dt * 0.999, b.InWeight));
+		double t0 = a.Time, t1 = a.Time + outWeight, t2 = b.Time - inWeight, t3 = b.Time;
+		double lo = 0.0, hi = 1.0;
+		for(int i = 0; i < 18; ++i)
+		{
+			double candidate = (lo + hi) * 0.5;
+			if(CurveBezier(t0, t1, t2, t3, candidate) < time) lo = candidate; else hi = candidate;
+		}
+		u = (lo + hi) * 0.5;
+		return CurveBezier(a.Value, a.Value + a.OutTangent * outWeight,
+			b.Value - b.InTangent * inWeight, b.Value, u);
+	}
+
+	double u2 = u * u, u3 = u2 * u;
+	return (2.0 * u3 - 3.0 * u2 + 1.0) * a.Value
+		+ (u3 - 2.0 * u2 + u) * dt * a.OutTangent
+		+ (-2.0 * u3 + 3.0 * u2) * b.Value
+		+ (u3 - u2) * dt * b.InTangent;
 }
 
 // CamPath /////////////////////////////////////////////////////////////////////
@@ -292,6 +344,7 @@ CamPath::DoubleInterp CamPath::FovInterpMethod_get(void) const
 
 void CamPath::Add(double time, const CamPathValue & value)
 {
+	ClearCurveData();
 	m_Map[time] = value;
 	DoInterpolationMapChangedAll();
 	Changed();
@@ -307,6 +360,7 @@ void CamPath::Changed()
 
 void CamPath::Remove(double time)
 {
+	ClearCurveData();
 	m_Map.erase(time);
 	DoInterpolationMapChangedAll();
 	Changed();
@@ -314,6 +368,7 @@ void CamPath::Remove(double time)
 
 void CamPath::Clear()
 {
+	ClearCurveData();
 	bool selectAll = true;
 
 	CInterpolationMap<CamPathValue>::iterator last = m_Map.end();
@@ -356,18 +411,29 @@ CamPathIterator CamPath::GetEnd()
 
 double CamPath::GetLowerBound() const
 {
+	if(HasCurveData()) {
+		double result = DBL_MAX;
+		for(auto const & pair : m_CurveChannels) if(0 != pair.first.find("dof.") && !pair.second.Keys.empty()) result = std::min(result, pair.second.Keys.front().Time);
+		if(DBL_MAX != result) return result;
+	}
 	if (m_Map.empty()) return 0.0;
 	return m_Map.cbegin()->first;
 }
 
 double CamPath::GetUpperBound() const
 {
+	if(HasCurveData()) {
+		double result = -DBL_MAX;
+		for(auto const & pair : m_CurveChannels) if(0 != pair.first.find("dof.") && !pair.second.Keys.empty()) result = std::max(result, pair.second.Keys.back().Time);
+		if(-DBL_MAX != result) return result;
+	}
 	if (m_Map.empty()) return 0.0;
 	return m_Map.crbegin()->first;
 }
 
 bool CamPath::CanEval(void) const
 {
+	if(HasCurveData()) return CurveCanEval();
 	return
 		m_XInterp->CanEval()
 		&& m_YInterp->CanEval()
@@ -380,7 +446,28 @@ bool CamPath::CanEval(void) const
 CamPathValue CamPath::Eval(double t)
 {
 	CamPathValue val;
-	
+	if(HasCurveData())
+	{
+		val.X = CurveValue("position.x", t);
+		val.Y = CurveValue("position.y", t);
+		val.Z = CurveValue("position.z", t);
+		double pitch = CurveValue("rotation.pitch", t);
+		double yaw = CurveValue("rotation.yaw", t);
+		double roll = CurveValue("rotation.roll", t);
+		val.R = Quaternion::FromQREulerAngles(QREulerAngles::FromQEulerAngles(QEulerAngles(pitch, yaw, roll)));
+		val.Fov = CurveValue("fov", t, 90.0);
+		val.Selected = false;
+		val.HasDof = m_CurveChannels.end() != m_CurveChannels.find("dof.enabled");
+		val.DofEnabled = 0.5 <= CurveValue("dof.enabled", t, 0.0);
+		val.DofNearBlurry = CurveValue("dof.nearBlurry", t, -100.0);
+		val.DofNearCrisp = CurveValue("dof.nearCrisp", t, 0.0);
+		val.DofFarCrisp = CurveValue("dof.farCrisp", t, 180.0);
+		val.DofFarBlurry = CurveValue("dof.farBlurry", t, 2000.0);
+		val.DofMaxBlurSize = CurveValue("dof.maxBlur", t, 5.0);
+		val.DofRadiusScale = CurveValue("dof.radiusScale", t, 0.25);
+		return val;
+	}
+
 	val.X = m_XInterp->Eval(t);
 	val.Y = m_YInterp->Eval(t);
 	val.Z = m_ZInterp->Eval(t);
@@ -391,10 +478,48 @@ CamPathValue CamPath::Eval(double t)
 	return val;
 }
 
+bool CamPath::HasCurveData() const
+{
+	return !m_CurveChannels.empty();
+}
+
+bool CamPath::CurveCanEval() const
+{
+	static char const * required[] = { "position.x", "position.y", "position.z", "rotation.pitch", "rotation.yaw", "rotation.roll", "fov" };
+	for(char const * id : required) {
+		auto it = m_CurveChannels.find(id);
+		if(m_CurveChannels.end() == it || it->second.Keys.empty()) return false;
+	}
+	return true;
+}
+
+double CamPath::CurveValue(char const * id, double time, double fallback) const
+{
+	auto it = m_CurveChannels.find(id);
+	return m_CurveChannels.end() != it && !it->second.Keys.empty() ? it->second.Eval(time) : fallback;
+}
+
+void CamPath::ClearCurveData()
+{
+	m_CurveChannels.clear();
+}
+
+void CamPath::RebuildCurveSummaryMap()
+{
+	std::set<double> times;
+	for(auto const & pair : m_CurveChannels) {
+		if(0 == pair.first.find("dof.")) continue;
+		for(CurveKey const & key : pair.second.Keys) times.insert(key.Time);
+	}
+	m_Map.clear();
+	for(double time : times) m_Map[time] = Eval(time);
+	DoInterpolationMapChangedAll();
+}
+
 char * double2xml(rapidxml::xml_document<> & doc, double value)
 {
 	char szTmp[196];
-	_snprintf_s(szTmp, _TRUNCATE,"%f", value);
+	_snprintf_s(szTmp, _TRUNCATE,"%.17g", value);
 	return doc.allocate_string(szTmp);
 }
 
@@ -455,8 +580,50 @@ bool CamPath::Save(wchar_t const * fileName)
 
 		if(val.Selected)
 			pt->append_attribute(doc.allocate_attribute("selected"));
+		if(val.HasDof) {
+			if(val.DofEnabled) pt->append_attribute(doc.allocate_attribute("dofEnabled"));
+			pt->append_attribute(doc.allocate_attribute("dofNearBlurry", double2xml(doc, val.DofNearBlurry)));
+			pt->append_attribute(doc.allocate_attribute("dofNearCrisp", double2xml(doc, val.DofNearCrisp)));
+			pt->append_attribute(doc.allocate_attribute("dofFarCrisp", double2xml(doc, val.DofFarCrisp)));
+			pt->append_attribute(doc.allocate_attribute("dofFarBlurry", double2xml(doc, val.DofFarBlurry)));
+			pt->append_attribute(doc.allocate_attribute("dofMaxBlurSize", double2xml(doc, val.DofMaxBlurSize)));
+			pt->append_attribute(doc.allocate_attribute("dofRadiusScale", double2xml(doc, val.DofRadiusScale)));
+		}
 
 		pts->append_node(pt);
+	}
+
+	if(HasCurveData())
+	{
+		rapidxml::xml_node<> * curveEditor = doc.allocate_node(rapidxml::node_element, "curveEditor");
+		curveEditor->append_attribute(doc.allocate_attribute("version", "1"));
+		cam->append_node(curveEditor);
+		for(auto const & pair : m_CurveChannels)
+		{
+			CurveChannel const & channel = pair.second;
+			rapidxml::xml_node<> * channelNode = doc.allocate_node(rapidxml::node_element, "channel");
+			channelNode->append_attribute(doc.allocate_attribute("id", doc.allocate_string(channel.Id.c_str())));
+			channelNode->append_attribute(doc.allocate_attribute("name", doc.allocate_string(channel.Name.c_str())));
+			channelNode->append_attribute(doc.allocate_attribute("group", doc.allocate_string(channel.Group.c_str())));
+			channelNode->append_attribute(doc.allocate_attribute("color", doc.allocate_string(channel.Color.c_str())));
+			curveEditor->append_node(channelNode);
+			for(CurveKey const & key : channel.Keys)
+			{
+				rapidxml::xml_node<> * keyNode = doc.allocate_node(rapidxml::node_element, "key");
+				keyNode->append_attribute(doc.allocate_attribute("t", double2xml(doc, key.Time)));
+				keyNode->append_attribute(doc.allocate_attribute("v", double2xml(doc, key.Value)));
+				keyNode->append_attribute(doc.allocate_attribute("in", double2xml(doc, key.InTangent)));
+				keyNode->append_attribute(doc.allocate_attribute("out", double2xml(doc, key.OutTangent)));
+				keyNode->append_attribute(doc.allocate_attribute("inWeight", double2xml(doc, key.InWeight)));
+				keyNode->append_attribute(doc.allocate_attribute("outWeight", double2xml(doc, key.OutWeight)));
+				keyNode->append_attribute(doc.allocate_attribute("weighted", key.Weighted ? "true" : "false"));
+				char const * interpolation = CI_CONSTANT == key.Interpolation ? "Constant" : CI_LINEAR == key.Interpolation ? "Linear" : "Bezier";
+				char const * tangentMode = CT_SMOOTH == key.TangentMode ? "Smooth" : CT_BROKEN == key.TangentMode ? "Broken" : CT_LINEAR == key.TangentMode ? "Linear" : "Auto";
+				keyNode->append_attribute(doc.allocate_attribute("interpolation", interpolation));
+				keyNode->append_attribute(doc.allocate_attribute("tangentMode", tangentMode));
+				channelNode->append_node(keyNode);
+			}
+		}
 	}
 
 	std::string xmlString;
@@ -510,6 +677,7 @@ bool CamPath::Load(wchar_t const * fileName)
 
 				rapidxml::xml_node<> * cur_node = doc.first_node("campath");
 				if(!cur_node) break;
+				rapidxml::xml_node<> * camNode = cur_node;
 
 				// Clear current Campath:
 				SelectNone();
@@ -538,10 +706,9 @@ bool CamPath::Load(wchar_t const * fileName)
 				bool bHold = nullptr != holdA;
 				SetHold(bHold);
 
-				cur_node = cur_node->first_node("points");
-				if(!cur_node) break;
+				rapidxml::xml_node<> * pointsNode = camNode->first_node("points");
 
-				for(cur_node = cur_node->first_node("p"); cur_node; cur_node = cur_node->next_sibling("p"))
+				for(cur_node = pointsNode ? pointsNode->first_node("p") : nullptr; cur_node; cur_node = cur_node->next_sibling("p"))
 				{
 					rapidxml::xml_attribute<> * timeAttr = cur_node->first_attribute("t");
 					if(!timeAttr) continue;
@@ -598,6 +765,57 @@ bool CamPath::Load(wchar_t const * fileName)
 						// Add point:
 						m_Map[dT] = r;
 					}
+				}
+
+				rapidxml::xml_node<> * curveEditorNode = camNode->first_node("curveEditor");
+				if(curveEditorNode)
+				{
+					for(rapidxml::xml_node<> * channelNode = curveEditorNode->first_node("channel"); channelNode; channelNode = channelNode->next_sibling("channel"))
+					{
+						rapidxml::xml_attribute<> * idA = channelNode->first_attribute("id");
+						if(!idA || !*idA->value()) continue;
+						CurveChannel channel;
+						channel.Id = idA->value();
+						rapidxml::xml_attribute<> * nameA = channelNode->first_attribute("name");
+						rapidxml::xml_attribute<> * groupA = channelNode->first_attribute("group");
+						rapidxml::xml_attribute<> * colorA = channelNode->first_attribute("color");
+						channel.Name = nameA ? nameA->value() : channel.Id;
+						channel.Group = groupA ? groupA->value() : "Other";
+						channel.Color = colorA ? colorA->value() : "#FFFFFF";
+						for(rapidxml::xml_node<> * keyNode = channelNode->first_node("key"); keyNode; keyNode = keyNode->next_sibling("key"))
+						{
+							rapidxml::xml_attribute<> * timeA = keyNode->first_attribute("t");
+							rapidxml::xml_attribute<> * valueA = keyNode->first_attribute("v");
+							if(!timeA || !valueA) continue;
+							CurveKey key;
+							key.Time = atof(timeA->value());
+							key.Value = atof(valueA->value());
+							rapidxml::xml_attribute<> * inA = keyNode->first_attribute("in");
+							rapidxml::xml_attribute<> * outA = keyNode->first_attribute("out");
+							rapidxml::xml_attribute<> * inWeightA = keyNode->first_attribute("inWeight");
+							rapidxml::xml_attribute<> * outWeightA = keyNode->first_attribute("outWeight");
+							rapidxml::xml_attribute<> * weightedA = keyNode->first_attribute("weighted");
+							rapidxml::xml_attribute<> * interpolationA = keyNode->first_attribute("interpolation");
+							rapidxml::xml_attribute<> * tangentModeA = keyNode->first_attribute("tangentMode");
+							key.InTangent = inA ? atof(inA->value()) : 0.0;
+							key.OutTangent = outA ? atof(outA->value()) : 0.0;
+							key.InWeight = inWeightA ? atof(inWeightA->value()) : 0.25;
+							key.OutWeight = outWeightA ? atof(outWeightA->value()) : 0.25;
+							key.Weighted = weightedA && 0 == _stricmp(weightedA->value(), "true");
+							if(interpolationA && 0 == _stricmp(interpolationA->value(), "Constant")) key.Interpolation = CI_CONSTANT;
+							else if(interpolationA && 0 == _stricmp(interpolationA->value(), "Linear")) key.Interpolation = CI_LINEAR;
+							else key.Interpolation = CI_BEZIER;
+							if(tangentModeA && 0 == _stricmp(tangentModeA->value(), "Smooth")) key.TangentMode = CT_SMOOTH;
+							else if(tangentModeA && 0 == _stricmp(tangentModeA->value(), "Broken")) key.TangentMode = CT_BROKEN;
+							else if(tangentModeA && 0 == _stricmp(tangentModeA->value(), "Linear")) key.TangentMode = CT_LINEAR;
+							else key.TangentMode = CT_AUTO;
+							channel.Keys.push_back(key);
+						}
+						std::sort(channel.Keys.begin(), channel.Keys.end(), [](CurveKey const & a, CurveKey const & b) { return a.Time < b.Time; });
+						m_CurveChannels[channel.Id] = channel;
+					}
+					if(CurveCanEval()) RebuildCurveSummaryMap();
+					else ClearCurveData();
 				}
 			}
 			while (false);
@@ -715,6 +933,13 @@ size_t CamPath::SelectAdd(double min, double max)
 
 void CamPath::SetStart(double t, bool relative)
 {
+	if(HasCurveData()) {
+		double deltaT = relative ? t : t - GetLowerBound();
+		for(auto & pair : m_CurveChannels) for(CurveKey & key : pair.second.Keys) key.Time += deltaT;
+		RebuildCurveSummaryMap();
+		Changed();
+		return;
+	}
 	if(m_Map.size()<1) return;
 
 	CInterpolationMap<CamPathValue> tempMap;
@@ -761,6 +986,21 @@ void CamPath::SetStart(double t, bool relative)
 	
 void CamPath::SetDuration(double t)
 {
+	if(HasCurveData()) {
+		double first = GetLowerBound();
+		double duration = GetDuration();
+		if(duration <= 0.0) return;
+		double scale = t / duration;
+		for(auto & pair : m_CurveChannels) for(CurveKey & key : pair.second.Keys) {
+			key.Time = first + scale * (key.Time - first);
+			key.InWeight *= fabs(scale);
+			key.OutWeight *= fabs(scale);
+			if(0.0 != scale) { key.InTangent /= scale; key.OutTangent /= scale; }
+		}
+		RebuildCurveSummaryMap();
+		Changed();
+		return;
+	}
 	if(m_Map.size()<2) return;
 
 	CInterpolationMap<CamPathValue> tempMap;
@@ -822,6 +1062,7 @@ void CamPath::SetDuration(double t)
 
 void CamPath::SetPosition(double x, double y, double z, bool setX, bool setY, bool setZ)
 {
+	ClearCurveData();
 	if(m_Map.size()<1) return;
 
 	bool selectAll = true;
@@ -899,6 +1140,7 @@ void CamPath::SetPosition(double x, double y, double z, bool setX, bool setY, bo
 
 void CamPath::SetAngles(double yPitch, double zYaw, double xRoll, bool setY, bool setZ, bool setX)
 {
+	ClearCurveData();
 	if(m_Map.size()<1) return;
 
 	bool selectAll = true;
@@ -945,6 +1187,7 @@ void CamPath::SetAngles(double yPitch, double zYaw, double xRoll, bool setY, boo
 
 void CamPath::SetFov(double fov)
 {
+	ClearCurveData();
 	if(m_Map.size()<1) return;
 
 	bool selectAll = true;
@@ -982,6 +1225,7 @@ void CamPath::SetFov(double fov)
 
 void CamPath::Rotate(double yPitch, double zYaw, double xRoll)
 {
+	ClearCurveData();
 	if(m_Map.size()<1) return;
 
 	bool selectAll = true;
@@ -1114,6 +1358,7 @@ void CamPath::Rotate(double yPitch, double zYaw, double xRoll)
 
 void CamPath::AnchorTransform(double anchorX, double anchorY, double anchorZ, double anchorYPitch, double anchorZYaw, double anchorXRoll, double destX, double destY, double destZ, double destYPitch, double destZYaw, double destXRoll)
 {
+	ClearCurveData();
 	if(m_Map.size()<1) return;
 
 	bool selectAll = true;
@@ -1236,6 +1481,7 @@ void CamPath::CopyMap(CInterpolationMap<CamPathValue> & dst, CInterpolationMap<C
 
 double CamPath::GetDuration() const
 {
+	if(HasCurveData()) return GetUpperBound() - GetLowerBound();
 	if(m_Map.size()<2) return 0.0;
 
 	return (--m_Map.cend())->first - m_Map.cbegin()->first;

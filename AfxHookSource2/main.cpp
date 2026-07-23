@@ -1657,6 +1657,75 @@ extern bool g_b_on_c_view_render_setup_view;
 
 extern bool MirvFovOverride(float &fov);
 
+class CCampathDofOverride {
+public:
+	void Apply(CamPathValue const & value) {
+		Resolve();
+		if(!m_Saved) {
+			Save(m_Override, m_OldOverride); Save(m_NearBlurry, m_OldNearBlurry); Save(m_NearCrisp, m_OldNearCrisp);
+			Save(m_FarCrisp, m_OldFarCrisp); Save(m_FarBlurry, m_OldFarBlurry); Save(m_MaxBlur, m_OldMaxBlur); Save(m_RadiusScale, m_OldRadiusScale);
+			m_Saved = true;
+		}
+		SetBool(m_Override, value.DofEnabled);
+		SetFloat(m_NearBlurry, value.DofNearBlurry); SetFloat(m_NearCrisp, value.DofNearCrisp);
+		SetFloat(m_FarCrisp, value.DofFarCrisp); SetFloat(m_FarBlurry, value.DofFarBlurry);
+		SetFloat(m_MaxBlur, value.DofMaxBlurSize); SetFloat(m_RadiusScale, value.DofRadiusScale);
+	}
+
+	void Restore() {
+		if(!m_Saved) return;
+		Restore(m_Override, m_OldOverride); Restore(m_NearBlurry, m_OldNearBlurry); Restore(m_NearCrisp, m_OldNearCrisp);
+		Restore(m_FarCrisp, m_OldFarCrisp); Restore(m_FarBlurry, m_OldFarBlurry); Restore(m_MaxBlur, m_OldMaxBlur); Restore(m_RadiusScale, m_OldRadiusScale);
+		m_Saved = false;
+	}
+
+private:
+	struct SavedValue { double Value = 0.0; SOURCESDK::CS2::EConVarType Type = SOURCESDK::CS2::EConVarType_Invalid; bool Valid = false; };
+	SOURCESDK::CS2::Cvar_s * m_Override = nullptr, * m_NearBlurry = nullptr, * m_NearCrisp = nullptr;
+	SOURCESDK::CS2::Cvar_s * m_FarCrisp = nullptr, * m_FarBlurry = nullptr, * m_MaxBlur = nullptr, * m_RadiusScale = nullptr;
+	SavedValue m_OldOverride, m_OldNearBlurry, m_OldNearCrisp, m_OldFarCrisp, m_OldFarBlurry, m_OldMaxBlur, m_OldRadiusScale;
+	bool m_Saved = false;
+
+	static SOURCESDK::CS2::Cvar_s * Find(char const * name) {
+		if(!SOURCESDK::CS2::g_pCVar) return nullptr;
+		return SOURCESDK::CS2::g_pCVar->GetCvar(SOURCESDK::CS2::g_pCVar->FindConVar(name, false).Get());
+	}
+	void Resolve() {
+		if(!m_Override) m_Override = Find("r_dof_override");
+		if(!m_NearBlurry) m_NearBlurry = Find("r_dof_override_near_blurry");
+		if(!m_NearCrisp) m_NearCrisp = Find("r_dof_override_near_crisp");
+		if(!m_FarCrisp) m_FarCrisp = Find("r_dof_override_far_crisp");
+		if(!m_FarBlurry) m_FarBlurry = Find("r_dof_override_far_blurry");
+		if(!m_MaxBlur) m_MaxBlur = Find("r_dof2_maxblursize");
+		if(!m_RadiusScale) m_RadiusScale = Find("r_dof2_radiusscale");
+	}
+	static void Save(SOURCESDK::CS2::Cvar_s * cvar, SavedValue & saved) {
+		if(!cvar) return;
+		saved.Type = cvar->m_eVarType;
+		if(SOURCESDK::CS2::EConVarType_Bool == saved.Type) saved.Value = cvar->m_Value.m_bValue ? 1.0 : 0.0;
+		else if(SOURCESDK::CS2::EConVarType_Float64 == saved.Type) saved.Value = cvar->m_Value.m_dbValue;
+		else if(SOURCESDK::CS2::EConVarType_Float32 == saved.Type) saved.Value = cvar->m_Value.m_flValue;
+		else return;
+		saved.Valid = true;
+	}
+	static void Restore(SOURCESDK::CS2::Cvar_s * cvar, SavedValue const & saved) {
+		if(!cvar || !saved.Valid) return;
+		if(SOURCESDK::CS2::EConVarType_Bool == saved.Type) cvar->m_Value.m_bValue = 0.0 != saved.Value;
+		else if(SOURCESDK::CS2::EConVarType_Float64 == saved.Type) cvar->m_Value.m_dbValue = saved.Value;
+		else if(SOURCESDK::CS2::EConVarType_Float32 == saved.Type) cvar->m_Value.m_flValue = (float)saved.Value;
+	}
+	static void SetBool(SOURCESDK::CS2::Cvar_s * cvar, bool value) {
+		if(!cvar) return;
+		if(SOURCESDK::CS2::EConVarType_Bool == cvar->m_eVarType) cvar->m_Value.m_bValue = value;
+		else if(SOURCESDK::CS2::EConVarType_Float32 == cvar->m_eVarType) cvar->m_Value.m_flValue = value ? 1.0f : 0.0f;
+	}
+	static void SetFloat(SOURCESDK::CS2::Cvar_s * cvar, double value) {
+		if(!cvar) return;
+		if(SOURCESDK::CS2::EConVarType_Float64 == cvar->m_eVarType) cvar->m_Value.m_dbValue = value;
+		else if(SOURCESDK::CS2::EConVarType_Float32 == cvar->m_eVarType) cvar->m_Value.m_flValue = (float)value;
+	}
+} g_CampathDofOverride;
+
 bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	if(!g_pEngineToClient) return false;
 
@@ -1696,6 +1765,7 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 
 	ObsWebSocket_ProcessActions();
 
+	bool campathDofActive = false;
 	if (g_CamPath.Enabled_get() && g_CamPath.CanEval())
 	{
 		double campathCurTime = curTime - g_CamPath.GetOffset();
@@ -1725,8 +1795,13 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 			Rz = (float)ang.Roll;
 
 			Fov = (float)val.Fov;
+			if(val.HasDof) {
+				g_CampathDofOverride.Apply(val);
+				campathDofActive = true;
+			}
 		}
 	}
+	if(!campathDofActive) g_CampathDofOverride.Restore();
 
 	if (g_S2CamIO.GetCamImport())
 	{

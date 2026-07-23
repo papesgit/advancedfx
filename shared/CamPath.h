@@ -3,6 +3,9 @@
 #include "AfxMath.h"
 
 #include <list>
+#include <map>
+#include <string>
+#include <vector>
 
 using namespace Afx;
 using namespace Afx::Math;
@@ -18,6 +21,15 @@ struct CamPathValue
 	double Fov;
 
 	bool Selected;
+
+	bool HasDof;
+	bool DofEnabled;
+	double DofNearBlurry;
+	double DofNearCrisp;
+	double DofFarCrisp;
+	double DofFarBlurry;
+	double DofMaxBlurSize;
+	double DofRadiusScale;
 
 	CamPathValue();
 
@@ -166,6 +178,8 @@ public:
 
 	double GetOffset() const;
 
+	bool HasCurveData() const;
+
 private:
 	struct CamPathChangedData {
 		CamPathChanged pFn;
@@ -224,6 +238,29 @@ private:
 	QuaternionInterp m_RotationInterpMethod;
 	DoubleInterp m_FovInterpMethod;
 	double m_Offset;
+
+	enum CurveInterpolation { CI_CONSTANT, CI_LINEAR, CI_BEZIER };
+	enum CurveTangentMode { CT_AUTO, CT_SMOOTH, CT_BROKEN, CT_LINEAR };
+	struct CurveKey {
+		double Time = 0.0;
+		double Value = 0.0;
+		double InTangent = 0.0;
+		double OutTangent = 0.0;
+		double InWeight = 0.25;
+		double OutWeight = 0.25;
+		bool Weighted = false;
+		CurveInterpolation Interpolation = CI_BEZIER;
+		CurveTangentMode TangentMode = CT_AUTO;
+	};
+	struct CurveChannel {
+		std::string Id;
+		std::string Name;
+		std::string Group;
+		std::string Color;
+		std::vector<CurveKey> Keys;
+		double Eval(double time) const;
+	};
+	std::map<std::string, CurveChannel> m_CurveChannels;
 	
 	CInterpolationMap<CamPathValue> m_Map;
 
@@ -245,4 +282,8 @@ private:
 	void CopyMap(CInterpolationMap<CamPathValue> & dst, CInterpolationMap<CamPathValue> & src);
 
 	void DoInterpolationMapChangedAll(void);
+	bool CurveCanEval() const;
+	double CurveValue(char const * id, double time, double fallback = 0.0) const;
+	void RebuildCurveSummaryMap();
+	void ClearCurveData();
 };
