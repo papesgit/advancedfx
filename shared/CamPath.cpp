@@ -533,6 +533,8 @@ bool CamPath::Save(wchar_t const * fileName)
 	doc.append_node(decl);
 
 	rapidxml::xml_node<> * cam = doc.allocate_node(rapidxml::node_element, "campath");
+	bool hasCurveData = HasCurveData();
+	cam->append_attribute(doc.allocate_attribute("model", hasCurveData ? "curves" : "classic"));
 	if(DI_DEFAULT != m_PositionInterpMethod)
 		cam->append_attribute(doc.allocate_attribute("positionInterp", DoubleInterp_ToString(m_PositionInterpMethod)));
 	if(QI_DEFAULT != m_RotationInterpMethod)
@@ -545,55 +547,58 @@ bool CamPath::Save(wchar_t const * fileName)
 		cam->append_attribute(doc.allocate_attribute("hold"));
 	doc.append_node(cam);
 
-	rapidxml::xml_node<> * pts = doc.allocate_node(rapidxml::node_element, "points");
-	cam->append_node(pts);
-
-	rapidxml::xml_node<> * cmt = doc.allocate_node(rapidxml::node_comment,0,
-		"Points are in Quake coordinates, meaning x=forward, y=left, z=up and rotation order is first rx, then ry and lastly rz.\n"
-		"Rotation direction follows the right-hand grip rule.\n"
-		"rx (roll), ry (pitch), rz(yaw) are the Euler angles in degrees.\n"
-		"qw, qx, qy, qz are the quaternion values.\n"
-		"When read it is sufficient that either rx, ry, rz OR qw, qx, qy, qz are present.\n"
-		"If both are present then qw, qx, qy, qz take precedence."
-	);
-	pts->append_node(cmt);
-
-	for(CamPathIterator it = GetBegin(); it != GetEnd(); ++it)
+	if(!hasCurveData)
 	{
-		double time = it.GetTime();
-		CamPathValue val = it.GetValue();
-		QEulerAngles ang = val.R.ToQREulerAngles().ToQEulerAngles();
+		rapidxml::xml_node<> * pts = doc.allocate_node(rapidxml::node_element, "points");
+		cam->append_node(pts);
 
-		rapidxml::xml_node<> * pt = doc.allocate_node(rapidxml::node_element, "p");
-		pt->append_attribute(doc.allocate_attribute("t", double2xml(doc,time)));
-		pt->append_attribute(doc.allocate_attribute("x", double2xml(doc,val.X)));
-		pt->append_attribute(doc.allocate_attribute("y", double2xml(doc,val.Y)));
-		pt->append_attribute(doc.allocate_attribute("z", double2xml(doc,val.Z)));
-		pt->append_attribute(doc.allocate_attribute("fov", double2xml(doc,val.Fov)));
-		pt->append_attribute(doc.allocate_attribute("rx", double2xml(doc,ang.Roll)));
-		pt->append_attribute(doc.allocate_attribute("ry", double2xml(doc,ang.Pitch)));
-		pt->append_attribute(doc.allocate_attribute("rz", double2xml(doc,ang.Yaw)));
-		pt->append_attribute(doc.allocate_attribute("qw", double2xml(doc,it.wrapped->second.R.W)));
-		pt->append_attribute(doc.allocate_attribute("qx", double2xml(doc,it.wrapped->second.R.X)));
-		pt->append_attribute(doc.allocate_attribute("qy", double2xml(doc,it.wrapped->second.R.Y)));
-		pt->append_attribute(doc.allocate_attribute("qz", double2xml(doc,it.wrapped->second.R.Z)));
+		rapidxml::xml_node<> * cmt = doc.allocate_node(rapidxml::node_comment,0,
+			"Points are in Quake coordinates, meaning x=forward, y=left, z=up and rotation order is first rx, then ry and lastly rz.\n"
+			"Rotation direction follows the right-hand grip rule.\n"
+			"rx (roll), ry (pitch), rz(yaw) are the Euler angles in degrees.\n"
+			"qw, qx, qy, qz are the quaternion values.\n"
+			"When read it is sufficient that either rx, ry, rz OR qw, qx, qy, qz are present.\n"
+			"If both are present then qw, qx, qy, qz take precedence."
+		);
+		pts->append_node(cmt);
 
-		if(val.Selected)
-			pt->append_attribute(doc.allocate_attribute("selected"));
-		if(val.HasDof) {
-			if(val.DofEnabled) pt->append_attribute(doc.allocate_attribute("dofEnabled"));
-			pt->append_attribute(doc.allocate_attribute("dofNearBlurry", double2xml(doc, val.DofNearBlurry)));
-			pt->append_attribute(doc.allocate_attribute("dofNearCrisp", double2xml(doc, val.DofNearCrisp)));
-			pt->append_attribute(doc.allocate_attribute("dofFarCrisp", double2xml(doc, val.DofFarCrisp)));
-			pt->append_attribute(doc.allocate_attribute("dofFarBlurry", double2xml(doc, val.DofFarBlurry)));
-			pt->append_attribute(doc.allocate_attribute("dofMaxBlurSize", double2xml(doc, val.DofMaxBlurSize)));
-			pt->append_attribute(doc.allocate_attribute("dofRadiusScale", double2xml(doc, val.DofRadiusScale)));
+		for(CamPathIterator it = GetBegin(); it != GetEnd(); ++it)
+		{
+			double time = it.GetTime();
+			CamPathValue val = it.GetValue();
+			QEulerAngles ang = val.R.ToQREulerAngles().ToQEulerAngles();
+
+			rapidxml::xml_node<> * pt = doc.allocate_node(rapidxml::node_element, "p");
+			pt->append_attribute(doc.allocate_attribute("t", double2xml(doc,time)));
+			pt->append_attribute(doc.allocate_attribute("x", double2xml(doc,val.X)));
+			pt->append_attribute(doc.allocate_attribute("y", double2xml(doc,val.Y)));
+			pt->append_attribute(doc.allocate_attribute("z", double2xml(doc,val.Z)));
+			pt->append_attribute(doc.allocate_attribute("fov", double2xml(doc,val.Fov)));
+			pt->append_attribute(doc.allocate_attribute("rx", double2xml(doc,ang.Roll)));
+			pt->append_attribute(doc.allocate_attribute("ry", double2xml(doc,ang.Pitch)));
+			pt->append_attribute(doc.allocate_attribute("rz", double2xml(doc,ang.Yaw)));
+			pt->append_attribute(doc.allocate_attribute("qw", double2xml(doc,it.wrapped->second.R.W)));
+			pt->append_attribute(doc.allocate_attribute("qx", double2xml(doc,it.wrapped->second.R.X)));
+			pt->append_attribute(doc.allocate_attribute("qy", double2xml(doc,it.wrapped->second.R.Y)));
+			pt->append_attribute(doc.allocate_attribute("qz", double2xml(doc,it.wrapped->second.R.Z)));
+
+			if(val.Selected)
+				pt->append_attribute(doc.allocate_attribute("selected"));
+			if(val.HasDof) {
+				if(val.DofEnabled) pt->append_attribute(doc.allocate_attribute("dofEnabled"));
+				pt->append_attribute(doc.allocate_attribute("dofNearBlurry", double2xml(doc, val.DofNearBlurry)));
+				pt->append_attribute(doc.allocate_attribute("dofNearCrisp", double2xml(doc, val.DofNearCrisp)));
+				pt->append_attribute(doc.allocate_attribute("dofFarCrisp", double2xml(doc, val.DofFarCrisp)));
+				pt->append_attribute(doc.allocate_attribute("dofFarBlurry", double2xml(doc, val.DofFarBlurry)));
+				pt->append_attribute(doc.allocate_attribute("dofMaxBlurSize", double2xml(doc, val.DofMaxBlurSize)));
+				pt->append_attribute(doc.allocate_attribute("dofRadiusScale", double2xml(doc, val.DofRadiusScale)));
+			}
+
+			pts->append_node(pt);
 		}
-
-		pts->append_node(pt);
 	}
 
-	if(HasCurveData())
+	if(hasCurveData)
 	{
 		rapidxml::xml_node<> * curveEditor = doc.allocate_node(rapidxml::node_element, "curveEditor");
 		curveEditor->append_attribute(doc.allocate_attribute("version", "1"));
@@ -678,6 +683,8 @@ bool CamPath::Load(wchar_t const * fileName)
 				rapidxml::xml_node<> * cur_node = doc.first_node("campath");
 				if(!cur_node) break;
 				rapidxml::xml_node<> * camNode = cur_node;
+				rapidxml::xml_attribute<> * modelA = camNode->first_attribute("model");
+				bool curveModel = modelA && 0 == _stricmp(modelA->value(), "curves");
 
 				// Clear current Campath:
 				SelectNone();
@@ -706,7 +713,7 @@ bool CamPath::Load(wchar_t const * fileName)
 				bool bHold = nullptr != holdA;
 				SetHold(bHold);
 
-				rapidxml::xml_node<> * pointsNode = camNode->first_node("points");
+				rapidxml::xml_node<> * pointsNode = curveModel ? nullptr : camNode->first_node("points");
 
 				for(cur_node = pointsNode ? pointsNode->first_node("p") : nullptr; cur_node; cur_node = cur_node->next_sibling("p"))
 				{
@@ -767,7 +774,7 @@ bool CamPath::Load(wchar_t const * fileName)
 					}
 				}
 
-				rapidxml::xml_node<> * curveEditorNode = camNode->first_node("curveEditor");
+				rapidxml::xml_node<> * curveEditorNode = curveModel ? camNode->first_node("curveEditor") : nullptr;
 				if(curveEditorNode)
 				{
 					for(rapidxml::xml_node<> * channelNode = curveEditorNode->first_node("channel"); channelNode; channelNode = channelNode->next_sibling("channel"))
