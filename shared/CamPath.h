@@ -4,11 +4,17 @@
 
 #include <list>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 using namespace Afx;
 using namespace Afx::Math;
+
+namespace rapidxml {
+	template<class Ch> class xml_document;
+	template<class Ch> class xml_node;
+}
 
 struct CamPathValue
 {
@@ -119,6 +125,7 @@ public:
 	double GetUpperBound() const;
 
 	bool CanEval(void) const;
+	bool CanEvalAt(double t) const;
 
 	/// <remarks>
 	/// Must not be called if CanEval() returns false!<br />
@@ -179,6 +186,7 @@ public:
 	double GetOffset() const;
 
 	bool HasCurveData() const;
+	bool HasSequenceData() const;
 
 private:
 	struct CamPathChangedData {
@@ -238,6 +246,7 @@ private:
 	QuaternionInterp m_RotationInterpMethod;
 	DoubleInterp m_FovInterpMethod;
 	double m_Offset;
+	bool m_DofEnabled = false;
 
 	enum CurveInterpolation { CI_CONSTANT, CI_LINEAR, CI_BEZIER };
 	enum CurveTangentMode { CT_AUTO, CT_SMOOTH, CT_BROKEN, CT_LINEAR };
@@ -261,6 +270,15 @@ private:
 		double Eval(double time) const;
 	};
 	std::map<std::string, CurveChannel> m_CurveChannels;
+
+	struct CameraCut {
+		double Start = 0.0;
+		double End = 0.0;
+		std::string CameraId;
+	};
+	std::map<std::string, std::unique_ptr<CamPath>> m_SequenceCameras;
+	std::map<std::string, std::string> m_SequenceCameraNames;
+	std::vector<CameraCut> m_CameraCuts;
 	
 	CInterpolationMap<CamPathValue> m_Map;
 
@@ -286,4 +304,9 @@ private:
 	double CurveValue(char const * id, double time, double fallback = 0.0) const;
 	void RebuildCurveSummaryMap();
 	void ClearCurveData();
+	void RebuildSequenceSummaryMap();
+	void ClearSequenceData();
+	CamPath * SequenceCameraAt(double time) const;
+	void AppendXmlCamPath(rapidxml::xml_document<char> & doc, rapidxml::xml_node<char> * cam) const;
+	bool LoadXmlCamPath(rapidxml::xml_node<char> * camNode);
 };

@@ -1775,7 +1775,8 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 		}
 
 		// no extrapolation:
-		if (g_CamPath.GetLowerBound() <= campathCurTime && campathCurTime <= g_CamPath.GetUpperBound())
+		if (g_CamPath.GetLowerBound() <= campathCurTime && campathCurTime <= g_CamPath.GetUpperBound()
+			&& g_CamPath.CanEvalAt(campathCurTime))
 		{
 			CamPathValue val = g_CamPath.Eval(campathCurTime);
 			QEulerAngles ang = val.R.ToQREulerAngles().ToQEulerAngles();
