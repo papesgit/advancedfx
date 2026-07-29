@@ -1333,6 +1333,22 @@ size_t CamPath::SelectAdd(double min, double max)
 
 void CamPath::SetStart(double t, bool relative)
 {
+	if(HasSequenceData()) {
+		double deltaT = relative ? t : t - GetLowerBound();
+		for(auto & pair : m_SequenceCameras) {
+			// A sequence is edited as one timeline. Child selections must not
+			// cause only part of a classic camera track to move.
+			pair.second->SelectNone();
+			pair.second->SetStart(deltaT, true);
+		}
+		for(CameraCut & cut : m_CameraCuts) {
+			cut.Start += deltaT;
+			cut.End += deltaT;
+		}
+		RebuildSequenceSummaryMap();
+		Changed();
+		return;
+	}
 	if(HasCurveData()) {
 		double deltaT = relative ? t : t - GetLowerBound();
 		for(auto & pair : m_CurveChannels) for(CurveKey & key : pair.second.Keys) key.Time += deltaT;

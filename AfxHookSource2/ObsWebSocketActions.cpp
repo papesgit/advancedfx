@@ -427,7 +427,7 @@ void ObsWebSocket_ProcessActions() {
 			std::wstring wcmd;
 			UTF8StringToWideString(action.cmd.c_str(), wcmd);
 			const bool loaded = g_CamPath.Load(wcmd.c_str());
-			g_CamPath.SetStart(curTime - action.offset);
+			g_CamPath.SetStart(curTime - g_CamPath.GetOffset() - action.offset);
 			if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
 			if(!g_CamPath.Enabled_get()) g_CamPath.Enabled_set(true);
 			if(loaded && g_CamPath.CanEval() && g_pFreecam && g_pFreecam->IsEnabled()) g_pFreecam->SetEnabled(false);
