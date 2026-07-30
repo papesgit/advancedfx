@@ -130,18 +130,11 @@ void RefreshSpectatorBindings() {
 	// Map CT players to keys 1-5 (index 0-4)
 	for (size_t i = 0; i < ctControllers.size() && i < 5; ++i) {
 		g_SpectatorBindings[i] = ctControllers[i];
-		advancedfx::Message("Key %d -> CT controller %d\n", i+1, ctControllers[i]);
 	}
 
 	// Map T players to keys 6-0 (index 5-9)
 	for (size_t i = 0; i < tControllers.size() && i < 5; ++i) {
 		g_SpectatorBindings[i + 5] = tControllers[i];
-		if (g_UseAltSpectatorBindings) {
-			static const char* kAltLabels[5] = { "Q", "E", "R", "T", "Z" };
-			advancedfx::Message("Key %s -> T controller %d\n", kAltLabels[i], tControllers[i]);
-		} else {
-			advancedfx::Message("Key %d -> T controller %d\n", (i+6) % 10, tControllers[i]);
-		}
 	}
 
 	advancedfx::Message("Spectator bindings refreshed: %zu CT, %zu T\n", ctControllers.size(), tControllers.size());
@@ -149,6 +142,11 @@ void RefreshSpectatorBindings() {
 
 void SpectatorBindings_OnGameEvent(const char* eventName) {
     if (!eventName) return;
+
+    if (0 == _stricmp(eventName, "player_connect")) {
+        RefreshSpectatorBindings();
+		return;
+    }
 
     if (0 == _stricmp(eventName, "player_team")) {
         g_pendingSpectatorBindingsRefresh = true;
