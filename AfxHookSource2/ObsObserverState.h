@@ -99,6 +99,7 @@ struct AttachmentCameraState {
 	bool useAttachmentIndex = true;
 	uint8_t attachmentIndex = 0;
 	std::string attachmentName;
+	std::string boneName;
 	SOURCESDK::Vector offsetPos = {0.0f, 0.0f, 0.0f};
 	Afx::Math::QEulerAngles offsetAngles = Afx::Math::QEulerAngles(0.0, 0.0, 0.0);
 	float fov = 90.0f;

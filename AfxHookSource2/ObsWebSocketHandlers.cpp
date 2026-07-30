@@ -687,8 +687,8 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 			return;
 		}
 
-		if (!args.contains("attachment")) {
-			respond(MakeCommandResult("attach_camera", false, "Missing attachment"));
+		if (!args.contains("attachment") && !args.contains("bone")) {
+			respond(MakeCommandResult("attach_camera", false, "Missing attachment or bone"));
 			return;
 		}
 
@@ -706,7 +706,10 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		state.active = true;
 		state.controllerIndex = g_SpectatorBindings[slot];
 
-		if (args["attachment"].is_number_integer()) {
+		if (args.contains("bone") && args["bone"].is_string() && !args["bone"].get<std::string>().empty()) {
+			state.useAttachmentIndex = false;
+			state.boneName = args["bone"].get<std::string>();
+		} else if (args.contains("attachment") && args["attachment"].is_number_integer()) {
 			int idx = args["attachment"].get<int>();
 			if (idx < 0 || idx > 255) {
 				respond(MakeCommandResult("attach_camera", false, "attachment index must be 0-255"));
@@ -714,11 +717,11 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 			}
 			state.useAttachmentIndex = true;
 			state.attachmentIndex = (uint8_t)idx;
-		} else if (args["attachment"].is_string()) {
+		} else if (args.contains("attachment") && args["attachment"].is_string()) {
 			state.useAttachmentIndex = false;
 			state.attachmentName = args["attachment"].get<std::string>();
 		} else {
-			respond(MakeCommandResult("attach_camera", false, "attachment must be index or name"));
+			respond(MakeCommandResult("attach_camera", false, "attachment must be index or name, or bone must be a name"));
 			return;
 		}
 
@@ -1393,7 +1396,11 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 				if (attach.contains("attachment") && attach["attachment"].is_string()) {
 					attachmentName = attach["attachment"].get<std::string>();
 				}
-				g_MirvImageDrawer.SetAttachment(name.c_str(), slot, useYaw, usePitch, useRoll, attachmentName.c_str());
+				std::string boneName;
+				if (attach.contains("bone") && attach["bone"].is_string()) {
+					boneName = attach["bone"].get<std::string>();
+				}
+				g_MirvImageDrawer.SetAttachment(name.c_str(), slot, useYaw, usePitch, useRoll, attachmentName.c_str(), boneName.c_str());
 			}
 		}
 
@@ -1459,7 +1466,11 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 				if (attach.contains("attachment") && attach["attachment"].is_string()) {
 					attachmentName = attach["attachment"].get<std::string>();
 				}
-				g_MirvImageDrawer.SetAttachment(name.c_str(), slot, useYaw, usePitch, useRoll, attachmentName.c_str());
+				std::string boneName;
+				if (attach.contains("bone") && attach["bone"].is_string()) {
+					boneName = attach["bone"].get<std::string>();
+				}
+				g_MirvImageDrawer.SetAttachment(name.c_str(), slot, useYaw, usePitch, useRoll, attachmentName.c_str(), boneName.c_str());
 			}
 		}
 		if (args.contains("pos") && args["pos"].is_array() && args["pos"].size() == 3) {
@@ -1521,6 +1532,7 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 				{"attach", {
 					{"slot", img.attachSlot},
 					{"attachment", img.attachAttachmentName},
+					{"bone", img.attachBoneName},
 					{"useYaw", img.attachUseYaw},
 					{"usePitch", img.attachUsePitch},
 					{"useRoll", img.attachUseRoll}

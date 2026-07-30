@@ -1151,7 +1151,7 @@ static bool ResolveAttachmentTransform(
 	SOURCESDK::Vector attachmentOrigin;
 	SOURCESDK::Quaternion attachmentAngles;
 
-	const bool isPov = !state.useAttachmentIndex && state.attachmentName == "POV";
+	const bool isPov = !state.useAttachmentIndex && state.boneName.empty() && state.attachmentName == "POV";
 	if (isPov) {
 		float eyeOrigin[3];
 		float eyeAngles[3];
@@ -1168,6 +1168,9 @@ static bool ResolveAttachmentTransform(
 		attachmentAngles.y = q.Y;
 		attachmentAngles.z = q.Z;
 		attachmentAngles.w = q.W;
+	} else if (!state.boneName.empty()) {
+		const int boneIdx = pawn->LookupBone(state.boneName.c_str());
+		if (!pawn->GetBone(boneIdx, attachmentOrigin, attachmentAngles)) return false;
 	} else {
 		uint8_t attachmentIdx = state.attachmentIndex;
 		if (!state.useAttachmentIndex) {

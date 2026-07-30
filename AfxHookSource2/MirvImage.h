@@ -49,7 +49,7 @@ public:
 	void SetVisible(const char* name, bool value);
 	void SetDepthTest(const char* name, bool value);
 	void SetDepthWrite(const char* name, bool value);
-	void SetAttachment(const char* name, int slot, bool useYaw, bool usePitch, bool useRoll, const char* attachmentName);
+	void SetAttachment(const char* name, int slot, bool useYaw, bool usePitch, bool useRoll, const char* attachmentName, const char* boneName);
 	void UpdateAttachments();
 	void UpdateAttachmentsForSetupSerial(uint64_t setupSerial);
 	void PublishAttachmentsForSetupSerial(uint64_t setupSerial);
@@ -101,6 +101,7 @@ public:
 		std::string regionId;
 		int attachSlot = -1;
 		std::string attachAttachmentName;
+		std::string attachBoneName;
 		bool attachUseYaw = false;
 		bool attachUsePitch = false;
 		bool attachUseRoll = false;
@@ -144,6 +145,7 @@ private:
 		bool pendingLoad = false;
 		int attachSlot = -1;
 		std::string attachAttachmentName;
+		std::string attachBoneName;
 		bool attachUseYaw = false;
 		bool attachUsePitch = false;
 		bool attachUseRoll = false;

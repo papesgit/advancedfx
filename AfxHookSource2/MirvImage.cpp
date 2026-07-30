@@ -62,7 +62,7 @@ std::wstring BuildImagePath(const std::wstring& fileName) {
 	return path;
 }
 
-	bool TryGetAttachedTransform(int slot, const std::string& attachmentName, float outOrigin[3], float outAngles[3]) {
+	bool TryGetAttachedTransform(int slot, const std::string& attachmentName, const std::string& boneName, float outOrigin[3], float outAngles[3]) {
 		if (slot < 0 || slot > 9) return false;
 		if (!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) return false;
 		if (g_SpectatorBindings[slot] == -1) return false;
@@ -91,10 +91,14 @@ std::wstring BuildImagePath(const std::wstring& fileName) {
 		return true;
 	}
 
-	uint8_t attachmentIdx = pawn->LookupAttachment(attachmentName.c_str());
 	SOURCESDK::Vector attachmentOrigin;
 	SOURCESDK::Quaternion attachmentAngles;
-	if (!pawn->GetAttachment(attachmentIdx, attachmentOrigin, attachmentAngles)) return false;
+	if (!boneName.empty()) {
+		if (!pawn->GetBone(pawn->LookupBone(boneName.c_str()), attachmentOrigin, attachmentAngles)) return false;
+	} else {
+		uint8_t attachmentIdx = pawn->LookupAttachment(attachmentName.c_str());
+		if (!pawn->GetAttachment(attachmentIdx, attachmentOrigin, attachmentAngles)) return false;
+	}
 
 	outOrigin[0] = attachmentOrigin.x;
 	outOrigin[1] = attachmentOrigin.y;
@@ -326,7 +330,7 @@ void CMirvImageDrawer::SetDepthWrite(const char* name, bool value) {
 	entry->depthWrite = value;
 }
 
-void CMirvImageDrawer::SetAttachment(const char* name, int slot, bool useYaw, bool usePitch, bool useRoll, const char* attachmentName) {
+void CMirvImageDrawer::SetAttachment(const char* name, int slot, bool useYaw, bool usePitch, bool useRoll, const char* attachmentName, const char* boneName) {
 	if (!name) return;
 	std::lock_guard<std::mutex> lock(m_Mutex);
 	ImageEntry* entry = FindImageLocked(name);
@@ -336,6 +340,7 @@ void CMirvImageDrawer::SetAttachment(const char* name, int slot, bool useYaw, bo
 	entry->attachUsePitch = usePitch;
 	entry->attachUseRoll = useRoll;
 	entry->attachAttachmentName = attachmentName ? attachmentName : "";
+	entry->attachBoneName = boneName ? boneName : "";
 	entry->attachValid = false;
 	entry->attachSampleSerial = 0;
 	entry->attachSampleValid = false;
@@ -360,7 +365,7 @@ void CMirvImageDrawer::UpdateAttachmentsForSetupSerial(uint64_t setupSerial) {
 
 		float eye[3] = {};
 		float ang[3] = {};
-		if (TryGetAttachedTransform(entry.attachSlot, entry.attachAttachmentName, eye, ang)) {
+		if (TryGetAttachedTransform(entry.attachSlot, entry.attachAttachmentName, entry.attachBoneName, eye, ang)) {
 			if (0 == setupSerial) {
 				entry.attachOrigin = Vector3(eye[0], eye[1], eye[2]);
 				entry.attachPitch = ang[0];
@@ -459,6 +464,7 @@ void CMirvImageDrawer::GetImageSnapshot(std::vector<ImageSnapshot>& out) {
 		snap.regionId = entry.regionId;
 		snap.attachSlot = entry.attachSlot;
 		snap.attachAttachmentName = entry.attachAttachmentName;
+		snap.attachBoneName = entry.attachBoneName;
 		snap.attachUseYaw = entry.attachUseYaw;
 		snap.attachUsePitch = entry.attachUsePitch;
 		snap.attachUseRoll = entry.attachUseRoll;

@@ -180,6 +180,7 @@ unsafe extern "C" {
     fn afx_hook_source2_get_cur_time(outCurTime: & mut f64);
 
     fn afx_hook_source2_get_entity_ref_attachment(p_ref: * mut AfxEntityRef, attachment_name: *const c_char, pos: * mut advancedfx::math::Vector3, angs: * mut advancedfx::math::Quaternion) -> bool;
+    fn afx_hook_source2_get_entity_ref_bone(p_ref: * mut AfxEntityRef, bone_name: *const c_char, pos: * mut advancedfx::math::Vector3, angs: * mut advancedfx::math::Quaternion) -> bool;
 
     //
 
@@ -2540,6 +2541,11 @@ impl MirvEntityRef {
                 js_string!("getAttachment"),
                 0,
             )
+            .function(
+                NativeFunction::from_fn_ptr(MirvEntityRef::get_bone),
+                js_string!("getBone"),
+                0,
+            )
             .build();
     }
 
@@ -2803,6 +2809,25 @@ impl MirvEntityRef {
             },
             false => Ok(JsValue::null())
         }
+    }
+
+    fn get_bone(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let object = this.as_object().ok_or(advancedfx::js::errors::error_type(context))?;
+        let mirv = object.downcast_ref::<MirvEntityRef>().ok_or(advancedfx::js::errors::error_type(context))?;
+        if 1 != args.len() { return Err(advancedfx::js::errors::error_arguments(context).into()) };
+        let arg0 = args[0].as_string().ok_or(advancedfx::js::errors::error_arguments(context))?;
+        let bone_name = std::ffi::CString::new(arg0.to_std_string().unwrap()).unwrap();
+        let mut position = advancedfx::math::Vector3::new(0.0, 0.0, 0.0);
+        let mut angles = advancedfx::math::Quaternion::new(0.0, 0.0, 0.0, 0.0);
+        if unsafe { afx_hook_source2_get_entity_ref_bone(mirv.entity_ref, bone_name.as_ptr(), &mut position, &mut angles) } {
+            let pos_js = advancedfx::js::math::Vector3::new(position).to_js_object(context).unwrap();
+            let angs_js = advancedfx::js::math::Quaternion::new(angles).to_js_object(context).unwrap();
+            return Ok(JsValue::from(ObjectInitializer::new(context)
+                .property(js_string!("position"), pos_js, Attribute::all())
+                .property(js_string!("angles"), angs_js, Attribute::all())
+                .build()));
+        }
+        Ok(JsValue::null())
     }
 }
 
