@@ -1365,8 +1365,21 @@ public:
 	virtual bool GetDemoTimeFromClientTime(double curTime, double time, double& outDemoTime) {
 		return ::GetDemoTimeFromClientTime(curTime, time, outDemoTime);
 	}
-    virtual bool GetDemoTickFromClientTime(double curTime, double targetTime, int& outTick) {
-        return ::GetDemoTickFromClientTime(curTime, targetTime, outTick);
+    virtual bool GetDemoTickFromClientTime(double curTime, double targetTime, int& outTick, DemoTickRoundingMode mode = DemoTickRoundingMode::Nearest) {
+        if (DemoTickRoundingMode::Nearest == mode)
+            return ::GetDemoTickFromClientTime(curTime, targetTime, outTick);
+
+        double demoTime;
+        WrpGlobals* gl = g_Hook_VClient_RenderView.GetGlobals();
+        if (!::GetDemoTimeFromClientTime(curTime, targetTime, demoTime) || !gl)
+            return false;
+
+        double tick = demoTime / gl->interval_per_tick_get();
+        outTick = DemoTickRoundingMode::Before == mode
+            ? (int)ceil(tick) - 1
+            : (int)ceil(tick);
+        if (outTick < 0) outTick = 0;
+        return true;
     }
 } g_MirvCampath_Time;
 

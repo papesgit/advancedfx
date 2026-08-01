@@ -584,6 +584,20 @@ CamPath * CamPath::SequenceCameraAt(double time) const
 			}
 		}
 	}
+	if(!result && m_Hold) {
+		for(CameraCut const & cut : m_CameraCuts) {
+			auto camera = m_SequenceCameras.find(cut.CameraId);
+			if(m_SequenceCameras.end() == camera) continue;
+			if(cut.Start <= time && bestStart <= cut.Start) {
+				result = camera->second.get();
+				bestStart = cut.Start;
+			}
+			else if(!result && time < cut.Start) {
+				result = camera->second.get();
+				break;
+			}
+		}
+	}
 	return result;
 }
 

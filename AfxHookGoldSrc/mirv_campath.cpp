@@ -34,7 +34,7 @@ public:
 	virtual bool GetDemoTimeFromClientTime(double curTime, double time, double& outDemoTime) {
 		return false;
 	}
-    virtual bool GetDemoTickFromClientTime(double curTime, double targetTime, int& outTick) {
+    virtual bool GetDemoTickFromClientTime(double curTime, double targetTime, int& outTick, DemoTickRoundingMode mode = DemoTickRoundingMode::Nearest) {
         return false;
     }
 } g_MirvCampath_Time;

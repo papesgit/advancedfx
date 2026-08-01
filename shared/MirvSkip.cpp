@@ -107,12 +107,19 @@ void MirvSkip_ConsoleCommand(advancedfx::ICommandArgs * args, IMirvCampath_Time*
 
                     return;
                 }
-                else if (0 == _stricmp(arg2, "toGame") && 4 <= argc)
+                else if ((0 == _stricmp(arg2, "toGame")
+                    || 0 == _stricmp(arg2, "toGameBefore")
+                    || 0 == _stricmp(arg2, "toGameAfter")) && 4 <= argc)
                 {
                     double targetClientTime = atof(args->ArgV(3));
                     int targetTick;
+                    DemoTickRoundingMode mode = 0 == _stricmp(arg2, "toGameBefore")
+                        ? DemoTickRoundingMode::Before
+                        : 0 == _stricmp(arg2, "toGameAfter")
+                            ? DemoTickRoundingMode::After
+                            : DemoTickRoundingMode::Nearest;
 
-                    if (!mirvTime->GetDemoTickFromClientTime(mirvTime->GetCurTime(), targetClientTime, targetTick))
+                    if (!mirvTime->GetDemoTickFromClientTime(mirvTime->GetCurTime(), targetClientTime, targetTick, mode))
                     {
                         advancedfx::Warning("Error: GetDemoTickFromClientTime failed!\n");
                         return;
@@ -145,6 +152,8 @@ void MirvSkip_ConsoleCommand(advancedfx::ICommandArgs * args, IMirvCampath_Time*
                     "mirv_skip time <dValue> - skip approximately time <dValue> seconds (negative values skip back).\n"
                     "mirv_skip time to <dValue> - go approximately to demo time <dValue> seconds\n"
                     "mirv_skip time toGame <dValue> - go approximately to game (client) time <dValue> seconds\n"
+                    "mirv_skip time toGameBefore <dValue> - go to the game-time tick before <dValue> seconds\n"
+                    "mirv_skip time toGameAfter <dValue> - go to the game-time tick at or after <dValue> seconds\n"
                     "Current demo time in seconds: %f (",
                     demoTime
             );

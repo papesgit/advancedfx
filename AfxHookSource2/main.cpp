@@ -917,10 +917,19 @@ public:
 		}
 		return false;
 	}
-    virtual bool GetDemoTickFromClientTime(double curTime, double targetTime, int& outTick)
+    virtual bool GetDemoTickFromClientTime(double curTime, double targetTime, int& outTick, DemoTickRoundingMode mode = DemoTickRoundingMode::Nearest)
     {
         double demoTime;
-        return GetDemoTimeFromClientTime(curTime, targetTime, demoTime) && GetDemoTickFromDemoTime(curTime, demoTime, outTick);
+        if (!GetDemoTimeFromClientTime(curTime, targetTime, demoTime)) return false;
+
+        double tick = demoTime / g_MirvTime.interval_per_tick_get();
+        outTick = DemoTickRoundingMode::Before == mode
+            ? (int)ceil(tick) - 1
+            : DemoTickRoundingMode::After == mode
+                ? (int)ceil(tick)
+                : (int)round(tick);
+        if (outTick < 0) outTick = 0;
+        return true;
     }
 } g_MirvCampath_Time;
 
