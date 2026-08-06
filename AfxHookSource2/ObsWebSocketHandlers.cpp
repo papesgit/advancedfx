@@ -7,6 +7,7 @@
 #include "MirvTime.h"
 #include "hlaeFolder.h"
 #include "DeathMsg.h"
+#include "HotVersion.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
@@ -475,6 +476,16 @@ namespace {
 }
 
 void RegisterObsWebSocketHandlers() {
+	g_ObsWebSocketProtocol.RegisterCommandHandler("version_get", [](const json& /*args*/, const CObsWebSocketProtocol::JsonResponder& respond) {
+		respond(json{
+			{"type", "version"},
+			{"ok", true},
+			{"hlae_version", HLAE_UPSTREAM_VERSION},
+			{"hot_version", HOT_COMPATIBILITY_VERSION},
+			{"revision", HLAE_PACKAGE_REVISION}
+		});
+	});
+
 	static bool initialized = false;
 	if (initialized) return;
 	initialized = true;
