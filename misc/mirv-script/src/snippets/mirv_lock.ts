@@ -67,6 +67,8 @@
 
     const angleDelta = (target: number, current: number): number => angleNormalize180(target - current);
 
+    const unwrapAngleNear = (angle: number, reference: number): number => reference + angleDelta(angle, reference);
+
     const halfExp = (halftime: number, dt: number): number => {
         halftime = halftime <= 0.0001 ? 0.0001 : halftime;
         return 1.0 - Math.pow(0.5, dt / halftime);
@@ -208,11 +210,15 @@
             desiredYaw = (Math.atan2(dy, dx) * 180.0) / Math.PI;
             desiredPitch = (Math.atan2(-dz, hdist) * 180.0) / Math.PI;
         }
+        desiredYaw = unwrapAngleNear(desiredYaw, hasLastOut ? lastOutYaw : cam.rY);
 
         // Drive MirvInput target angles and let MirvInput smoothing seek
         const yawDelta = Math.abs(angleDelta(desiredYaw, cam.rY));
         const pitchDelta = Math.abs(angleDelta(desiredPitch, cam.rX));
-        if (yawDelta > 0.001 || pitchDelta > 0.001) {
+        const targetChanged = !hasLastOut
+            || Math.abs(desiredPitch - lastOutPitch) > 0.001
+            || Math.abs(desiredYaw - lastOutYaw) > 0.001;
+        if (targetChanged || yawDelta > 0.001 || pitchDelta > 0.001) {
             // setMirvInputAngles expects (pitch, yaw, roll)
             mirv.setMirvInputAngles(desiredPitch, desiredYaw, 0);
             lastOutPitch = desiredPitch;
