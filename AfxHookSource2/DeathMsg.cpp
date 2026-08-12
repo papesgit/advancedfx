@@ -1631,7 +1631,7 @@ void deathMsgPlayers_PrintHelp_Console()
 			auto playerInfo = getPlayerInfoFromControllerIndex(i);
 
 			rows.push_back({
-				playerInfo.name,
+				playerInfo.name ? playerInfo.name : "<null>",
 				std::to_string(playerInfo.userId), // apparently in CS2 userid is playercontroller entityindex - 1
 				std::string("x").append(std::to_string(playerInfo.xuid)),
 				std::string("k").append(std::to_string(playerInfo.specKey))
