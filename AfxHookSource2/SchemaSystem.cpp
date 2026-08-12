@@ -106,6 +106,12 @@ void initSchemaSystemOffsets()
 	bOk = bOk && getOffset(&g_clientDllOffsets.CBasePlayerController.m_steamID, "client.dll", "CBasePlayerController", "m_steamID");
 	bOk = bOk && getOffset(&g_clientDllOffsets.CBasePlayerController.m_hPawn, "client.dll", "CBasePlayerController", "m_hPawn");
 	bOk = bOk && getOffset(&g_clientDllOffsets.CCSPlayerController.m_sSanitizedPlayerName, "client.dll", "CCSPlayerController", "m_sSanitizedPlayerName");
+	bOk = bOk && getOffset(&g_clientDllOffsets.CCSPlayerController.m_pActionTrackingServices, "client.dll", "CCSPlayerController", "m_pActionTrackingServices");
+	bOk = bOk && getOffset(&g_clientDllOffsets.CCSPlayerController_ActionTrackingServices.m_matchStats, "client.dll", "CCSPlayerController_ActionTrackingServices", "m_matchStats");
+	bOk = bOk && getOffset(&g_clientDllOffsets.CSPerRoundStats_t.m_iDamage, "client.dll", "CSPerRoundStats_t", "m_iDamage");
+	bOk = bOk && getOffset(&g_clientDllOffsets.CSPerRoundStats_t.m_iHeadShotKills, "client.dll", "CSPerRoundStats_t", "m_iHeadShotKills");
+	bOk = bOk && getOffset(&g_clientDllOffsets.CSPerRoundStats_t.m_iUtilityDamage, "client.dll", "CSPerRoundStats_t", "m_iUtilityDamage");
+	bOk = bOk && getOffset(&g_clientDllOffsets.CSPerRoundStats_t.m_iEnemiesFlashed, "client.dll", "CSPerRoundStats_t", "m_iEnemiesFlashed");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_BasePlayerPawn.m_hController, "client.dll", "C_BasePlayerPawn", "m_hController");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_BasePlayerPawn.m_pWeaponServices, "client.dll", "C_BasePlayerPawn", "m_pWeaponServices");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_BasePlayerPawn.m_pObserverServices, "client.dll", "C_BasePlayerPawn", "m_pObserverServices");

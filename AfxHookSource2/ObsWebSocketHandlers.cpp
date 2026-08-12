@@ -8,6 +8,8 @@
 #include "hlaeFolder.h"
 #include "DeathMsg.h"
 #include "HotVersion.h"
+#include "ClientEntitySystem.h"
+#include "SchemaSystem.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
@@ -72,6 +74,55 @@ namespace {
 		}
 
 		return result;
+	}
+
+	bool TryReadPerRoundStat(const unsigned char* stats, ptrdiff_t offset, int& value) {
+		if (!stats || offset <= 0 || IsBadReadPtr(stats + offset, sizeof(value))) return false;
+		value = *(const int*)(stats + offset);
+		return true;
+	}
+
+	json GetPlayerStatsSnapshot() {
+		json players = json::object();
+		if (!g_pEntityList || !g_GetEntityFromIndex) return players;
+
+		const auto& offsets = g_clientDllOffsets;
+		if (!offsets.CCSPlayerController.m_pActionTrackingServices ||
+			!offsets.CCSPlayerController_ActionTrackingServices.m_matchStats) {
+			return players;
+		}
+		for (int index = 0; index <= GetHighestEntityIndex(); ++index) {
+			auto controller = (CEntityInstance*)g_GetEntityFromIndex(*g_pEntityList, index);
+			if (!controller || !controller->IsPlayerController()) continue;
+
+			const auto steamId = controller->GetSteamId();
+			if (!steamId) continue;
+
+			auto serviceAddress = (unsigned char*)controller + offsets.CCSPlayerController.m_pActionTrackingServices;
+			if (IsBadReadPtr(serviceAddress, sizeof(void*))) continue;
+			auto service = *(unsigned char**)serviceAddress;
+			if (!service) continue;
+
+			// CSMatchStats_t inherits CSPerRoundStats_t, so the shared stat fields
+			// are addressed with the schema-resolved CSPerRoundStats_t offsets.
+			const auto stats = service + offsets.CCSPlayerController_ActionTrackingServices.m_matchStats;
+			int totalDamage = 0;
+			int utilityDamage = 0;
+			int enemiesFlashed = 0;
+			int headshotKills = 0;
+			if (!TryReadPerRoundStat(stats, offsets.CSPerRoundStats_t.m_iDamage, totalDamage) ||
+				!TryReadPerRoundStat(stats, offsets.CSPerRoundStats_t.m_iUtilityDamage, utilityDamage) ||
+				!TryReadPerRoundStat(stats, offsets.CSPerRoundStats_t.m_iEnemiesFlashed, enemiesFlashed) ||
+				!TryReadPerRoundStat(stats, offsets.CSPerRoundStats_t.m_iHeadShotKills, headshotKills)) continue;
+		players[std::to_string(steamId)] = {
+			{"damage", totalDamage},
+			{"utilityDamage", utilityDamage},
+			{"enemiesFlashed", enemiesFlashed},
+			{"headshotKills", headshotKills}
+		};
+		}
+
+		return players;
 	}
 
 	bool IsSupportedMirvImageFileExtension(const std::filesystem::path& path) {
@@ -484,6 +535,18 @@ void RegisterObsWebSocketHandlers() {
 			{"hot_version", HOT_COMPATIBILITY_VERSION},
 			{"revision", HLAE_PACKAGE_REVISION}
 		});
+	});
+
+	g_ObsWebSocketProtocol.RegisterCommandHandler("stats.get", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+		json result{
+			{"type", "stats.get"},
+			{"ok", true},
+			{"players", GetPlayerStatsSnapshot()}
+		};
+		if (args.contains("requestId") && args["requestId"].is_string()) {
+			result["requestId"] = args["requestId"];
+		}
+		respond(result);
 	});
 
 	static bool initialized = false;

@@ -66,7 +66,19 @@ struct ClientDllOffsets_t {
 
 	struct CCSPlayerController {
 		ptrdiff_t m_sSanitizedPlayerName = 0; // CUtlString
+		ptrdiff_t m_pActionTrackingServices = 0; // CCSPlayerController_ActionTrackingServices*
 	} CCSPlayerController;
+
+	struct CCSPlayerController_ActionTrackingServices {
+		ptrdiff_t m_matchStats = 0; // CSMatchStats_t
+	} CCSPlayerController_ActionTrackingServices;
+
+	struct CSPerRoundStats_t {
+		ptrdiff_t m_iDamage = 0; // int32
+		ptrdiff_t m_iHeadShotKills = 0; // int32
+		ptrdiff_t m_iUtilityDamage = 0; // int32
+		ptrdiff_t m_iEnemiesFlashed = 0; // int32
+	} CSPerRoundStats_t;
 
 	struct C_BasePlayerPawn {
 		ptrdiff_t m_hController = 0; // CHandle< CBasePlayerController >
