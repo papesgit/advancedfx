@@ -55,6 +55,28 @@ void SafeRelease(IUnknown* ptr) {
 	if (ptr) ptr->Release();
 }
 
+DXGI_FORMAT SrgbViewFormat(DXGI_FORMAT format) {
+	switch (format) {
+	case DXGI_FORMAT_B8G8R8A8_UNORM:
+		return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+	case DXGI_FORMAT_R8G8B8A8_UNORM:
+		return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+	default:
+		return format;
+	}
+}
+
+DXGI_FORMAT TypelessResourceFormat(DXGI_FORMAT format) {
+	switch (format) {
+	case DXGI_FORMAT_B8G8R8A8_UNORM:
+		return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+	case DXGI_FORMAT_R8G8B8A8_UNORM:
+		return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+	default:
+		return format;
+	}
+}
+
 std::wstring BuildImagePath(const std::wstring& fileName) {
 	std::wstring path = GetHlaeFolderW();
 	path += L"resources\\AfxHookSource2\\images\\";
@@ -657,7 +679,7 @@ void CMirvImageDrawer::EnsureLocalAtlasResources(AtlasEntry& entry, const D3D11_
 	localDesc.Height = desc.Height;
 	localDesc.MipLevels = 1;
 	localDesc.ArraySize = 1;
-	localDesc.Format = desc.Format;
+	localDesc.Format = TypelessResourceFormat(desc.Format);
 	localDesc.SampleDesc.Count = 1;
 	localDesc.Usage = D3D11_USAGE_DEFAULT;
 	localDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -670,7 +692,7 @@ void CMirvImageDrawer::EnsureLocalAtlasResources(AtlasEntry& entry, const D3D11_
 	}
 
 	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-	srvDesc.Format = localDesc.Format;
+	srvDesc.Format = SrgbViewFormat(desc.Format);
 	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Texture2D.MostDetailedMip = 0;
 	srvDesc.Texture2D.MipLevels = 1;
@@ -685,7 +707,7 @@ void CMirvImageDrawer::EnsureLocalAtlasResources(AtlasEntry& entry, const D3D11_
 
 	entry.localTexture = localTex;
 	entry.localSrv = localSrv;
-	entry.localFormat = localDesc.Format;
+	entry.localFormat = desc.Format;
 	entry.localWidth = localDesc.Width;
 	entry.localHeight = localDesc.Height;
 }
@@ -937,7 +959,8 @@ bool CMirvImageDrawer::LoadTextureFromFile(
 		textureDesc.Height = height;
 		textureDesc.MipLevels = 1;
 		textureDesc.ArraySize = 1;
-		textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+		const DXGI_FORMAT pixelFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+		textureDesc.Format = TypelessResourceFormat(pixelFormat);
 		textureDesc.SampleDesc.Count = 1;
 		textureDesc.Usage = D3D11_USAGE_IMMUTABLE;
 		textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -946,7 +969,7 @@ bool CMirvImageDrawer::LoadTextureFromFile(
 		if (FAILED(hr)) break;
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.Format = textureDesc.Format;
+		srvDesc.Format = SrgbViewFormat(pixelFormat);
 		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 		srvDesc.Texture2D.MostDetailedMip = 0;
 		srvDesc.Texture2D.MipLevels = 1;
