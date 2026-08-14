@@ -183,6 +183,12 @@ SOURCESDK::CS2::ISource2EngineToClient * g_pEngineToClient = nullptr;
 typedef void * Cs2Gloabls_t;
 Cs2Gloabls_t g_pGlobals = nullptr;
 
+DWORD g_SleepMs = 0;
+
+CON_COMMAND(__mirv_sleep,"") {
+if (2<= args->ArgC()) g_SleepMs = strtoul(args->ArgV(1),nullptr,10);
+}
+
 CON_COMMAND(__mirv_info,"") {
 	PrintInfo();
 }
@@ -1445,6 +1451,8 @@ typedef void (* CS2_Client_FrameStageNotify_t)(void* This, SOURCESDK::CS2::Clien
 
 CS2_Client_FrameStageNotify_t old_CS2_Client_FrameStageNotify;
 
+bool g_bForceClInterpRatio = true;
+
 void  new_CS2_Client_FrameStageNotify(void* This, SOURCESDK::CS2::ClientFrameStage_t curStage) {
 	
 	AfxHookSource2Rs_Engine_RunJobQueue();
@@ -1499,8 +1507,17 @@ void  new_CS2_Client_FrameStageNotify(void* This, SOURCESDK::CS2::ClientFrameSta
 	}	
 
 	switch(curStage) {
+	case 0:
+		if(g_bForceClInterpRatio && g_pEngineToClient->IsPlayingDemo()){
+			if(SOURCESDK::CS2::Cvar_s * handle_cl_interp_ratio = SOURCESDK::CS2::g_pCVar->GetCvar(SOURCESDK::CS2::g_pCVar->FindConVar("cl_interp_ratio", false).Get())){
+				if(0 == handle_cl_interp_ratio->m_Value.m_flValue) {
+					handle_cl_interp_ratio->m_Value.m_flValue = 1;
+				}
+			}
+		}
 	case SOURCESDK::CS2::FRAME_RENDER_PASS:
 		g_CommandSystem.OnExecuteCommands();
+		if(g_SleepMs) Sleep(g_SleepMs);
 		break;
 	}
 
