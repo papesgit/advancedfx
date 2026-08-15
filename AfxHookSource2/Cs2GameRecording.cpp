@@ -685,7 +685,6 @@ public:
 		m_Enabled = true;
 		m_Sequence = 0;
 		m_FrameId = 0;
-		m_SentSkeletons.clear();
 		return true;
 	}
 
@@ -714,14 +713,12 @@ public:
 		if (!m_Enabled) return;
 		if (m_Socket == INVALID_SOCKET && !OpenSocket()) return;
 
-		SendSkeletonPackets(frame);
 		SendFramePackets(frame);
 	}
 
 private:
 	enum { kMaxPacketBytes = 60000 };
 	enum { kPacketTypeFrame = 1 };
-	enum { kPacketTypeSkeleton = 2 };
 
 	bool m_Enabled = false;
 	bool m_WsaStarted = false;
@@ -734,34 +731,7 @@ private:
 	uint32_t m_FrameId = 0;
 	uint32_t m_LastLargePacketWarningSequence = 0;
 	uint32_t m_LastSocketWarningSequence = 0;
-	std::map<int, const Cs2SkeletonMetadata*> m_SentSkeletons;
 	std::vector<unsigned char> m_PacketScratch;
-
-	void SendSkeletonPackets(const Cs2RecordedFrame& frame) {
-		for (std::vector<Cs2RecordedEntity>::const_iterator it = frame.Entities.begin(); it != frame.Entities.end(); ++it) {
-			if (!it->HasBones || !it->Skeleton) continue;
-
-			std::map<int, const Cs2SkeletonMetadata*>::iterator knownIt = m_SentSkeletons.find(it->Id);
-			if (knownIt != m_SentSkeletons.end() && knownIt->second == it->Skeleton) continue;
-
-			std::vector<unsigned char>& packet = m_PacketScratch;
-			packet.clear();
-			packet.reserve(4096);
-			AppendHeader(packet, kPacketTypeSkeleton, m_Sequence);
-			AppendI32(packet, it->Id);
-			AppendString(packet, it->ModelName);
-			AppendU32(packet, (uint32_t)it->Skeleton->BoneNames.size());
-
-			for (size_t i = 0; i < it->Skeleton->BoneNames.size(); ++i) {
-				AppendString(packet, it->Skeleton->BoneNames[i]);
-				AppendI32(packet, i < it->Skeleton->BoneParents.size() ? it->Skeleton->BoneParents[i] : -1);
-			}
-
-			if (SendPacket(packet, "skeleton")) {
-				m_SentSkeletons[it->Id] = it->Skeleton;
-			}
-		}
-	}
 
 	void SendFramePackets(const Cs2RecordedFrame& frame) {
 		const uint32_t frameId = m_FrameId++;
@@ -829,7 +799,6 @@ private:
 			++chunkIndex;
 		} while (entityIndex < frame.Entities.size());
 
-		ForgetHiddenSkeletons(frame);
 	}
 
 	enum { kFrameChunkFlagFinal = 1 };
@@ -900,6 +869,7 @@ private:
 		AppendU8(packet, entity.Visible ? 1 : 0);
 		AppendU8(packet, entity.ViewModel ? 1 : 0);
 		AppendString(packet, entity.ClientClassName);
+		AppendString(packet, entity.ModelName);
 		AppendMatrix3x4(packet, entity.Transform);
 		AppendU8(packet, entity.HasBones ? 1 : 0);
 		AppendU32(packet, (uint32_t)entity.LocalBoneTransforms.size());
@@ -917,6 +887,7 @@ private:
 			+ sizeof(uint8_t) // Visible
 			+ sizeof(uint8_t) // ViewModel
 			+ sizeof(uint16_t) + entity.ClientClassName.size()
+			+ sizeof(uint16_t) + entity.ModelName.size()
 			+ 12 * sizeof(float) // Transform
 			+ sizeof(uint8_t) // HasBones
 			+ sizeof(uint32_t) // BoneCount
@@ -985,12 +956,6 @@ private:
 		return result;
 	}
 
-	void ForgetHiddenSkeletons(const Cs2RecordedFrame& frame) {
-		for (std::vector<int>::const_iterator it = frame.HiddenEntityIds.begin(); it != frame.HiddenEntityIds.end(); ++it) {
-			m_SentSkeletons.erase(*it);
-		}
-	}
-
 	bool SendPacket(const std::vector<unsigned char>& packet, const char* label) {
 		if (packet.size() > kMaxPacketBytes) {
 			WarnPacketTooLarge(packet.size());
@@ -1016,7 +981,7 @@ private:
 		AppendU8(packet, 'F');
 		AppendU8(packet, 'X');
 		AppendU8(packet, 'L');
-		AppendU16(packet, 12);
+		AppendU16(packet, 13);
 		AppendU16(packet, packetType);
 		AppendU32(packet, sequence);
 	}
