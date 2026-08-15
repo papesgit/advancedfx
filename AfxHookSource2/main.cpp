@@ -1509,12 +1509,14 @@ void  new_CS2_Client_FrameStageNotify(void* This, SOURCESDK::CS2::ClientFrameSta
 	switch(curStage) {
 	case 0:
 		if(g_bForceClInterpRatio && g_pEngineToClient->IsPlayingDemo()){
-			if(SOURCESDK::CS2::Cvar_s * handle_cl_interp_ratio = SOURCESDK::CS2::g_pCVar->GetCvar(SOURCESDK::CS2::g_pCVar->FindConVar("cl_interp_ratio", false).Get())){
+			static SOURCESDK::CS2::Cvar_s * handle_cl_interp_ratio = SOURCESDK::CS2::g_pCVar->GetCvar(SOURCESDK::CS2::g_pCVar->FindConVar("cl_interp_ratio", false).Get());
+			if(handle_cl_interp_ratio){
 				if(0 == handle_cl_interp_ratio->m_Value.m_flValue) {
 					handle_cl_interp_ratio->m_Value.m_flValue = 1;
 				}
 			}
 		}
+		break;
 	case SOURCESDK::CS2::FRAME_RENDER_PASS:
 		g_CommandSystem.OnExecuteCommands();
 		if(g_SleepMs) Sleep(g_SleepMs);
