@@ -2053,7 +2053,15 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 			const Afx::Math::Quaternion inheritedQuat = Afx::Math::Quaternion::FromQREulerAngles(
 				Afx::Math::QREulerAngles::FromQEulerAngles(inheritedAngles)
 			).Normalized();
-			const Afx::Math::QEulerAngles angles = inheritedQuat.Slerp(targetQuat, (float)alpha).Normalized().ToQREulerAngles().ToQEulerAngles();
+			Afx::Math::Quaternion shortestTargetQuat = targetQuat.Normalized();
+			if (Afx::Math::DotProduct(inheritedQuat, shortestTargetQuat) < 0.0) {
+				shortestTargetQuat = Afx::Math::Quaternion(
+					-shortestTargetQuat.W,
+					-shortestTargetQuat.X,
+					-shortestTargetQuat.Y,
+					-shortestTargetQuat.Z);
+			}
+			const Afx::Math::QEulerAngles angles = inheritedQuat.Slerp(shortestTargetQuat, (float)alpha).Normalized().ToQREulerAngles().ToQEulerAngles();
 
 			Tx = (float)origin.X;
 			Ty = (float)origin.Y;
