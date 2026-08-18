@@ -82,6 +82,8 @@ double new_cs2_tier0_Plat_FloatTime(void) {
     return lastTimeResult;
 }
 
+extern bool g_bForceClInterpRatio;
+
 CON_COMMAND(mirv_fix, "Various fixes")
 {
 	int argc = args->ArgC();
@@ -156,9 +158,25 @@ CON_COMMAND(mirv_fix, "Various fixes")
 
 			return;
 		}
+		else if (0 == _stricmp("forceClInterpRatio", arg1)) {
+			if (3 <= argc) {
+				g_bForceClInterpRatio = 0 != atoi(args->ArgV(2));
+				return;
+			}
+			advancedfx::Message(
+				"%s forceClInterpRatio 0|1 - Enable (1) or disable (0) fix (default: 1).\n"
+				"Current value: %d\n"
+				, arg0, (g_bForceClInterpRatio?1:0)
+			);
+			return;
+		}		
 	}
 	advancedfx::Message(
 		"%s time [...] - Apply various time fixes (panorama and scene system).\n"
+		, arg0
+	);
+	advancedfx::Message(
+		"%s forceClInterpRatio [...] - Whether to force cl_interp_ratio to 1 if it is 0 during demo playback for smooth animations during recording.\n"
 		, arg0
 	);
 }
