@@ -69,34 +69,6 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     _CRT_SECURE_NO_WARNINGS
 )
 
-# For HLAE-HOT version control
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../hlae/CMakeLists.txt" HLAE_VERSION_CMAKE)
-function(read_hlae_version_component component output)
-    set(prefix "set(${component}")
-    foreach(line IN LISTS HLAE_VERSION_CMAKE)
-        string(FIND "${line}" "${prefix}" prefix_index)
-        if(prefix_index EQUAL 0)
-            string(REPLACE "${prefix}" "" value "${line}")
-            string(REPLACE ")" "" value "${value}")
-            string(STRIP "${value}" value)
-            set(${output} "${value}" PARENT_SCOPE)
-            return()
-        endif()
-    endforeach()
-
-    set(${output} "" PARENT_SCOPE)
-endfunction()
-
-read_hlae_version_component(hlae_VERSION_MAJOR HLAE_VERSION_MAJOR)
-read_hlae_version_component(hlae_VERSION_MINOR HLAE_VERSION_MINOR)
-read_hlae_version_component(hlae_VERSION_PATCH HLAE_VERSION_PATCH)
-if("${HLAE_VERSION_MAJOR}" STREQUAL "" OR "${HLAE_VERSION_MINOR}" STREQUAL "" OR "${HLAE_VERSION_PATCH}" STREQUAL "")
-    message(FATAL_ERROR "Could not determine the HLAE version from hlae/CMakeLists.txt")
-endif()
-target_compile_definitions(${PROJECT_NAME} PRIVATE
-    HLAE_UPSTREAM_VERSION=\"${HLAE_VERSION_MAJOR}.${HLAE_VERSION_MINOR}.${HLAE_VERSION_PATCH}\"
-)
-
 # - generate PDB in Release too
 # - enable Hot Reload in Debug
 target_compile_options(${PROJECT_NAME} PRIVATE
