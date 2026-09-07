@@ -67,6 +67,7 @@ namespace {
 
 CNadeCam::CNadeCam()
     : m_bEnabled(false)
+    , m_bAltHoldActivation(false)
     , m_TrackedIndex(-1)
     , m_HasLastPos(false)
     , m_HasLastAngles(false)
@@ -88,12 +89,14 @@ CNadeCam::CNadeCam()
 CNadeCam::~CNadeCam() {
 }
 
-void CNadeCam::SetEnabled(bool enabled, bool restoreSpectator) {
+void CNadeCam::SetEnabled(bool enabled, bool restoreSpectator, bool altHoldActivation) {
     if (m_bEnabled == enabled) {
+        if (enabled) m_bAltHoldActivation = altHoldActivation;
         return;
     }
 
     m_bEnabled = enabled;
+    m_bAltHoldActivation = enabled && altHoldActivation;
 
     if (enabled) {
         Reset();

@@ -40,8 +40,10 @@ public:
 
     /// Enable/disable nade cam
     /// @param restoreSpectator When disabling, restore previous spectated player if true.
-    void SetEnabled(bool enabled, bool restoreSpectator = true);
+    /// @param altHoldActivation The Alt hotkey owns the camera only while Alt is held.
+    void SetEnabled(bool enabled, bool restoreSpectator = true, bool altHoldActivation = false);
     bool IsEnabled() const { return m_bEnabled; }
+    bool IsAltHoldActivation() const { return m_bAltHoldActivation; }
 
     /// Get configuration (mutable for settings)
     NadeCamConfig& GetConfig() { return m_Config; }
@@ -87,6 +89,7 @@ private:
     float SquaredDistance(const float a[3], const float b[3]) const;
 
     bool m_bEnabled;
+    bool m_bAltHoldActivation;
     NadeCamConfig m_Config;
 
     // Tracking state

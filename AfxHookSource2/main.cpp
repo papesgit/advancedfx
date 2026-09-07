@@ -1939,8 +1939,10 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 
 		// Toggle on Alt key hold
 		if (altDown && !g_NadeCamSuppressUntilAltRelease && !g_CameraPovAnimation.active && g_pNadeCam && g_pFreecam && !g_pFreecam->IsEnabled()) {
-			if (!g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(true);
-		} else if (g_pNadeCam && g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(false, !altDown);
+			if (!g_pNadeCam->IsEnabled()) g_pNadeCam->SetEnabled(true, true, true);
+		} else if (g_pNadeCam && g_pNadeCam->IsEnabled() && g_pNadeCam->IsAltHoldActivation()) {
+			g_pNadeCam->SetEnabled(false, !altDown);
+		}
 
 		// Update NadeCam and apply transform if active
 		if (g_pNadeCam && g_pNadeCam->IsEnabled()) {
