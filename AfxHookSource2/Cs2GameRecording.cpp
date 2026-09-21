@@ -131,6 +131,19 @@ static constexpr uint32_t kCs2BoneUsedByAnythingMask =
 
 static bool IsLikelyPrintableAscii(const char* text, size_t maxLen);
 
+// Guard CSkeletonInstance-only model-state reads while walking entities.
+template <typename T>
+static bool TryReadGameMemory(const void* address, T& outValue) {
+	if (!address) return false;
+	__try {
+		outValue = *(const T*)address;
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
 static bool TryGetEntityModelInfo(
 	CEntityInstance* entity,
 	unsigned char*& outSceneNode,
@@ -151,20 +164,20 @@ static bool TryGetEntityModelInfo(
 	outBoneCount = 0;
 	if (!entity || !g_clientDllOffsets.C_BaseEntity.m_pGameSceneNode) return false;
 
-	outSceneNode = *(unsigned char**)((unsigned char*)entity + g_clientDllOffsets.C_BaseEntity.m_pGameSceneNode);
-	if (!outSceneNode) return false;
+	if (!TryReadGameMemory((unsigned char*)entity + g_clientDllOffsets.C_BaseEntity.m_pGameSceneNode, outSceneNode) || !outSceneNode) return false;
 
 	outModelState = outSceneNode + kCSkeletonInstanceModelStateOffset;
 	outModelHandle = (unsigned char***)(outModelState + kCModelStateModelHandleOffset);
-	if (!outModelHandle || !*outModelHandle || !**outModelHandle) return false;
+	unsigned char** modelHandle = nullptr;
+	if (!TryReadGameMemory(outModelHandle, modelHandle) || !modelHandle) return false;
+	if (!TryReadGameMemory(modelHandle, outModelImp) || !outModelImp) return false;
 
-	outModelImp = **outModelHandle;
-	outBoneCount = *(uint32_t*)(outModelImp + kModelBoneCountOffset);
+	if (!TryReadGameMemory(outModelImp + kModelBoneCountOffset, outBoneCount)) return false;
 	if (outBoneCount == 0 || outBoneCount > kMaxReasonableBoneCount) return false;
 
-	outModelName = *(const char**)(outModelState + kCModelStateModelNameOffset);
-	outBoneNamesArray = *(unsigned char**)(outModelImp + kModelBoneNamesArrayOffset);
-	outBoneParentArray = *(int16_t**)(outModelImp + kModelBoneParentArrayOffset);
+	if (!TryReadGameMemory(outModelState + kCModelStateModelNameOffset, outModelName)) return false;
+	if (!TryReadGameMemory(outModelImp + kModelBoneNamesArrayOffset, outBoneNamesArray)) return false;
+	if (!TryReadGameMemory(outModelImp + kModelBoneParentArrayOffset, outBoneParentArray)) return false;
 	return outBoneNamesArray != nullptr;
 }
 
@@ -173,20 +186,19 @@ static bool TryGetEntityModelBaseInfo(CEntityInstance* entity, unsigned char*& o
 	outModelName = nullptr;
 	if (!entity || !g_clientDllOffsets.C_BaseEntity.m_pGameSceneNode) return false;
 
-	outSceneNode = *(unsigned char**)((unsigned char*)entity + g_clientDllOffsets.C_BaseEntity.m_pGameSceneNode);
-	if (!outSceneNode) return false;
+	if (!TryReadGameMemory((unsigned char*)entity + g_clientDllOffsets.C_BaseEntity.m_pGameSceneNode, outSceneNode) || !outSceneNode) return false;
 
 	unsigned char* modelState = outSceneNode + kCSkeletonInstanceModelStateOffset;
-	outModelName = *(const char**)(modelState + kCModelStateModelNameOffset);
+	if (!TryReadGameMemory(modelState + kCModelStateModelNameOffset, outModelName)) return false;
 	return outModelName && IsLikelyPrintableAscii(outModelName, 256);
 }
 
 static bool IsLikelyPrintableAscii(const char* text, size_t maxLen) {
-	if (!text || IsBadReadPtr(text, 1)) return false;
+	if (!text) return false;
 	size_t len = 0;
 	for (; len < maxLen; ++len) {
-		if (IsBadReadPtr(text + len, 1)) return false;
-		unsigned char c = (unsigned char)text[len];
+		unsigned char c = 0;
+		if (!TryReadGameMemory(text + len, c)) return false;
 		if (c == '\0') break;
 		if (c < 0x20 || c > 0x7e) return false;
 	}
