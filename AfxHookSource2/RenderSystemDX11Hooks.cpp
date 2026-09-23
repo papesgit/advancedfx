@@ -3209,16 +3209,28 @@ void Before_Present() {
     //NVENC and shared texture
     ID3D11Texture2D* pBackBuffer = nullptr;
     if (g_pSwapChain) {
-        if (auto pDeviceContext = g_RenderCommands.RenderThread_GetContext()) {
-            if (SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer))) {
+        if (SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer)) && pBackBuffer) {
+            ID3D11DeviceContext* pDeviceContext = g_RenderCommands.RenderThread_GetContext();
+            bool releaseContext = false;
+            if (!pDeviceContext) {
+                ID3D11Device* pBackBufferDevice = nullptr;
+                pBackBuffer->GetDevice(&pBackBufferDevice);
+                if (pBackBufferDevice) {
+                    pBackBufferDevice->GetImmediateContext(&pDeviceContext);
+                    pBackBufferDevice->Release();
+                    releaseContext = true;
+                }
+            }
+
+            if (pDeviceContext) {
                 ProcessNvencPendingCommand(pBackBuffer);
                 g_SharedTextureHost.Update(pDeviceContext, pBackBuffer);
                 if (g_NvencStream.IsActive()) {
                     g_NvencStream.EncodeFrame(pDeviceContext, pBackBuffer);
                 }
-                pBackBuffer->Release();
-                pBackBuffer = nullptr;
             }
+            if (releaseContext && pDeviceContext) pDeviceContext->Release();
+            pBackBuffer->Release();
         }
     }
 }
