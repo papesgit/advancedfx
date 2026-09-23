@@ -422,7 +422,7 @@ https://github.com/1mpulse
 
 #### paper
 
-2025-09-26 - 2026-04-21
+2025-09-26 - 2026-05-28
 
 research, code
 
@@ -451,6 +451,14 @@ https://github.com/wuXinnnn
 code
 
 https://github.com/rechedev9
+
+#### kaputlog
+
+2026-09-23 - 2026-09-23
+
+code
+
+https://github.com/kaputlog
 
 ## Donors
 

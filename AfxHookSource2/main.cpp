@@ -2452,19 +2452,21 @@ void HookClientDll(HMODULE clientDll) {
 
 	*/
 	{
-		Afx::BinUtils::MemRange result = FindPatternString(textRange, "48 8b 0d ?? ?? ?? ?? 48 8b 01 ff 90 50 01 00 00 0f 57 ff 84 c0 74 57 ba ff ff ff ff");
+		// Since the 2026-09-23 build the cl_demoviewoverride read after the je is "lea rcx, cvar" (was "mov edx, -1")
+		// and CViewSetup is held in rbx (mov rbx, rdx at function start), not in r14 anymore.
+		Afx::BinUtils::MemRange result = FindPatternString(textRange, "48 8b 0d ?? ?? ?? ?? 48 8b 01 ff 90 50 01 00 00 0f 57 ff 84 c0 74 ?? 48 8d 0d");
 																	  
 		if (!result.IsEmpty()) {
 			/*
 				These are the top 16 bytes we change to:
 
-180882cd6	4C89f1               mov     rcx, r14
+			4889d9               mov     rcx, rbx <-- CViewSetup
 			48b8???????????????? mov     rax, ???????????????? <-- here we load our hook's address
 			ff10                 call    qword ptr [rax]
 			90                   nop
 			*/
 			unsigned char asmCode[16]={
-				0x4C, 0x89, 0xf1,
+				0x48, 0x89, 0xd9,
 				0x48, 0xb8, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 				0xff, 0x10,
 				0x90
@@ -3742,6 +3744,9 @@ void My_Console_DevWarning(int level, const char* fmt, ...) {
 	va_end(args);
 }
 
+extern void GetClientDllSceneObjectVtable(HMODULE clientDll);
+extern void  GetParticlesDllSceneObjectVtable(HMODULE particlesDll);
+
 void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 {
 	static bool bFirstTier0 = true;
@@ -3756,6 +3761,7 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 	static bool bFirstSchemaSystem = true;
 	static bool bFirstSceneSystem = true;
 	static bool bFirstResourceSystem = true;
+	static bool bFirstParticles = true;
 	
 	CommonHooks();
 
@@ -3889,6 +3895,8 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 		HookClientDll(hModule);
 
 		Hook_ClientEntitySystem3(hModule);
+
+		GetClientDllSceneObjectVtable(hModule);
 	} 
 	else if(bFirstPanorama && StringEndsWithW(lpLibFileName, L"panorama.dll"))
 	{
@@ -3905,6 +3913,11 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 	{
 		bFirstResourceSystem = false;
 		g_H_ResourceSystemDll = hModule;
+	}
+	else if(bFirstParticles && StringEndsWithW(lpLibFileName, L"particles.dll"))
+	{
+		bFirstParticles = false;
+		GetParticlesDllSceneObjectVtable(hModule);
 	}
 }
 
