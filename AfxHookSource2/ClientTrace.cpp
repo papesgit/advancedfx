@@ -32,14 +32,15 @@ typedef void (__fastcall * cs2_client_BuildTraceHullShape_t)(
     const void * minsMaxs
 );
 
-typedef void (__fastcall * cs2_client_TraceCollideableShape_t)(
+typedef void (__fastcall * cs2_client_TraceShapeToEntity_t)(
     void * param_1,
     void * param_2,
     void * param_3,
     float * param_4,
     long long * param_5,
     void * param_6,
-    void * param_7
+    void * param_7,
+    uint32_t flags
 );
 
 static Vec3 Lerp(const Vec3 & a, const Vec3 & b, float t) {
@@ -228,20 +229,20 @@ bool TraceCollideable(
 ) {
     outResult = {};
 
-    if (!AFXADDR_GET(cs2_client_TraceCollideableShape)) return false;
+    if (!AFXADDR_GET(cs2_client_TraceShapeToEntity)) return false;
     if (!AFXADDR_GET(cs2_client_TraceContextPtr)) return false;
-    if (!AFXADDR_GET(cs2_client_TraceCollideableFilterPtr)) return false;
+    if (!AFXADDR_GET(cs2_client_TraceFilterInstance)) return false;
     if (!AFXADDR_GET(cs2_client_BuildTraceHullShape)) return false;
 
     CEntityInstance * targetEnt = ResolveEntityFromHandle(targetHandle);
     if (!targetEnt) return false;
 
-    auto traceCollideable = (cs2_client_TraceCollideableShape_t)AFXADDR_GET(cs2_client_TraceCollideableShape);
+    auto traceShapeToEntity = (cs2_client_TraceShapeToEntity_t)AFXADDR_GET(cs2_client_TraceShapeToEntity);
     auto buildHull = (cs2_client_BuildTraceHullShape_t)AFXADDR_GET(cs2_client_BuildTraceHullShape);
     auto ppTraceContext = (long long **)AFXADDR_GET(cs2_client_TraceContextPtr);
-    void * collideableFilterPtr = (void *)AFXADDR_GET(cs2_client_TraceCollideableFilterPtr);
+    void * traceFilterInstance = (void *)AFXADDR_GET(cs2_client_TraceFilterInstance);
 
-    if (!traceCollideable || !buildHull || !ppTraceContext || !*ppTraceContext || !collideableFilterPtr) return false;
+    if (!traceShapeToEntity || !buildHull || !ppTraceContext || !*ppTraceContext || !traceFilterInstance) return false;
 
     void * traceContext = (void *)(*ppTraceContext);
 
@@ -253,14 +254,15 @@ bool TraceCollideable(
     Vec3 startPacked = start;
     Vec3 endPacked = end;
 
-    traceCollideable(
+    traceShapeToEntity(
         traceContext,
         hullShape,
         &startPacked,
         (float *)&endPacked,
         (long long *)targetEnt,
-        collideableFilterPtr,
-        &traceResult
+        traceFilterInstance,
+        &traceResult,
+        4
     );
 
     const float fraction = *(float *)&traceResult.Data[0xAC];

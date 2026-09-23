@@ -17,12 +17,12 @@ AFXADDR_DEF(cs2_deathmsg_lifetime_offset)
 AFXADDR_DEF(cs2_deathmsg_lifetimemod_offset)
 
 AFXADDR_DEF(cs2_client_TraceShape)
-AFXADDR_DEF(cs2_client_TraceCollideableShape)
+AFXADDR_DEF(cs2_client_TraceShapeToEntity)
 AFXADDR_DEF(cs2_client_TraceContextPtr)
 AFXADDR_DEF(cs2_client_TraceFilterVft)
 AFXADDR_DEF(cs2_client_InitTraceFilter)
 AFXADDR_DEF(cs2_client_BuildTraceHullShape)
-AFXADDR_DEF(cs2_client_TraceCollideableFilterPtr)
+AFXADDR_DEF(cs2_client_TraceFilterInstance)
 
 static AfxAddr DecodeRipRel32Target(AfxAddr insnAddress, size_t rel32Offset, size_t insnSize)
 {
@@ -194,7 +194,7 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
 			ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
 
-      // - TraceShape and TraceCollideableShape are resolved from their own function signatures below.
+      // - TraceShape and TraceShapeToEntity are resolved from their own function signatures below.
       // - Trace context pointer is resolved from a native TraceShape callsite (most common callsite) block:
       //     MOV RCX,[PTR_DAT_...]
       //     ...
@@ -204,16 +204,15 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
       //     MOV [PTR_PTR_...],RAX
       //     RET
       //   This initializer was located by following arg#6 filter pointer references used by
-      //   Script_TraceCollideable's TraceCollideableShape call path.
+      //   Script_TraceCollideable's TraceShapeToEntity call path.
 
       // cs2_client_TraceShape
       // Search for "Physics/TraceShape (Client)" or Script wrappers ("Didnt supply startpos...")
-      // - Starts with stack setup + __chkstk call and then:
-      //   MOV R10D,dword ptr [_tls_index]
+      // - Starts with stack setup and a __chkstk call.
       {
             MemRange result = FindPatternString(
                   textRange,
-                  "48 89 54 24 10 48 89 4C 24 08 55 53 56 57 41 56 41 57 48 8D AC 24 18 DC FF FF B8 E8 24 00 00 E8 ?? ?? ?? ?? 48 2B E0 44 8B 15 ?? ?? ?? ??"
+                  "48 89 54 24 10 48 89 4C 24 08 55 53 56 57 41 54 41 56 41 57 48 8D AC 24 F0 DB FF FF B8 10 25 00 00 E8 ?? ?? ?? ?? 48 2B E0 48 8D 05 ?? ?? ?? ??"
             );
 
             if (!result.IsEmpty()) {
@@ -222,22 +221,18 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
             else ErrorBox(MkErrStr(__FILE__, __LINE__));
       }
 
-      // cs2_client_TraceCollideableShape
-      // - Found easiest from Script wrapper callsite ("Didnt supply ... Script TraceCollideable")
-      // - Starts with:
-      //   MOV RAX,RSP
-      //   MOV [RAX+18],RBX
-      //   ...
-      //   TEST RBX,RBX
-      //   JZ ...
+      // cs2_client_TraceShapeToEntity
+      // Search for "TraceShapeToEntity" or "CGamePhysicsQueryInterface::TraceShapeToEntity".
+      // This accepts an explicit hull shape and is called by Script TraceCollideable.
+      // The function takes an eighth argument (flags); the game passes 4.
       {
             MemRange result = FindPatternString(
                   textRange,
-                  "48 8B C4 48 89 58 18 55 56 57 41 54 41 56 48 8D 68 B9 48 81 EC B0 00 00 00"
+                  "4C 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 53 56 57 41 55 41 56 41 57 48 8D AC 24 50 FF FF FF 48 81 EC B0 01 00 00"
             );
 
             if (!result.IsEmpty()) {
-                  AFXADDR_SET(cs2_client_TraceCollideableShape, result.Start);
+                  AFXADDR_SET(cs2_client_TraceShapeToEntity, result.Start);
             }
             else ErrorBox(MkErrStr(__FILE__, __LINE__));
       }
@@ -322,7 +317,8 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
       }
 
       // cs2_client_TraceFilterVft (Unused but kept for now)
-      // cs2_client_TraceCollideableFilterPtr
+      // cs2_client_TraceFilterInstance
+      // Address of the statically initialized filter object, also used by native traces.
       // From native initializer:
       //   LEA RAX,[PTR_FUN_...]
       //   MOV [PTR_PTR_...],RAX
@@ -335,17 +331,17 @@ void Addresses_InitClientDll(AfxAddr clientDll) {
 
             if (!result.IsEmpty()) {
                   const AfxAddr leaFilterVftInsn = result.Start + 0x19; // 48 8D 05 rel32
-                  const AfxAddr movFilterPtrInsn = result.Start + 0x20; // 48 89 05 rel32
+                  const AfxAddr storeFilterVftInsn = result.Start + 0x20; // 48 89 05 rel32
 
                   const AfxAddr filterVftAddress = DecodeRipRel32Target(leaFilterVftInsn, 3, 7);
-                  const AfxAddr filterPtrAddress = DecodeRipRel32Target(movFilterPtrInsn, 3, 7);
+                  const AfxAddr filterInstanceAddress = DecodeRipRel32Target(storeFilterVftInsn, 3, 7);
 
                   if (filterVftAddress < moduleRange.Start || filterVftAddress >= moduleRange.End
-                        || filterPtrAddress < moduleRange.Start || filterPtrAddress >= moduleRange.End)
+                        || filterInstanceAddress < moduleRange.Start || filterInstanceAddress >= moduleRange.End)
                         ErrorBox(MkErrStr(__FILE__, __LINE__));
                   else {
                         AFXADDR_SET(cs2_client_TraceFilterVft, filterVftAddress);
-                        AFXADDR_SET(cs2_client_TraceCollideableFilterPtr, filterPtrAddress);
+                        AFXADDR_SET(cs2_client_TraceFilterInstance, filterInstanceAddress);
                   }
             }
             else ErrorBox(MkErrStr(__FILE__, __LINE__));
