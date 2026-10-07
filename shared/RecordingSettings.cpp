@@ -51,6 +51,16 @@ CRecordingSettings::CShared::CShared()
 	}
 
 	{
+		CRecordingSettings * settings = new CFfmpegRecordingSettings("afxFfmpegProres", true, "-c:v prores_ks -profile:v 4 -pix_fmt yuv444p10le {QUOTE}{AFX_STREAM_PATH}\\video.mov{QUOTE}");
+		m_NamedSettings.emplace(settings->GetName(), settings);
+	}
+
+	{
+		CRecordingSettings * settings = new CFfmpegRecordingSettings("afxFfmpegProresAlpha", true, "-c:v prores_ks -profile:v 4 -pix_fmt yuva444p10le {QUOTE}{AFX_STREAM_PATH}\\video.mov{QUOTE}");
+		m_NamedSettings.emplace(settings->GetName(), settings);
+	}
+
+	{
 		CRecordingSettings * settings = new CSamplingRecordingSettings("afxSampler30", true, m_DefaultSettings, EasySamplerSettings::ESM_Trapezoid, 30.0f, 1.0f, 1.0f);
 		m_NamedSettings.emplace(settings->GetName(), settings);
 	}
@@ -610,13 +620,17 @@ void CMultiRecordingSettings::Console_Edit(ICommandArgs * args)
 				}
 				else
 				{
-					for (auto it = m_Settings.begin(); it != m_Settings.end(); ++it)
+					for (auto it = m_Settings.begin(); it != m_Settings.end(); )
 					{
 						CRecordingSettings * itSettings = *it;
 						if (itSettings == settings)
 						{
 							it = m_Settings.erase(it);
 							itSettings->Release();
+						}
+						else
+						{
+							++it;
 						}
 					}
 				}

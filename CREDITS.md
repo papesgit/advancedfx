@@ -422,7 +422,7 @@ https://github.com/1mpulse
 
 #### paper
 
-2025-09-26 - 2025-10-01
+2025-09-26 - 2026-05-28
 
 research, code
 
@@ -438,11 +438,27 @@ https://github.com/playsur3-pixel
 
 #### 'wuXin'
 
-2026-03-10 - 2026-03-10
+2026-03-10 - 2026-09-29
 
 code
 
 https://github.com/wuXinnnn
+
+#### Luis 'rechedev9' Reche
+
+2026-07-10 - 2026-07-10
+
+code
+
+https://github.com/rechedev9
+
+#### kaputlog
+
+2026-09-23 - 2026-09-23
+
+code
+
+https://github.com/kaputlog
 
 ## Donors
 
