@@ -1919,7 +1919,7 @@ void Cs2FireBullets_Init(void* clientDll) {
 	Afx::BinUtils::MemRange textRange = sections.GetMemRange();
 	// Per-bullet trace/effect routine called from FX_FireBullets after spread offsets are generated.
 	// FX_FireBullets has "FX_FireBullets: " strings, with our function being called near the bottom:
-	// FUN_180806ab0(plVar9[0x28d],&local_528,&local_4f8,uVar4,uVar1,4,uVar3,local_518,
+	// FUN_180886d30(plVar9[0x2ae],&local_528,&local_4f8,uVar1,uVar2,4,uVar4,local_518,
 	//               uVar19,uVar2,plVar9,local_408,
 	//               *(undefined4 *)((longlong)local_448 + uVar17),
 	//               *(undefined4 *)((longlong)local_488 + uVar17),param_2,lVar10,param_18,
@@ -1928,7 +1928,7 @@ void Cs2FireBullets_Init(void* clientDll) {
 	// per-bullet spread offsets before tracing/applying effects.
 	Afx::BinUtils::MemRange traceResult = Afx::BinUtils::FindPatternString(
 		textRange,
-		"4C 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 56 48 8D AC 24 28 D7 FF FF B8 D8 29 00 00 E8 ?? ?? ?? ?? 48 2B E0");
+		"4C 89 44 24 18 48 89 54 24 10 48 89 4C 24 08 55 56 48 8D AC 24 18 D7 FF FF B8 E8 29 00 00 E8 ?? ?? ?? ?? 48 2B E0");
 	if (traceResult.IsEmpty()) {
 		ErrorBox(MkErrStr(__FILE__, __LINE__));
 	}
