@@ -93,6 +93,9 @@ void RefreshSpectatorBindings() {
 		// Check if it's a player controller (not pawn)
 		if (!ent->IsPlayerController()) continue;
 
+		auto pawnHandle = ent->GetPlayerPawnHandle();
+		if (!pawnHandle.IsValid()) continue;
+
 		// Get team (2 = T, 3 = CT)
 		int team = ent->GetTeam();
 		if (team != 2 && team != 3) continue;
