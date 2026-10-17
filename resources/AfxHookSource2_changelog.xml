@@ -6,6 +6,37 @@
 
 <release>
 <name>AfxHookSource2</name>
+<version>0.41.8</version>
+<time>2026-10-14T15:26Z</time>
+<changes>
+<change type="fixed">Fixed end of round/end of match being frozen in recordings.</change>
+<change type="fixed">Fixed `mirv_sky clouds draw` not working</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
+<version>0.41.7</version>
+<time>2026-10-08T13:56Z</time>
+<changes>
+<change type="fixed">Fixed crash in mirv.entity.getPlayerName()</change>
+<change type="fixed">Fixed more HUD/Sniper Scopes, and some other issues in mirv_streams.</change>
+</changes>
+</release>
+
+<release>
+<name>AfxHookSource2</name>
+<version>0.41.6</version>
+<time>2026-09-26T15:40Z</time>
+<changes>
+<change type="fixed">Fixed #1222 CS2: Sniper scopes broken again</change>
+</changes>
+</release>
+
+
+<release>
+<name>AfxHookSource2</name>
 <version>0.41.5</version>
 <time>2026-09-26T07:30Z</time>
 <changes>

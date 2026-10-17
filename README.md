@@ -19,6 +19,9 @@ Compatible with latest Steam version.
 
 https://github.com/advancedfx/advancedfx/releases
 
+* **Old HLAE versions for specific CS2 versions**  
+  https://github.com/advancedfx/advancedfx/wiki/Old-HLAE-versions-for-specific-CS2-versions
+
 * **HLAE 2.153.1** (2024-01-05T19:45Z)  
   https://github.com/advancedfx/advancedfx/releases/tag/v2.153.1  
   Release with AfxHookGoldSrc and related tools compatible with Steam version "steam_legacy - Pre-25th Anniversary Build.
