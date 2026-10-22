@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include <mutex>
+#include <utility>
+#include <Windows.h>
+#include "../shared/StringTools.h"
 
 // Global spectator key bindings: slots 1-0 map to controller indices
 // -1 = no player mapped to this key
@@ -74,12 +78,58 @@ static bool IsCoachName(const char* name)
     return after[sepLen] != '\0';
 }
 
+namespace {
+    struct PlayerFilter {
+        std::wstring name;
+        bool contains;
+    };
+    std::mutex g_PlayerFiltersMutex;
+    std::vector<PlayerFilter> g_PlayerFilters;
+
+    bool MatchesPlayerFilter(const char* name, const std::vector<PlayerFilter>& rules) {
+        if (!name || !*name || rules.empty()) return false;
+        std::wstring wideName;
+        if (!UTF8StringToWideString(name, wideName)) return false;
+        for (const auto& rule : rules) {
+            if (rule.name.empty() || rule.name.size() > wideName.size()) continue;
+            const auto length = static_cast<int>(rule.name.size());
+            if (!rule.contains) {
+                if (wideName.size() == rule.name.size() && CSTR_EQUAL == CompareStringOrdinal(
+                    wideName.data(), length, rule.name.data(), length, TRUE)) return true;
+            } else {
+                for (size_t offset = 0; offset + rule.name.size() <= wideName.size(); ++offset) {
+                    if (CSTR_EQUAL == CompareStringOrdinal(wideName.data() + offset, length,
+                        rule.name.data(), length, TRUE)) return true;
+                }
+            }
+        }
+        return false;
+    }
+}
+
+void SetSpectatorPlayerFilters(std::vector<ObsPlayerFilterRule> rules) {
+    std::vector<PlayerFilter> filters;
+    for (const auto& rule : rules) {
+        std::wstring name;
+        if (!rule.name.empty() && UTF8StringToWideString(rule.name.c_str(), name))
+            filters.push_back({std::move(name), rule.contains});
+    }
+    std::lock_guard<std::mutex> lock(g_PlayerFiltersMutex);
+    g_PlayerFilters = std::move(filters);
+}
+
 // Refresh spectator bindings for number keys 1-0
 void RefreshSpectatorBindings() {
 	if (!g_pEntityList || !g_GetEntityFromIndex || !g_GetHighestEntityIndex) {
 		advancedfx::Warning("Cannot refresh bindings: Engine not ready\n");
 		return;
 	}
+
+    std::vector<PlayerFilter> filters;
+    {
+        std::lock_guard<std::mutex> lock(g_PlayerFiltersMutex);
+        filters = g_PlayerFilters;
+    }
 
 	// Collect all player controllers with their indices
 	std::vector<int> ctControllers;
@@ -104,11 +154,7 @@ void RefreshSpectatorBindings() {
 		if (!name || '\0' == name[0]) {
 			name = ent->GetPlayerName();
 		}
-		if(IsCoachName(name)) {
-			advancedfx::Message("Found coachname:");
-			advancedfx::Message(name);
-			continue;
-		}
+		if (IsCoachName(name) || MatchesPlayerFilter(name, filters)) continue;
 
 		// Controller index is the entity index itself
 		int controllerIndex = i;

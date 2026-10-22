@@ -1120,6 +1120,37 @@ g_ObsWebSocketProtocol.RegisterCommandHandler("freecam_hold", [](const json& arg
 		respond(result);
 	});
 
+	g_ObsWebSocketProtocol.RegisterCommandHandler("player_filters", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
+        auto reply = MakeCommandResult("player_filters", false, "Invalid player filters");
+        if (args.contains("revision") && args["revision"].is_number_integer())
+            reply["revision"] = args["revision"];
+        if (!args.contains("rules") || !args["rules"].is_array()) {
+            respond(reply);
+            return;
+        }
+        std::vector<ObsPlayerFilterRule> filters;
+        for (const auto& rule : args["rules"]) {
+            if (!rule.is_object() || !rule.contains("name") || !rule["name"].is_string()
+                || !rule.contains("match") || !rule["match"].is_string()) {
+                respond(reply);
+                return;
+            }
+            auto name = rule["name"].get<std::string>();
+            auto match = rule["match"].get<std::string>();
+            if (name.empty() || name.find('\0') != std::string::npos || (match != "exact" && match != "contains")) {
+                respond(reply);
+                return;
+            }
+            filters.push_back({std::move(name), match == "contains"});
+        }
+        // Replace atomically; refresh is executed by the existing game-thread action queue.
+        SetSpectatorPlayerFilters(std::move(filters));
+        ObsWebSocket_QueueRefreshBinds();
+        reply["ok"] = true;
+        reply.erase("error");
+        respond(reply);
+    });
+
 	g_ObsWebSocketProtocol.RegisterCommandHandler("spectator_bindings_mode", [](const json& args, const CObsWebSocketProtocol::JsonResponder& respond) {
 		if (!args.contains("useAlt") || !args["useAlt"].is_boolean()) {
 			respond(MakeCommandResult("spectator_bindings_mode", false, "Missing or invalid useAlt flag"));
